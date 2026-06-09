@@ -1,0 +1,147 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Literal
+
+
+@dataclass(frozen=True, slots=True)
+class Range:
+    min: float
+    max: float
+
+    def validate(self, name: str) -> None:
+        if self.max < self.min:
+            raise ValueError(f"{name}.max must be >= {name}.min")
+
+
+@dataclass(frozen=True, slots=True)
+class InitialRanges:
+    ip: Range
+    pfc_currents: tuple[Range, ...]
+    sol_currents: tuple[Range, ...]
+    boundary_parameters: dict[str, Range]
+
+
+@dataclass(frozen=True, slots=True)
+class IpReferenceConfig:
+    min: float
+    max: float
+    rate_limit: float
+    segment_min_steps: int
+    segment_max_steps: int
+    segment_count_min: int
+    segment_count_max: int
+    hold_probability: float
+
+
+@dataclass(frozen=True, slots=True)
+class BoundaryReferenceConfig:
+    kind: Literal["static_initial_parameters", "rate_limited_parameters"] = "static_initial_parameters"
+    rate_limits: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceConfig:
+    duration_s: float
+    t_step: float
+    theta_count: int
+    seed: int
+    ip: IpReferenceConfig
+    boundary: BoundaryReferenceConfig
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationConfig:
+    target_preview_steps: int = 8
+    target_preview_stride: int = 10
+    diagnostic_flux_count: int = 38
+    diagnostic_field_count: int = 38
+
+
+@dataclass(frozen=True, slots=True)
+class RewardConfig:
+    shape_good_m: float = 0.005
+    shape_bad_m: float = 0.05
+    ip_good_a: float = 500.0
+    ip_bad_a: float = 20000.0
+    current_good_a: float = 100.0
+    current_bad_a: float = 50000.0
+    derivative_good: float = 0.05
+    derivative_bad: float = 1.0
+    terminal_reward: float = -5.0
+    reward_scale: float = 0.01
+
+
+@dataclass(frozen=True, slots=True)
+class RandomizationConfig:
+    enabled: bool = False
+    ip_measurement_noise_a: float = 0.0
+    current_measurement_noise_a: float = 0.0
+    flux_noise: float = 0.0
+    field_noise: float = 0.0
+    action_offset_min: float = 0.0
+    action_offset_max: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class SimConfig:
+    config_path: Path
+    initial_currents_path: Path | None
+    compute_backend: Literal["cpu", "gpu"] = "cpu"
+    gpu_device: str = "cuda:0"
+    angles: int = 32
+    max_episode_steps: int = 1000
+    initial_ranges: InitialRanges | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class NetworkConfig:
+    hidden_dim: int = 256
+    critic_hidden_dim: int = 256
+    critic_mlp_hidden_dim: int = 256
+
+
+@dataclass(frozen=True, slots=True)
+class LearnerConfig:
+    discount: float = 0.99
+    unroll_length: int = 64
+    batch_size: int = 256
+    replay_capacity_episodes: int = 2048
+    actor_lr: float = 3.0e-4
+    critic_lr: float = 3.0e-4
+    kl_lr: float = 3.0e-4
+    action_samples: int = 20
+    temperature: float = 1.0
+    mean_kl_epsilon: float = 0.01
+    std_kl_epsilon: float = 1.0e-4
+    target_update_tau: float = 0.005
+    rollout_chunk_length: int = 64
+    updates_per_rollout_chunk: int = 16
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingConfig:
+    steps: int = 10000
+    num_envs: int = 16
+    device: Literal["cpu", "cuda", "auto"] = "auto"
+    seed: int = 1
+    output_dir: Path = Path("outputs/run")
+    checkpoint_interval_steps: int = 10000
+    eval_interval_steps: int = 10000
+    eval_episodes: int = 8
+    eval_max_steps: int = 1000
+    actor_workers: int = 1
+
+
+@dataclass(frozen=True, slots=True)
+class ExperimentConfig:
+    name: str
+    sim: SimConfig
+    reference: ReferenceConfig
+    observation: ObservationConfig
+    reward: RewardConfig
+    randomization: RandomizationConfig
+    network: NetworkConfig
+    learner: LearnerConfig
+    training: TrainingConfig

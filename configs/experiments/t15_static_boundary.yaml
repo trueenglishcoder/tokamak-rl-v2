@@ -1,0 +1,152 @@
+{
+  "name": "t15_static_boundary",
+  "sim": {
+    "config_path": "../../../tokamak-sim/configs/T15MD_new_data.toml",
+    "initial_currents_path": null,
+    "compute_backend": "cpu",
+    "gpu_device": "cuda:0",
+    "angles": 32,
+    "max_episode_steps": 1000,
+    "initial_ranges": {
+      "ip": {
+        "min": 124750.45168962443,
+        "max": 124967.92554755499
+      },
+      "pfc_currents": {
+        "pfc0": {
+          "min": -19945.58846153846,
+          "max": -18224.476923076923
+        },
+        "pfc1": {
+          "min": 68838.56923076924,
+          "max": 73185.18461538461
+        },
+        "pfc2": {
+          "min": 26700.725538461535,
+          "max": 29366.630769230767
+        },
+        "pfc3": {
+          "min": 33206.77615384615,
+          "max": 36397.403076923074
+        },
+        "pfc4": {
+          "min": 86235.32307692307,
+          "max": 92392.70769230768
+        },
+        "pfc5": {
+          "min": -147676.79076923075,
+          "max": -129260.08246153848
+        }
+      },
+      "sol_currents": {
+        "sol0": {
+          "min": 565568.5834615383,
+          "max": 692223.8407692304
+        },
+        "sol1": {
+          "min": 1238496.6153846174,
+          "max": 1493497.703846153
+        },
+        "sol2": {
+          "min": 583331.4103846158,
+          "max": 707710.2265384617
+        }
+      },
+      "boundary_parameters": {
+        "R0": {
+          "min": 1.4101200630345005,
+          "max": 1.4316390436922017
+        },
+        "Z0": {
+          "min": -0.007414581445590505,
+          "max": -0.0034510165353685133
+        },
+        "A0": {
+          "min": 0.6088247420590857,
+          "max": 0.6292987997843181
+        },
+        "kappa": {
+          "min": 1.1120020187817363,
+          "max": 1.1353543065348441
+        },
+        "delta": {
+          "min": 0.0993730470809749,
+          "max": 0.10926110642805169
+        }
+      }
+    }
+  },
+  "reference": {
+    "duration_s": 1.0,
+    "t_step": 0.001,
+    "theta_count": 32,
+    "seed": 11,
+    "ip": {
+      "min": 112947.0,
+      "max": 414434.0,
+      "rate_limit": 8000000.0,
+      "segment_min_steps": 50,
+      "segment_max_steps": 300,
+      "segment_count_min": 3,
+      "segment_count_max": 8,
+      "hold_probability": 0.35
+    },
+    "boundary": {
+      "kind": "static_initial_parameters"
+    }
+  },
+  "observation": {
+    "target_preview_steps": 8,
+    "target_preview_stride": 10,
+    "diagnostic_flux_count": 38,
+    "diagnostic_field_count": 38
+  },
+  "reward": {
+    "shape_good_m": 0.005,
+    "shape_bad_m": 0.05,
+    "ip_good_a": 500.0,
+    "ip_bad_a": 20000.0,
+    "current_good_a": 100.0,
+    "current_bad_a": 50000.0,
+    "derivative_good": 0.05,
+    "derivative_bad": 1.0,
+    "terminal_reward": -5.0,
+    "reward_scale": 0.01
+  },
+  "randomization": {
+    "enabled": false
+  },
+  "network": {
+    "hidden_dim": 256,
+    "critic_hidden_dim": 256,
+    "critic_mlp_hidden_dim": 256
+  },
+  "learner": {
+    "discount": 0.99,
+    "unroll_length": 64,
+    "batch_size": 256,
+    "replay_capacity_episodes": 2048,
+    "actor_lr": 0.0003,
+    "critic_lr": 0.0003,
+    "kl_lr": 0.0003,
+    "action_samples": 20,
+    "temperature": 1.0,
+    "mean_kl_epsilon": 0.01,
+    "std_kl_epsilon": 0.0001,
+    "target_update_tau": 0.005,
+    "rollout_chunk_length": 64,
+    "updates_per_rollout_chunk": 16
+  },
+  "training": {
+    "steps": 10000,
+    "num_envs": 16,
+    "device": "auto",
+    "seed": 1,
+    "output_dir": "../../outputs/t15_static_boundary",
+    "checkpoint_interval_steps": 10000,
+    "eval_interval_steps": 10000,
+    "eval_episodes": 8,
+    "eval_max_steps": 1000,
+    "actor_workers": 1
+  }
+}

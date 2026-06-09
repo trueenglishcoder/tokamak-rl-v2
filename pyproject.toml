@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tokamak-rl-v2"
+version = "0.1.0"
+description = "Magnetic-control reinforcement learning for tokamak-sim."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+  "numpy>=1.26",
+  "torch>=2.5",
+  "PyYAML>=6.0",
+  "tqdm>=4.66",
+  "wandb>=0.16",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+tokamak-rl-v2-train = "tokamak_rl_v2.training.cli:main"
+tokamak-rl-v2-export = "tokamak_rl_v2.export.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tokamak_rl_v2"]
+
+[tool.hatch.build.targets.sdist]
+include = ["tokamak_rl_v2", "configs", "scripts", "README.md", "pyproject.toml"]

@@ -1,0 +1,10 @@
+services:
+  tokamak-rl-v2:
+    build:
+      context: .
+    image: tokamak-rl-v2:latest
+    working_dir: /workspace/tokamak-rl-v2
+    volumes:
+      - ..:/workspace
+    environment:
+      PYTHONPATH: /workspace/tokamak-sim:/workspace/tokamak-rl-v2
