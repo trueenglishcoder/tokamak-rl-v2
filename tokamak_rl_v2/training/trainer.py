@@ -53,6 +53,23 @@ class Trainer:
         self.schema = self.env.export_schema()
         self.normalization = self.env.normalization()
         self.best_eval = -float("inf")
+        self._configure_wandb_metrics()
+
+    def _configure_wandb_metrics(self) -> None:
+        if self.wandb_run is None:
+            return
+        try:
+            self.wandb_run.define_metric("global_step")
+            for prefix in ("train/*", "reward/*", "eval/*"):
+                self.wandb_run.define_metric(prefix, step_metric="global_step")
+        except Exception:
+            pass
+
+    def _wandb_log(self, values: dict[str, object], *, step: int) -> None:
+        if self.wandb_run is None:
+            return
+        payload = {"global_step": int(step), **values}
+        self.wandb_run.log(payload, step=int(step))
 
     def train(self) -> dict[str, Any]:
         if int(self.config.training.actor_workers) > 1:
@@ -88,8 +105,7 @@ class Trainer:
                     speed = float(step * self.num_envs) / max(time.time() - start, 1.0e-9)
                     row = {"step": step, "env_steps_per_second": speed, **asdict(metrics)}
                     loss_writer.writerow(row); loss_f.flush()
-                    if self.wandb_run is not None:
-                        self.wandb_run.log({f"train/{k}": v for k, v in row.items() if k != "step"}, step=step)
+                    self._wandb_log({f"train/{k}": v for k, v in row.items() if k != "step"}, step=step)
                 comps = batch_step.info.get("reward_components", {}) if isinstance(batch_step.info, dict) else {}
                 if comps:
                     flat = {"step": step}
@@ -99,14 +115,12 @@ class Trainer:
                         reward_writer = csv.DictWriter(reward_f, fieldnames=list(flat.keys()))
                         reward_writer.writeheader()
                     reward_writer.writerow(flat); reward_f.flush()
-                    if self.wandb_run is not None:
-                        self.wandb_run.log({f"reward/{k}": v for k, v in flat.items() if k != "step"}, step=step)
+                    self._wandb_log({f"reward/{k}": v for k, v in flat.items() if k != "step"}, step=step)
                 if step % int(self.config.training.checkpoint_interval_steps) == 0:
                     self._save_checkpoint("latest.pt", step=step, updates=updates)
                 if step % int(self.config.training.eval_interval_steps) == 0:
                     score = self.evaluate(max_steps=int(self.config.training.eval_max_steps), episodes=int(self.config.training.eval_episodes))
-                    if self.wandb_run is not None:
-                        self.wandb_run.log({"eval/mean_return": score}, step=step)
+                    self._wandb_log({"eval/mean_return": score}, step=step)
                     if score > self.best_eval:
                         self.best_eval = score
                         self._save_checkpoint("best.pt", step=step, updates=updates)
@@ -166,6 +180,7 @@ class Trainer:
                         speed = float(env_steps) / max(time.time() - start, 1.0e-9)
                         row = {"step": env_steps, "env_steps_per_second": speed, **asdict(metrics)}
                         loss_writer.writerow(row); loss_f.flush()
+                        self._wandb_log({f"train/{k}": v for k, v in row.items() if k != "step"}, step=env_steps)
                         if updates % 4 == 0:
                             broadcast_actor(param_queues, self.actor.state_dict())
                         break

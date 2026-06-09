@@ -117,16 +117,16 @@
     "diagnostic_field_count": 38
   },
   "reward": {
-    "shape_good_m": 0.005,
-    "shape_bad_m": 0.05,
-    "ip_good_a": 500.0,
-    "ip_bad_a": 20000.0,
+    "shape_good_m": 0.003,
+    "shape_bad_m": 0.08,
+    "ip_good_a": 1000.0,
+    "ip_bad_a": 25000.0,
     "current_good_a": 100.0,
     "current_bad_a": 50000.0,
     "derivative_good": 0.05,
     "derivative_bad": 1.0,
     "terminal_reward": -5.0,
-    "reward_scale": 0.01
+    "reward_scale": 0.1
   },
   "randomization": {
     "enabled": false
@@ -153,14 +153,14 @@
     "updates_per_rollout_chunk": 16
   },
   "training": {
-    "steps": 10000,
-    "num_envs": 16,
+    "steps": 1000000,
+    "num_envs": 64,
     "device": "auto",
     "seed": 1,
-    "output_dir": "../../outputs/t15_static_boundary",
-    "checkpoint_interval_steps": 10000,
-    "eval_interval_steps": 10000,
-    "eval_episodes": 8,
+    "output_dir": "../../outputs/t15_static_boundary_candidate16_full_cpu",
+    "checkpoint_interval_steps": 50000,
+    "eval_interval_steps": 50000,
+    "eval_episodes": 32,
     "eval_max_steps": 1000,
     "actor_workers": 1
   }

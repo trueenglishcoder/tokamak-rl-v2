@@ -21,5 +21,5 @@ srun --container-image /scratch/$USER/tokamak/tokamak-rl-v2.sqsh \
     export CUDA_VISIBLE_DEVICES=0
     export PYTHONPATH=/workspace/tokamak-sim:/workspace/tokamak-rl-v2:$PYTHONPATH
     cd /workspace/tokamak-rl-v2
-    python scripts/train.py --config configs/experiments/t15_static_boundary_gpu.yaml --device cuda --wandb --wandb-project tokamak-rl-v2 --wandb-name t15_static_boundary_gpu
+    python scripts/train.py --config configs/experiments/t15_static_boundary_gpu.yaml --device cuda --wandb --wandb-project tokamak-rl-v2 --wandb-name t15_static_boundary_candidate16_full_gpu
   '
