@@ -110,13 +110,13 @@ class Trainer:
                     if score > self.best_eval:
                         self.best_eval = score
                         self._save_checkpoint("best.pt", step=step, updates=updates)
-                        self._export("exports/best_actor", step=step, eval_score=score)
+                        self._export("exports/best_actor", step=step, updates=updates, eval_score=score)
                 progress.update(1)
                 progress.set_postfix(replay=self.replay.size, updates=updates, reward=f"{float(batch_step.reward.mean().detach().cpu()):.4f}", refresh=False)
             progress.close()
         final = {"steps": self.steps, "updates": updates, "best_eval": self.best_eval, "device": str(self.device), "output_dir": str(self.output_dir)}
         self._save_checkpoint("final.pt", step=self.steps, updates=updates)
-        self._export("exports/final_actor", step=self.steps, eval_score=self.best_eval)
+        self._export("exports/final_actor", step=self.steps, updates=updates, eval_score=self.best_eval)
         metrics_path.write_text(json.dumps(final, indent=2), encoding="utf-8")
         return final
 
@@ -177,7 +177,7 @@ class Trainer:
         finally:
             stop_actor_workers(processes, stop)
         self._save_checkpoint("final.pt", step=env_steps, updates=updates)
-        self._export("exports/final_actor", step=env_steps, eval_score=None)
+        self._export("exports/final_actor", step=env_steps, updates=updates, eval_score=None)
         final = {"steps": env_steps, "updates": updates, "best_eval": self.best_eval, "device": str(self.device), "output_dir": str(self.output_dir), "actor_workers": worker_count}
         metrics_path.write_text(json.dumps(final, indent=2), encoding="utf-8")
         return final
@@ -221,8 +221,8 @@ class Trainer:
         }, path)
         return path
 
-    def _export(self, relative: str, *, step: int, eval_score: float | None) -> Path:
-        return export_deterministic_actor(actor=self.actor, export_dir=self.output_dir / relative, schema=self.schema, normalization=self.normalization, metadata=self._metadata(step=step, updates=0, eval_score=eval_score))
+    def _export(self, relative: str, *, step: int, updates: int, eval_score: float | None) -> Path:
+        return export_deterministic_actor(actor=self.actor, export_dir=self.output_dir / relative, schema=self.schema, normalization=self.normalization, metadata=self._metadata(step=step, updates=updates, eval_score=eval_score))
 
     def _write_config_snapshot(self) -> None:
         def convert(obj):

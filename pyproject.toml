@@ -27,6 +27,7 @@ dev = ["pytest>=7.4"]
 [project.scripts]
 tokamak-rl-v2-train = "tokamak_rl_v2.training.cli:main"
 tokamak-rl-v2-export = "tokamak_rl_v2.export.cli:main"
+tokamak-rl-v2-search-rewards = "tokamak_rl_v2.training.reward_search:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["tokamak_rl_v2"]

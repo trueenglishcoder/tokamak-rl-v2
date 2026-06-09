@@ -12,6 +12,7 @@ from tokamak_rl_v2.networks import FeedForwardGaussianActor, RecurrentQCritic
 from tokamak_rl_v2.rewards import T15StaticBoundaryReward
 from tokamak_rl_v2.rewards import transforms
 from tokamak_rl_v2.training.trainer import Trainer
+from tokamak_rl_v2.training.reward_search import main as reward_search_main
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -81,3 +82,29 @@ def test_small_distributed_training_writes_export(tmp_path: Path) -> None:
     assert result["actor_workers"] == 2
     assert (tmp_path / "checkpoints" / "final.pt").exists()
     assert (tmp_path / "exports" / "final_actor" / "policy_weights.npz").exists()
+
+
+def test_reward_search_dry_run_writes_candidates(tmp_path: Path) -> None:
+    out = tmp_path / "search"
+    code = reward_search_main([
+        "--config", str(CONFIG),
+        "--output-dir", str(out),
+        "--dry-run",
+        "--max-candidates", "2",
+        "--shape-good-values", "0.004,0.006",
+        "--shape-bad-values", "0.05",
+    ])
+    assert code == 0
+    assert (out / "search_manifest.json").exists()
+    results = (out / "results.csv").read_text()
+    assert "candidate" in results
+    assert "dry_run" in results
+
+
+def test_export_metadata_records_update_count(tmp_path: Path) -> None:
+    cfg = _small_config(tmp_path)
+    result = Trainer(cfg, device="cpu", output_dir=tmp_path).train()
+    import json
+    metadata = json.loads((tmp_path / "exports" / "final_actor" / "metadata.json").read_text())
+    assert metadata["updates"] == result["updates"]
+    assert metadata["updates"] > 0
