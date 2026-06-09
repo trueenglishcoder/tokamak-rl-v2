@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 import json
+import math
 
 try:
     import yaml
@@ -11,6 +12,7 @@ except Exception:  # pragma: no cover - optional local fallback
 
 from tokamak_rl_v2.config.schema import (
     BoundaryReferenceConfig,
+    CurrentSafetyLimits,
     ExperimentConfig,
     InitialRanges,
     IpReferenceConfig,
@@ -72,6 +74,29 @@ def _ranges(raw: Mapping[str, Any] | None) -> InitialRanges | None:
     )
 
 
+def _float_sequence(raw: object, name: str) -> tuple[float, ...]:
+    if isinstance(raw, Mapping):
+        values = [v for _k, v in sorted(raw.items())]
+    elif isinstance(raw, (list, tuple)):
+        values = list(raw)
+    else:
+        raise ValueError(f"{name} must be a list or mapping")
+    out = tuple(float(v) for v in values)
+    for idx, value in enumerate(out):
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{name}[{idx}] must be finite and positive")
+    return out
+
+
+def _current_safety_limits(raw: Mapping[str, Any] | None) -> CurrentSafetyLimits | None:
+    if not raw:
+        return None
+    return CurrentSafetyLimits(
+        pfc_currents=_float_sequence(raw.get("pfc_currents"), "current_safety_limits.pfc_currents"),
+        sol_currents=_float_sequence(raw.get("sol_currents"), "current_safety_limits.sol_currents"),
+    )
+
+
 def _sim(raw: Mapping[str, Any], base: Path) -> SimConfig:
     config_path = _resolve(base, raw["config_path"])
     initial_raw = raw.get("initial_currents_path")
@@ -83,6 +108,7 @@ def _sim(raw: Mapping[str, Any], base: Path) -> SimConfig:
         angles=int(raw.get("angles", 32)),
         max_episode_steps=int(raw.get("max_episode_steps", 1000)),
         initial_ranges=_ranges(_mapping(raw.get("initial_ranges", {}), "initial_ranges")),
+        current_safety_limits=_current_safety_limits(_mapping(raw.get("current_safety_limits", {}), "current_safety_limits")),
     )
 
 

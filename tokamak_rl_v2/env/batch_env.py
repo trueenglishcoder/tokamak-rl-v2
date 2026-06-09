@@ -56,7 +56,7 @@ class TokamakMagneticControlEnv:
         self.action_dim = self.cfg.pfc.n_coils + self.cfg.sol.n_coils
         self.obs_dim = self._obs_dim()
         self.reward_fn = T15StaticBoundaryReward(config.reward, control_rate_hz=1.0 / float(self.cfg.physics.t_step))
-        self.current_limits = torch.as_tensor(np.concatenate([_limit_vec(self.cfg.physics.pfc_current_limit, self.cfg.pfc.n_coils), _limit_vec(self.cfg.physics.sol_current_limit, self.cfg.sol.n_coils)]), dtype=torch.float32, device=self.device)
+        self.current_limits = torch.as_tensor(_current_limit_vector(config, self.cfg), dtype=torch.float32, device=self.device)
         self.derivative_limits = torch.as_tensor(np.concatenate([_limit_vec(self.cfg.physics.pfc_deriv_limit, self.cfg.pfc.n_coils), _limit_vec(self.cfg.physics.sol_deriv_limit, self.cfg.sol.n_coils)]), dtype=torch.float32, device=self.device)
         self.previous_action = torch.zeros((self.batch_size, self.action_dim), dtype=torch.float32, device=self.device)
         self.action_offset = torch.zeros((self.batch_size, self.action_dim), dtype=torch.float32, device=self.device)
@@ -248,13 +248,13 @@ class TokamakMagneticControlEnv:
         ip_ref, ref_points, _ref_radii = self._reference_at()
         current = torch.cat([result.state.pfc_currents, result.state.sol_currents], dim=1).to(torch.float32)
         deriv = torch.cat([result.state.pfc_current_derivs, result.state.sol_current_derivs], dim=1).to(torch.float32)
-        cur_margin = torch.min(1.0 - torch.abs(current) / self.current_limits[None, :], dim=1).values
+        current_over_limit = torch.max(torch.clamp(torch.abs(current) - self.current_limits[None, :], min=0.0), dim=1).values
         der_margin = torch.min(1.0 - torch.abs(deriv) / self.derivative_limits[None, :], dim=1).values
         boundary_points = result.boundary.points[:, : int(self.config.sim.angles)].to(torch.float32)
         ref = ref_points[:, : int(self.config.sim.angles)].to(torch.float32)
         found = result.boundary.found.to(torch.bool)
         terminated = ~found
-        rb = self.reward_fn(ip=result.state.Ip.to(torch.float32), ip_ref=ip_ref, boundary_points=boundary_points, reference_points=ref, action=action, previous_action=self.previous_action, current_margin=cur_margin, derivative_margin=der_margin, boundary_found=found, terminated=terminated)
+        rb = self.reward_fn(ip=result.state.Ip.to(torch.float32), ip_ref=ip_ref, boundary_points=boundary_points, reference_points=ref, action=action, previous_action=self.previous_action, current_over_limit_a=current_over_limit, derivative_margin=der_margin, boundary_found=found, terminated=terminated)
         return rb.reward, terminated, {"reward_components": {k: v.detach().cpu().numpy() for k, v in rb.components.items()}}
 
     def _reward_cpu(self, action: Tensor) -> tuple[Tensor, Tensor, dict[str, object]]:
@@ -279,11 +279,11 @@ class TokamakMagneticControlEnv:
                 found.append(False)
         current_t = torch.as_tensor(np.stack(currents), dtype=torch.float32, device=self.device)
         deriv_t = torch.as_tensor(np.stack(derivs), dtype=torch.float32, device=self.device)
-        cur_margin = torch.min(1.0 - torch.abs(current_t) / self.current_limits[None, :], dim=1).values
+        current_over_limit = torch.max(torch.clamp(torch.abs(current_t) - self.current_limits[None, :], min=0.0), dim=1).values
         der_margin = torch.min(1.0 - torch.abs(deriv_t) / self.derivative_limits[None, :], dim=1).values
         found_t = torch.as_tensor(found, dtype=torch.bool, device=self.device)
         terminated = ~found_t
-        rb = self.reward_fn(ip=torch.as_tensor(ips, dtype=torch.float32, device=self.device), ip_ref=ip_ref, boundary_points=torch.nan_to_num(torch.as_tensor(np.stack(boundary_points), dtype=torch.float32, device=self.device)), reference_points=ref_points[:, : int(self.config.sim.angles)].to(torch.float32), action=action, previous_action=self.previous_action, current_margin=cur_margin, derivative_margin=der_margin, boundary_found=found_t, terminated=terminated)
+        rb = self.reward_fn(ip=torch.as_tensor(ips, dtype=torch.float32, device=self.device), ip_ref=ip_ref, boundary_points=torch.nan_to_num(torch.as_tensor(np.stack(boundary_points), dtype=torch.float32, device=self.device)), reference_points=ref_points[:, : int(self.config.sim.angles)].to(torch.float32), action=action, previous_action=self.previous_action, current_over_limit_a=current_over_limit, derivative_margin=der_margin, boundary_found=found_t, terminated=terminated)
         return rb.reward, terminated, {"reward_components": {k: v.detach().cpu().numpy() for k, v in rb.components.items()}}
 
     def export_schema(self) -> dict[str, object]:
@@ -310,12 +310,29 @@ class TokamakMagneticControlEnv:
             "flux_scale": 1.0,
             "field_scale": 1.0,
             "bdot_scale": 1.0,
-            "current_scale": [1.5e6] * self.action_dim,
+            "current_scale": self.current_limits.detach().cpu().numpy().astype(float).tolist(),
             "derivative_scale": self.derivative_limits.detach().cpu().numpy().astype(float).tolist(),
         }
 
 
+def _current_limit_vector(config: ExperimentConfig, loaded_cfg) -> np.ndarray:
+    n_pfc = int(loaded_cfg.pfc.n_coils)
+    n_sol = int(loaded_cfg.sol.n_coils)
+    if config.sim.current_safety_limits is not None:
+        config.sim.current_safety_limits.validate(n_pfc=n_pfc, n_sol=n_sol)
+        return np.concatenate([
+            np.asarray(config.sim.current_safety_limits.pfc_currents, dtype=float),
+            np.asarray(config.sim.current_safety_limits.sol_currents, dtype=float),
+        ])
+    pfc = _limit_vec(loaded_cfg.physics.pfc_current_limit, n_pfc)
+    sol = _limit_vec(loaded_cfg.physics.sol_current_limit, n_sol)
+    out = np.concatenate([pfc, sol])
+    if not np.all(np.isfinite(out)):
+        raise ValueError("Training reward requires explicit finite current_safety_limits when simulator current limits are absent")
+    return out
+
+
 def _limit_vec(limit: float | None, n: int) -> np.ndarray:
     if limit is None or not np.isfinite(float(limit)) or float(limit) <= 0.0:
-        return np.full((int(n),), 1.0, dtype=float)
+        return np.full((int(n),), np.inf, dtype=float)
     return np.full((int(n),), float(limit), dtype=float)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from pathlib import Path
 from typing import Literal
 
@@ -21,6 +22,22 @@ class InitialRanges:
     pfc_currents: tuple[Range, ...]
     sol_currents: tuple[Range, ...]
     boundary_parameters: dict[str, Range]
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentSafetyLimits:
+    pfc_currents: tuple[float, ...]
+    sol_currents: tuple[float, ...]
+
+    def validate(self, *, n_pfc: int | None = None, n_sol: int | None = None) -> None:
+        if n_pfc is not None and len(self.pfc_currents) != int(n_pfc):
+            raise ValueError(f"current_safety_limits.pfc_currents must contain {int(n_pfc)} values")
+        if n_sol is not None and len(self.sol_currents) != int(n_sol):
+            raise ValueError(f"current_safety_limits.sol_currents must contain {int(n_sol)} values")
+        for name, values in (("pfc_currents", self.pfc_currents), ("sol_currents", self.sol_currents)):
+            for idx, value in enumerate(values):
+                if not math.isfinite(float(value)) or float(value) <= 0.0:
+                    raise ValueError(f"current_safety_limits.{name}[{idx}] must be finite and positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +110,7 @@ class SimConfig:
     angles: int = 32
     max_episode_steps: int = 1000
     initial_ranges: InitialRanges | None = None
+    current_safety_limits: CurrentSafetyLimits | None = None
 
 
 @dataclass(frozen=True, slots=True)

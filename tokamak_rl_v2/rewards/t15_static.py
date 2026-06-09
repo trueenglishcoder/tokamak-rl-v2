@@ -31,7 +31,7 @@ class T15StaticBoundaryReward:
         reference_points: Tensor,
         action: Tensor,
         previous_action: Tensor,
-        current_margin: Tensor,
+        current_over_limit_a: Tensor,
         derivative_margin: Tensor,
         boundary_found: Tensor,
         terminated: Tensor,
@@ -42,8 +42,8 @@ class T15StaticBoundaryReward:
         r_shape = combiners.smooth_max(shape_quality_points, alpha=-1.0, dim=-1)
         ip_error = torch.abs(ip - ip_ref)
         r_ip = transforms.softplus(ip_error, good=c.ip_good_a, bad=c.ip_bad_a)
-        current_error = torch.clamp(-current_margin, min=0.0)
-        r_current = transforms.softplus(current_error, good=0.0, bad=max(c.current_bad_a, 1.0))
+        current_error = torch.clamp(current_over_limit_a, min=0.0)
+        r_current = transforms.softplus(current_error, good=c.current_good_a, bad=max(c.current_bad_a, c.current_good_a + 1.0))
         delta_action = action - previous_action
         action_mag = torch.sqrt(torch.mean(action.pow(2), dim=-1))
         delta_mag = torch.sqrt(torch.mean(delta_action.pow(2), dim=-1))
@@ -63,6 +63,7 @@ class T15StaticBoundaryReward:
                 "shape_quality": r_shape,
                 "ip_error_a": ip_error,
                 "ip_quality": r_ip,
+                "current_over_limit_a": current_error,
                 "current_quality": r_current,
                 "action_quality": r_action,
                 "delta_action_quality": r_delta,
