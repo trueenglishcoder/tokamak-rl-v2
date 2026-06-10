@@ -10,12 +10,9 @@ from torch import Tensor
 from tokamak_control.compute import ComputeSettings
 from tokamak_control.core.batched_gpu_simulator import BatchedGpuTokamakSimulator
 from tokamak_control.core.plasma_model import PlasmaModel
-from tokamak_control.diagnostics import default_t15_diagnostic_layout, magnetic_diagnostics_numpy
 from tokamak_control.geometry.boundary import BoundaryNotFoundError, find_plasma_boundary_with_status
 from tokamak_control.geometry.coordinates import radii_from_polyline_ray_intersections
-from tokamak_control.geometry.parametric_boundary import BoundaryParameters, evaluate_parametric_boundary
 from tokamak_control.io.config_io import load_config
-from tokamak_control.metrics import current_limit_margin, derivative_limit_margin
 
 from tokamak_rl_v2.config.schema import ExperimentConfig
 from tokamak_rl_v2.env.references import ReferenceBatch, generate_reference_batch, sample_initial_conditions
@@ -46,13 +43,6 @@ class TokamakMagneticControlEnv:
         if self.cfg.limiter_shape is None:
             raise ValueError("T15 training requires limiter geometry")
         self.angles = np.linspace(-np.pi, np.pi, int(config.sim.angles), endpoint=False, dtype=float)
-        self.diagnostic_layout = default_t15_diagnostic_layout(
-            grid=self.cfg.grid,
-            limiter_shape=self.cfg.limiter_shape,
-            center=(self.cfg.physics.R0, self.cfg.physics.Z0),
-            flux_count=config.observation.diagnostic_flux_count,
-            field_count=config.observation.diagnostic_field_count,
-        )
         self.action_dim = self.cfg.pfc.n_coils + self.cfg.sol.n_coils
         self.obs_dim = self._obs_dim()
         self.reward_fn = T15StaticBoundaryReward(config.reward, control_rate_hz=1.0 / float(self.cfg.physics.t_step))
@@ -64,7 +54,6 @@ class TokamakMagneticControlEnv:
         self.step_index = torch.zeros((self.batch_size,), dtype=torch.long, device=self.device)
         self.done = torch.ones((self.batch_size,), dtype=torch.bool, device=self.device)
         self._cpu_models: list[PlasmaModel] = []
-        self._previous_flux: list[np.ndarray | None] = [None] * self.batch_size
         self._gpu_sim: BatchedGpuTokamakSimulator | None = None
 
     @property
@@ -97,7 +86,6 @@ class TokamakMagneticControlEnv:
             self.action_offset = torch.zeros((self.batch_size, self.action_dim), dtype=torch.float32, device=self.device)
         self.step_index.zero_()
         self.done.zero_()
-        self._previous_flux = [None] * self.batch_size
         if self.config.sim.compute_backend == "gpu":
             self._gpu_sim = BatchedGpuTokamakSimulator(
                 grid=self.cfg.grid,
@@ -108,7 +96,6 @@ class TokamakMagneticControlEnv:
                 angles_rad=self.angles,
                 limiter_shape=self.cfg.limiter_shape,
                 gpu_device=self.config.sim.gpu_device,
-                diagnostic_layout=self.diagnostic_layout,
             )
             self._gpu_sim.reset(ip=ip0, pfc_currents=pfc0, sol_currents=sol0)
             return self._obs_gpu()
@@ -141,17 +128,36 @@ class TokamakMagneticControlEnv:
         return BatchStep(obs=obs, reward=reward, terminated=terminated, truncated=truncated, info=info)
 
     def _obs_dim(self) -> int:
+        return self._feature_slices()["target_preview"][1]
+
+    def _feature_slices(self) -> dict[str, tuple[int, int]]:
+        n_angles = int(self.config.sim.angles)
+        nz, nr = int(self.cfg.grid.z.size), int(self.cfg.grid.r.size)
         preview = int(self.config.observation.target_preview_steps)
-        return (
-            4
-            + self.action_dim
-            + self.diagnostic_layout.flux_count
-            + self.diagnostic_layout.field_count
-            + self.diagnostic_layout.flux_count
-            + int(self.config.sim.angles)
-            + preview * (2 + int(self.config.sim.angles))
-            + self.action_dim
+        sizes = (
+            ("step_norm", 1),
+            ("ip", 1),
+            ("ip_ref", 1),
+            ("ip_error", 1),
+            ("active_currents", self.action_dim),
+            ("active_current_derivs", self.action_dim),
+            ("psi_flat", nz * nr),
+            ("measured_boundary_radii", n_angles),
+            ("ref_radii", n_angles),
+            ("boundary_radii_error", n_angles),
+            ("boundary_found", 1),
+            ("target_preview", preview * (2 + n_angles)),
         )
+        out: dict[str, tuple[int, int]] = {}
+        start = 0
+        for name, size in sizes:
+            end = start + int(size)
+            out[name] = (start, end)
+            start = end
+        return out
+
+    def _feature_order(self) -> list[str]:
+        return list(self._feature_slices().keys())
 
     def _reference_at(self) -> tuple[Tensor, Tensor, Tensor]:
         assert self.reference is not None
@@ -178,62 +184,71 @@ class TokamakMagneticControlEnv:
         if result is None:
             result = self._gpu_sim._result()
         ip_ref, _ref_points, ref_radii = self._reference_at()
-        diag = result.diagnostics
         currents = torch.cat([result.state.pfc_currents, result.state.sol_currents], dim=1).to(torch.float32)
+        derivs = torch.cat([result.state.pfc_current_derivs, result.state.sol_current_derivs], dim=1).to(torch.float32)
         ip = result.state.Ip.to(torch.float32)
-        flux = diag["flux"].to(torch.float32)
-        field = diag["field"].to(torch.float32)
-        bdot = diag["bdot"].to(torch.float32)
         if self.config.randomization.enabled:
             if self.config.randomization.ip_measurement_noise_a > 0.0:
                 ip = ip + torch.randn_like(ip) * float(self.config.randomization.ip_measurement_noise_a)
             if self.config.randomization.current_measurement_noise_a > 0.0:
                 currents = currents + torch.randn_like(currents) * float(self.config.randomization.current_measurement_noise_a)
-            if self.config.randomization.flux_noise > 0.0:
-                flux = flux + torch.randn_like(flux) * float(self.config.randomization.flux_noise)
-            if self.config.randomization.field_noise > 0.0:
-                field = field + torch.randn_like(field) * float(self.config.randomization.field_noise)
+        measured_radii = torch.nan_to_num(result.boundary.radii[:, : int(self.config.sim.angles)].to(torch.float32), nan=0.0, posinf=0.0, neginf=0.0)
+        target_radii = ref_radii[:, : int(self.config.sim.angles)].to(torch.float32)
+        boundary_found = result.boundary.found.to(torch.float32).reshape(self.batch_size, 1)
+        current_scale = torch.where(torch.isfinite(self.current_limits) & (self.current_limits > 0.0), self.current_limits, torch.ones_like(self.current_limits))
+        deriv_scale = torch.where(torch.isfinite(self.derivative_limits) & (self.derivative_limits > 0.0), self.derivative_limits, torch.ones_like(self.derivative_limits))
+        psi = result.state.psi.to(torch.float32).reshape(self.batch_size, -1)
         obs = torch.cat([
-            torch.stack([self.step_index.to(torch.float32) / max(float(self.config.sim.max_episode_steps), 1.0), ip / 5.0e5, ip_ref / 5.0e5, (ip - ip_ref) / 5.0e5], dim=1),
-            currents / 1.5e6,
-            flux,
-            field,
-            bdot,
-            ref_radii[:, : int(self.config.sim.angles)].to(torch.float32),
+            self.step_index.to(torch.float32).reshape(self.batch_size, 1) / max(float(self.config.sim.max_episode_steps), 1.0),
+            (ip / 5.0e5).reshape(self.batch_size, 1),
+            (ip_ref / 5.0e5).reshape(self.batch_size, 1),
+            ((ip - ip_ref) / 5.0e5).reshape(self.batch_size, 1),
+            currents / current_scale[None, :],
+            derivs / deriv_scale[None, :],
+            psi / 1.0,
+            measured_radii,
+            target_radii,
+            target_radii - measured_radii,
+            boundary_found,
             self._preview(),
-            self.previous_action,
         ], dim=1)
         return torch.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
 
     def _obs_cpu(self) -> Tensor:
         obs = []
         ip_ref, _ref_points, ref_radii = self._reference_at()
+        current_scale = np.asarray(self.current_limits.detach().cpu().numpy(), dtype=float)
+        current_scale = np.where(np.isfinite(current_scale) & (current_scale > 0.0), current_scale, 1.0)
+        deriv_scale = np.asarray(self.derivative_limits.detach().cpu().numpy(), dtype=float)
+        deriv_scale = np.where(np.isfinite(deriv_scale) & (deriv_scale > 0.0), deriv_scale, 1.0)
+        preview = self._preview().detach().cpu().numpy()
         for b, model in enumerate(self._cpu_models):
-            diag = magnetic_diagnostics_numpy(psi=model.state.psi, grid=model.grid, layout=self.diagnostic_layout, previous_flux=self._previous_flux[b], dt=float(model.t_step))
-            self._previous_flux[b] = diag["flux"].copy()
-            currents = np.concatenate([model.state.pfc_currents, model.state.sol_currents])
+            currents = np.concatenate([model.state.pfc_currents, model.state.sol_currents]).astype(float, copy=False)
+            derivs = np.concatenate([model.state.pfc_current_derivs, model.state.sol_current_derivs]).astype(float, copy=False)
             measured_ip = float(model.state.Ip)
-            flux = np.asarray(diag["flux"], dtype=float).copy()
-            field = np.asarray(diag["field"], dtype=float).copy()
-            bdot = np.asarray(diag["bdot"], dtype=float).copy()
             if self.config.randomization.enabled:
                 if self.config.randomization.ip_measurement_noise_a > 0.0:
                     measured_ip += float(self.rng.normal(0.0, float(self.config.randomization.ip_measurement_noise_a)))
                 if self.config.randomization.current_measurement_noise_a > 0.0:
                     currents = currents + self.rng.normal(0.0, float(self.config.randomization.current_measurement_noise_a), size=currents.shape)
-                if self.config.randomization.flux_noise > 0.0:
-                    flux = flux + self.rng.normal(0.0, float(self.config.randomization.flux_noise), size=flux.shape)
-                if self.config.randomization.field_noise > 0.0:
-                    field = field + self.rng.normal(0.0, float(self.config.randomization.field_noise), size=field.shape)
+            try:
+                poly, _level, _status = find_plasma_boundary_with_status(model.state.psi, model.grid, (model.R0, model.Z0), n_levels=80, limiter_shape=self.cfg.limiter_shape, boundary_mode=self.cfg.boundary_mode)
+                measured_radii = radii_from_polyline_ray_intersections(poly, (model.R0, model.Z0), self.angles)
+                boundary_found = 1.0
+            except BoundaryNotFoundError:
+                measured_radii = np.zeros((int(self.config.sim.angles),), dtype=float)
+                boundary_found = 0.0
+            target_radii = ref_radii[b, : int(self.config.sim.angles)].detach().cpu().numpy().astype(float, copy=False)
             parts = [
                 np.array([float(self.step_index[b].item()) / max(float(self.config.sim.max_episode_steps), 1.0), measured_ip / 5.0e5, float(ip_ref[b].item()) / 5.0e5, (measured_ip - float(ip_ref[b].item())) / 5.0e5], dtype=float),
-                currents / 1.5e6,
-                flux,
-                field,
-                bdot,
-                ref_radii[b, : int(self.config.sim.angles)].detach().cpu().numpy(),
-                self._preview()[b].detach().cpu().numpy(),
-                self.previous_action[b].detach().cpu().numpy(),
+                currents / current_scale,
+                derivs / deriv_scale,
+                np.asarray(model.state.psi, dtype=float).reshape(-1) / 1.0,
+                np.nan_to_num(measured_radii, nan=0.0, posinf=0.0, neginf=0.0),
+                target_radii,
+                target_radii - np.nan_to_num(measured_radii, nan=0.0, posinf=0.0, neginf=0.0),
+                np.array([boundary_found], dtype=float),
+                preview[b],
             ]
             obs.append(np.concatenate(parts))
         return torch.nan_to_num(torch.as_tensor(np.stack(obs, axis=0), dtype=torch.float32, device=self.device), nan=0.0, posinf=0.0, neginf=0.0)
@@ -288,28 +303,26 @@ class TokamakMagneticControlEnv:
 
     def export_schema(self) -> dict[str, object]:
         return {
+            "observation_kind": "joint_state_v1",
             "obs_dim": self.obs_dim,
             "action_dim": self.action_dim,
             "n_active_total": self.action_dim,
             "n_pfc": self.cfg.pfc.n_coils,
             "n_sol": self.cfg.sol.n_coils,
             "n_angles": int(self.config.sim.angles),
+            "angles_rad": np.asarray(self.angles, dtype=float).tolist(),
+            "grid_shape": [int(self.cfg.grid.z.size), int(self.cfg.grid.r.size)],
+            "feature_order": self._feature_order(),
+            "feature_slices": {name: [int(start), int(end)] for name, (start, end) in self._feature_slices().items()},
             "target_preview_steps": int(self.config.observation.target_preview_steps),
             "target_preview_stride": int(self.config.observation.target_preview_stride),
-            "diagnostics": {
-                "flux_points": np.asarray(self.diagnostic_layout.flux_points, dtype=float).tolist(),
-                "field_points": np.asarray(self.diagnostic_layout.field_points, dtype=float).tolist(),
-                "field_angles": np.asarray(self.diagnostic_layout.field_angles, dtype=float).tolist(),
-            },
         }
 
     def normalization(self) -> dict[str, object]:
         return {
             "ip_scale": 5.0e5,
             "radius_scale": 1.0,
-            "flux_scale": 1.0,
-            "field_scale": 1.0,
-            "bdot_scale": 1.0,
+            "psi_scale": 1.0,
             "current_scale": self.current_limits.detach().cpu().numpy().astype(float).tolist(),
             "derivative_scale": self.derivative_limits.detach().cpu().numpy().astype(float).tolist(),
         }

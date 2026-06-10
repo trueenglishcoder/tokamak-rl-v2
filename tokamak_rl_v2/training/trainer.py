@@ -5,7 +5,7 @@ import json
 import time
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -53,6 +53,7 @@ class Trainer:
         self.schema = self.env.export_schema()
         self.normalization = self.env.normalization()
         self.best_eval = -float("inf")
+        self.best_eval_details: dict[str, float] = {}
         self._configure_wandb_metrics()
 
     def _configure_wandb_metrics(self) -> None:
@@ -119,16 +120,18 @@ class Trainer:
                 if step % int(self.config.training.checkpoint_interval_steps) == 0:
                     self._save_checkpoint("latest.pt", step=step, updates=updates)
                 if step % int(self.config.training.eval_interval_steps) == 0:
-                    score = self.evaluate(max_steps=int(self.config.training.eval_max_steps), episodes=int(self.config.training.eval_episodes))
-                    self._wandb_log({"eval/mean_return": score}, step=step)
+                    eval_metrics = self.evaluate_detailed(max_steps=int(self.config.training.eval_max_steps), episodes=int(self.config.training.eval_episodes))
+                    score = float(eval_metrics["mean_return"])
+                    self._wandb_log({f"eval/{k}": v for k, v in eval_metrics.items()}, step=step)
                     if score > self.best_eval:
                         self.best_eval = score
+                        self.best_eval_details = dict(eval_metrics)
                         self._save_checkpoint("best.pt", step=step, updates=updates)
                         self._export("exports/best_actor", step=step, updates=updates, eval_score=score)
                 progress.update(1)
                 progress.set_postfix(replay=self.replay.size, updates=updates, reward=f"{float(batch_step.reward.mean().detach().cpu()):.4f}", refresh=False)
             progress.close()
-        final = {"steps": self.steps, "updates": updates, "best_eval": self.best_eval, "device": str(self.device), "output_dir": str(self.output_dir)}
+        final = {"steps": self.steps, "updates": updates, "best_eval": self.best_eval, "best_eval_details": self.best_eval_details, "device": str(self.device), "output_dir": str(self.output_dir)}
         self._save_checkpoint("final.pt", step=self.steps, updates=updates)
         self._export("exports/final_actor", step=self.steps, updates=updates, eval_score=self.best_eval)
         metrics_path.write_text(json.dumps(final, indent=2), encoding="utf-8")
@@ -199,22 +202,44 @@ class Trainer:
 
     @torch.no_grad()
     def evaluate(self, *, episodes: int, max_steps: int) -> float:
+        return float(self.evaluate_detailed(episodes=episodes, max_steps=max_steps)["mean_return"])
+
+    @torch.no_grad()
+    def evaluate_detailed(self, *, episodes: int, max_steps: int, policy: Literal["actor", "no_control"] = "actor") -> dict[str, float]:
+        if policy not in {"actor", "no_control"}:
+            raise ValueError(f"unsupported evaluation policy: {policy}")
         env = TokamakMagneticControlEnv(self.config, batch_size=max(1, min(int(episodes), self.num_envs)), device=self.device, seed=int(self.config.training.seed) + 100000)
-        returns = []
+        returns: list[float] = []
+        component_values: dict[str, list[float]] = {}
         remaining = int(episodes)
         while remaining > 0:
             obs = env.reset()
             total = torch.zeros((env.batch_size,), dtype=torch.float32, device=self.device)
             for _ in range(int(max_steps)):
-                action = env.actor_action if False else self.actor.deterministic(obs)
+                if policy == "actor":
+                    action = self.actor.deterministic(obs)
+                else:
+                    action = torch.zeros((env.batch_size, env.action_dim), dtype=torch.float32, device=self.device)
                 out = env.step(action)
                 total += out.reward
+                comps = out.info.get("reward_components", {}) if isinstance(out.info, dict) else {}
+                if isinstance(comps, dict):
+                    for name, value in comps.items():
+                        arr = np.asarray(value, dtype=float).reshape(-1)
+                        if arr.size:
+                            component_values.setdefault(str(name), []).extend(arr[np.isfinite(arr)].astype(float).tolist())
                 obs = out.obs
                 if bool(torch.all(out.terminated | out.truncated).item()):
                     break
             returns.extend(total.detach().cpu().numpy().astype(float).tolist())
             remaining -= env.batch_size
-        return float(np.mean(returns[: int(episodes)]))
+        selected_returns = np.asarray(returns[: int(episodes)], dtype=float)
+        metrics: dict[str, float] = {"mean_return": float(np.nanmean(selected_returns)) if selected_returns.size else float("nan")}
+        for name, values in component_values.items():
+            arr = np.asarray(values, dtype=float)
+            if arr.size:
+                metrics[name] = float(np.nanmean(arr))
+        return metrics
 
     def _metadata(self, *, step: int, updates: int, eval_score: float | None = None) -> dict[str, object]:
         return {"experiment": self.config.name, "step": int(step), "updates": int(updates), "eval_score": eval_score, "device": str(self.device), "algorithm": "Maximum a Posteriori Policy Optimisation", "plant": "tokamak-sim"}

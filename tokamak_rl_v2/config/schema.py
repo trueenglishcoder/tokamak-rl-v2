@@ -72,8 +72,6 @@ class ReferenceConfig:
 class ObservationConfig:
     target_preview_steps: int = 8
     target_preview_stride: int = 10
-    diagnostic_flux_count: int = 38
-    diagnostic_field_count: int = 38
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,8 +93,6 @@ class RandomizationConfig:
     enabled: bool = False
     ip_measurement_noise_a: float = 0.0
     current_measurement_noise_a: float = 0.0
-    flux_noise: float = 0.0
-    field_noise: float = 0.0
     action_offset_min: float = 0.0
     action_offset_max: float = 0.0
 

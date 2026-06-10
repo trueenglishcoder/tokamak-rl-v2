@@ -18,6 +18,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--sim-gpu-device", default=None)
     ap.add_argument("--batch-size", type=int, default=None)
     ap.add_argument("--unroll-length", type=int, default=None)
+    ap.add_argument("--replay-capacity-episodes", type=int, default=None)
     ap.add_argument("--hidden-dim", type=int, default=None)
     ap.add_argument("--critic-hidden-dim", type=int, default=None)
     ap.add_argument("--critic-mlp-hidden-dim", type=int, default=None)
@@ -37,13 +38,14 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_experiment_config(args.config)
     if args.sim_compute_backend is not None or args.sim_gpu_device is not None:
         cfg = replace(cfg, sim=replace(cfg.sim, compute_backend=args.sim_compute_backend or cfg.sim.compute_backend, gpu_device=args.sim_gpu_device or cfg.sim.gpu_device))
-    if any(v is not None for v in (args.batch_size, args.unroll_length, args.rollout_chunk_length, args.updates_per_rollout_chunk, args.action_samples)):
+    if any(v is not None for v in (args.batch_size, args.unroll_length, args.replay_capacity_episodes, args.rollout_chunk_length, args.updates_per_rollout_chunk, args.action_samples)):
         cfg = replace(
             cfg,
             learner=replace(
                 cfg.learner,
                 batch_size=args.batch_size or cfg.learner.batch_size,
                 unroll_length=args.unroll_length or cfg.learner.unroll_length,
+                replay_capacity_episodes=args.replay_capacity_episodes or cfg.learner.replay_capacity_episodes,
                 rollout_chunk_length=args.rollout_chunk_length or cfg.learner.rollout_chunk_length,
                 updates_per_rollout_chunk=args.updates_per_rollout_chunk or cfg.learner.updates_per_rollout_chunk,
                 action_samples=args.action_samples or cfg.learner.action_samples,

@@ -112,9 +112,7 @@
   },
   "observation": {
     "target_preview_steps": 8,
-    "target_preview_stride": 10,
-    "diagnostic_flux_count": 38,
-    "diagnostic_field_count": 38
+    "target_preview_stride": 10
   },
   "reward": {
     "shape_good_m": 0.003,
@@ -140,7 +138,7 @@
     "discount": 0.99,
     "unroll_length": 64,
     "batch_size": 256,
-    "replay_capacity_episodes": 2048,
+    "replay_capacity_episodes": 64,
     "actor_lr": 0.0003,
     "critic_lr": 0.0003,
     "kl_lr": 0.0003,

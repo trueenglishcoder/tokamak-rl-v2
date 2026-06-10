@@ -12,7 +12,7 @@ from tokamak_rl_v2.networks import FeedForwardGaussianActor, RecurrentQCritic
 from tokamak_rl_v2.rewards import T15StaticBoundaryReward
 from tokamak_rl_v2.rewards import transforms
 from tokamak_rl_v2.training.trainer import Trainer
-from tokamak_rl_v2.training.reward_search import main as reward_search_main
+from tokamak_rl_v2.training.reward_search import _rank_rows, main as reward_search_main
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,6 +54,16 @@ def test_environment_reset_step_contract() -> None:
     cfg = load_experiment_config(CONFIG)
     cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=4))
     env = TokamakMagneticControlEnv(cfg, batch_size=2, device="cpu", seed=1)
+    schema = env.export_schema()
+    assert schema["observation_kind"] == "joint_state_v1"
+    assert "diagnostics" not in schema
+    assert "psi_flat" in schema["feature_order"]
+    assert "measured_boundary_radii" in schema["feature_order"]
+    assert "boundary_radii_error" in schema["feature_order"]
+    assert env.obs_dim == schema["feature_slices"]["target_preview"][1]
+    assert "flux_scale" not in env.normalization()
+    assert "field_scale" not in env.normalization()
+    assert "bdot_scale" not in env.normalization()
     obs = env.reset()
     assert obs.shape == (2, env.obs_dim)
     result = env.step(torch.zeros((2, env.action_dim)))
@@ -108,3 +118,84 @@ def test_export_metadata_records_update_count(tmp_path: Path) -> None:
     metadata = json.loads((tmp_path / "exports" / "final_actor" / "metadata.json").read_text())
     assert metadata["updates"] == result["updates"]
     assert metadata["updates"] > 0
+
+
+def test_evaluate_detailed_reports_physical_metrics(tmp_path: Path) -> None:
+    cfg = _small_config(tmp_path)
+    trainer = Trainer(cfg, device="cpu", output_dir=tmp_path)
+    metrics = trainer.evaluate_detailed(episodes=2, max_steps=4, policy="no_control")
+    assert "mean_return" in metrics
+    assert "shape_error_mean_m" in metrics
+    assert "shape_error_max_m" in metrics
+    assert "ip_error_a" in metrics
+    assert "current_over_limit_a" in metrics
+    assert "boundary_found" in metrics
+    assert np.isfinite(metrics["mean_return"])
+
+
+def test_successive_halving_dry_run_writes_stage_artifacts(tmp_path: Path) -> None:
+    out = tmp_path / "staged_search"
+    code = reward_search_main([
+        "--config", str(CONFIG),
+        "--output-dir", str(out),
+        "--strategy", "successive_halving",
+        "--dry-run",
+        "--max-candidates", "2",
+        "--stage-steps", "2,3,4",
+        "--stage-keep", "2,1,1",
+        "--stage-eval-episodes", "1,1,1",
+        "--shape-good-values", "0.004,0.006",
+        "--shape-bad-values", "0.05",
+    ])
+    assert code == 0
+    manifest = (out / "search_manifest.json").read_text()
+    assert '"strategy": "successive_halving"' in manifest
+    assert '"baseline_policy": "no_control"' in manifest
+    assert (out / "stage_00_baseline" / "results.csv").exists()
+    assert (out / "baseline_results.csv").exists()
+
+
+def test_reward_search_ranking_uses_physical_metrics_before_return() -> None:
+    rows = [
+        {
+            "candidate": 0,
+            "status": "ok",
+            "eval.boundary_found": 1.0,
+            "eval.current_over_limit_a": 0.0,
+            "eval.shape_error_mean_m": 0.09,
+            "eval.ip_error_a": 5000.0,
+            "eval.improvement_over_no_control": 5.0,
+            "eval.delta_action_quality": 0.9,
+            "eval.action_quality": 0.9,
+            "eval.mean_return": 100.0,
+        },
+        {
+            "candidate": 1,
+            "status": "ok",
+            "eval.boundary_found": 1.0,
+            "eval.current_over_limit_a": 0.0,
+            "eval.shape_error_mean_m": 0.04,
+            "eval.ip_error_a": 7000.0,
+            "eval.improvement_over_no_control": 1.0,
+            "eval.delta_action_quality": 0.8,
+            "eval.action_quality": 0.8,
+            "eval.mean_return": 50.0,
+        },
+        {
+            "candidate": 2,
+            "status": "ok",
+            "eval.boundary_found": 0.5,
+            "eval.current_over_limit_a": 0.0,
+            "eval.shape_error_mean_m": 0.01,
+            "eval.ip_error_a": 100.0,
+            "eval.improvement_over_no_control": 100.0,
+            "eval.delta_action_quality": 1.0,
+            "eval.action_quality": 1.0,
+            "eval.mean_return": 500.0,
+        },
+    ]
+    ranked = _rank_rows(rows)
+    assert ranked[0]["candidate"] == 1
+    assert ranked[-1]["candidate"] == 2
+    assert ranked[-1]["promotion_reason"] == "rejected_boundary_not_reliable"
+

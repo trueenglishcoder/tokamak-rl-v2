@@ -134,8 +134,6 @@ def _observation(raw: Mapping[str, Any]) -> ObservationConfig:
     return ObservationConfig(
         target_preview_steps=int(raw.get("target_preview_steps", 8)),
         target_preview_stride=int(raw.get("target_preview_stride", 10)),
-        diagnostic_flux_count=int(raw.get("diagnostic_flux_count", 38)),
-        diagnostic_field_count=int(raw.get("diagnostic_field_count", 38)),
     )
 
 
