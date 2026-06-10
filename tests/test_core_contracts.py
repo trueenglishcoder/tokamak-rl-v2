@@ -237,6 +237,61 @@ def test_reward_search_ranking_uses_physical_metrics_before_return() -> None:
     assert ranked[-1]["promotion_reason"] == "rejected_boundary_not_reliable"
 
 
+def test_reward_search_rejects_candidates_worse_than_no_control() -> None:
+    rows = [
+        {
+            "candidate": 0,
+            "status": "ok",
+            "eval.boundary_found": 1.0,
+            "eval.current_over_limit_a": 0.0,
+            "eval.shape_error_mean_m": 0.18,
+            "eval.ip_error_a": 100000.0,
+            "eval.shape_improvement_over_no_control_m": -0.04,
+            "eval.ip_improvement_over_no_control_a": 60000.0,
+            "eval.improvement_over_no_control": 5.0,
+            "search.require_no_control_improvement": 1,
+            "eval.delta_action_quality": 1.0,
+            "eval.action_quality": 1.0,
+            "eval.mean_return": 60.0,
+        },
+        {
+            "candidate": 1,
+            "status": "ok",
+            "eval.boundary_found": 1.0,
+            "eval.current_over_limit_a": 0.0,
+            "eval.shape_error_mean_m": 0.10,
+            "eval.ip_error_a": 180000.0,
+            "eval.shape_improvement_over_no_control_m": 0.03,
+            "eval.ip_improvement_over_no_control_a": -20000.0,
+            "eval.improvement_over_no_control": 5.0,
+            "search.require_no_control_improvement": 1,
+            "eval.delta_action_quality": 1.0,
+            "eval.action_quality": 1.0,
+            "eval.mean_return": 60.0,
+        },
+        {
+            "candidate": 2,
+            "status": "ok",
+            "eval.boundary_found": 1.0,
+            "eval.current_over_limit_a": 0.0,
+            "eval.shape_error_mean_m": 0.10,
+            "eval.ip_error_a": 100000.0,
+            "eval.shape_improvement_over_no_control_m": 0.03,
+            "eval.ip_improvement_over_no_control_a": 60000.0,
+            "eval.improvement_over_no_control": 5.0,
+            "search.require_no_control_improvement": 1,
+            "eval.delta_action_quality": 1.0,
+            "eval.action_quality": 1.0,
+            "eval.mean_return": 60.0,
+        },
+    ]
+    ranked = _rank_rows(rows)
+    assert ranked[0]["candidate"] == 2
+    reasons = {row["candidate"]: row["promotion_reason"] for row in ranked}
+    assert reasons[0] == "rejected_shape_not_better_than_no_control"
+    assert reasons[1] == "rejected_ip_not_better_than_no_control"
+
+
 def test_chunked_sampled_q_values_match_unbatched_reference() -> None:
     torch.manual_seed(123)
     obs_dim = 9

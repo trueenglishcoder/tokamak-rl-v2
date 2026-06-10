@@ -102,6 +102,7 @@ def main(argv: list[str] | None = None) -> int:
         "stage_eval_episodes": _int_values(args.stage_eval_episodes) if args.strategy == "successive_halving" else None,
         "refine_top_k": int(args.refine_top_k),
         "refine_midpoints": bool(args.refine_midpoints),
+        "require_no_control_improvement": bool(args.require_no_control_improvement),
         "parallel_candidates": int(args.parallel_candidates),
         "gpu_devices": _gpu_devices(args),
     }
@@ -194,7 +195,7 @@ def _run_successive_halving(*, base: ExperimentConfig, args: argparse.Namespace,
         promoted_rows = eligible[: min(int(keep), len(eligible))]
         promoted_ids = {int(row["candidate"]) for row in promoted_rows}
         for rank, row in enumerate(ranked, start=1):
-            promo = {"stage": stage_name, "candidate": row.get("candidate"), "rank": rank, "promoted": int(int(row.get("candidate", -1)) in promoted_ids), "promotion_reason": row.get("promotion_reason", ""), "eval.mean_return": row.get("eval.mean_return", ""), "eval.shape_error_mean_m": row.get("eval.shape_error_mean_m", ""), "eval.ip_error_a": row.get("eval.ip_error_a", ""), "eval.current_over_limit_a": row.get("eval.current_over_limit_a", ""), "eval.boundary_found": row.get("eval.boundary_found", "")}
+            promo = {"stage": stage_name, "candidate": row.get("candidate"), "rank": rank, "promoted": int(int(row.get("candidate", -1)) in promoted_ids), "promotion_reason": row.get("promotion_reason", ""), "eval.mean_return": row.get("eval.mean_return", ""), "eval.shape_error_mean_m": row.get("eval.shape_error_mean_m", ""), "eval.ip_error_a": row.get("eval.ip_error_a", ""), "eval.current_over_limit_a": row.get("eval.current_over_limit_a", ""), "eval.boundary_found": row.get("eval.boundary_found", ""), "eval.shape_improvement_over_no_control_m": row.get("eval.shape_improvement_over_no_control_m", ""), "eval.ip_improvement_over_no_control_a": row.get("eval.ip_improvement_over_no_control_a", ""), "eval.improvement_over_no_control": row.get("eval.improvement_over_no_control", "")}
             promotion_rows.append(promo)
         _write_results(out / "promotion_history.csv", promotion_rows)
         promoted_candidates = [_candidate_by_index(active, int(row["candidate"])) for row in promoted_rows]
@@ -309,7 +310,7 @@ def _run_one_stage_candidate(
     try:
         trained = _train_candidate(base=base, args=args, candidate=candidate, candidate_dir=candidate_dir, steps=steps, eval_episodes=eval_episodes, stage_name=stage_name, stage_index=stage_index)
         row.update(trained)
-        _attach_baseline_improvement(row, baseline_by_key=baseline_by_key, reward=candidate.reward)
+        _attach_baseline_improvement(row, baseline_by_key=baseline_by_key, reward=candidate.reward, require_no_control_improvement=bool(args.require_no_control_improvement))
     except Exception as exc:
         candidate_dir.mkdir(parents=True, exist_ok=True)
         row.update({"status": "error", "score": "", "error": repr(exc), "promotion_reason": "error"})
@@ -364,7 +365,7 @@ def _run_stage_candidates_parallel(
                 stderr_f.close()
             gpu = str(item["gpu_device"])
             free_gpus.append(gpu)
-            row = _read_worker_result(item, returncode=returncode, baseline_by_key=baseline_by_key)
+            row = _read_worker_result(args=args, item=item, returncode=returncode, baseline_by_key=baseline_by_key)
             stage_rows.append(row)
             _write_results(stage_dir / "results.csv", stage_rows)
             _write_results(aggregate_results_path, [*aggregate_rows, *stage_rows])
@@ -426,7 +427,7 @@ def _worker_args(args: argparse.Namespace, *, gpu_device: str) -> dict[str, obje
     return out
 
 
-def _read_worker_result(item: dict[str, object], *, returncode: int, baseline_by_key: dict[tuple[float, ...], dict[str, object]]) -> dict[str, object]:
+def _read_worker_result(*, args: argparse.Namespace, item: dict[str, object], returncode: int, baseline_by_key: dict[tuple[float, ...], dict[str, object]]) -> dict[str, object]:
     result_path = Path(item["result_path"])  # type: ignore[arg-type]
     reward = item["candidate_reward"]
     if result_path.exists():
@@ -434,18 +435,25 @@ def _read_worker_result(item: dict[str, object], *, returncode: int, baseline_by
     else:
         row = {"candidate": item["candidate_index"], "status": "error", "score": "", "error": f"worker exited {returncode} without result", "worker.stderr": str(item["stderr_path"])}
     if isinstance(reward, RewardConfig):
-        _attach_baseline_improvement(row, baseline_by_key=baseline_by_key, reward=reward)
+        _attach_baseline_improvement(row, baseline_by_key=baseline_by_key, reward=reward, require_no_control_improvement=bool(args.require_no_control_improvement))
     row["worker_returncode"] = int(returncode)
     row["worker_stdout"] = str(item["stdout_path"])
     row["worker_stderr"] = str(item["stderr_path"])
     return row
 
 
-def _attach_baseline_improvement(row: dict[str, object], *, baseline_by_key: dict[tuple[float, ...], dict[str, object]], reward: RewardConfig) -> None:
+def _attach_baseline_improvement(row: dict[str, object], *, baseline_by_key: dict[tuple[float, ...], dict[str, object]], reward: RewardConfig, require_no_control_improvement: bool) -> None:
     baseline_row = baseline_by_key.get(_reward_key(reward), {})
     baseline_return = _row_float(baseline_row, "baseline.mean_return", default=float("nan"))
     eval_return = _row_float(row, "eval.mean_return", default=float("nan"))
     row["eval.improvement_over_no_control"] = eval_return - baseline_return if math.isfinite(eval_return) and math.isfinite(baseline_return) else float("nan")
+    baseline_shape = _row_float(baseline_row, "baseline.shape_error_mean_m", default=float("nan"))
+    eval_shape = _row_float(row, "eval.shape_error_mean_m", default=float("nan"))
+    row["eval.shape_improvement_over_no_control_m"] = baseline_shape - eval_shape if math.isfinite(eval_shape) and math.isfinite(baseline_shape) else float("nan")
+    baseline_ip = _row_float(baseline_row, "baseline.ip_error_a", default=float("nan"))
+    eval_ip = _row_float(row, "eval.ip_error_a", default=float("nan"))
+    row["eval.ip_improvement_over_no_control_a"] = baseline_ip - eval_ip if math.isfinite(eval_ip) and math.isfinite(baseline_ip) else float("nan")
+    row["search.require_no_control_improvement"] = int(bool(require_no_control_improvement))
     row["promotion_reason"] = _promotion_reason(row)
 
 
@@ -532,6 +540,7 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--refine-midpoints", action="store_true")
     ap.add_argument("--parallel-candidates", type=int, default=1)
     ap.add_argument("--gpu-devices", default=None)
+    ap.add_argument("--require-no-control-improvement", action="store_true")
     ap.add_argument("--steps", type=int, default=None)
     ap.add_argument("--num-envs", type=int, default=None)
     ap.add_argument("--device", default=None)
@@ -669,16 +678,18 @@ def _rank_rows(rows: Sequence[dict[str, object]]) -> list[dict[str, object]]:
     return sorted(annotated, key=_ranking_key)
 
 
-def _ranking_key(row: dict[str, object]) -> tuple[float, float, float, float, float, float, float, float]:
+def _ranking_key(row: dict[str, object]) -> tuple[float, ...]:
     status_bad = 0.0 if row.get("status") == "ok" else 1.0
     rejected = 0.0 if row.get("promotion_reason") == "eligible" else 1.0
     shape = _row_float(row, "eval.shape_error_mean_m")
     ip = _row_float(row, "eval.ip_error_a")
     improvement = _row_float(row, "eval.improvement_over_no_control", default=-float("inf"))
+    shape_improvement = _row_float(row, "eval.shape_improvement_over_no_control_m", default=-float("inf"))
+    ip_improvement = _row_float(row, "eval.ip_improvement_over_no_control_a", default=-float("inf"))
     delta_quality = _row_float(row, "eval.delta_action_quality", default=-float("inf"))
     action_quality = _row_float(row, "eval.action_quality", default=-float("inf"))
     mean_return = _row_float(row, "eval.mean_return", default=-float("inf"))
-    return (status_bad, rejected, shape, ip, -improvement, -delta_quality, -action_quality if math.isfinite(action_quality) else float("inf"), -mean_return)
+    return (status_bad, rejected, shape, ip, -shape_improvement, -ip_improvement, -improvement, -delta_quality, -action_quality if math.isfinite(action_quality) else float("inf"), -mean_return)
 
 
 def _promotion_reason(row: dict[str, object]) -> str:
@@ -694,6 +705,14 @@ def _promotion_reason(row: dict[str, object]) -> str:
     ip = _row_float(row, "eval.ip_error_a", default=float("nan"))
     if not math.isfinite(shape) or not math.isfinite(ip):
         return "rejected_missing_physical_metrics"
+    require_no_control = bool(int(_row_float(row, "search.require_no_control_improvement", default=0.0)))
+    if require_no_control:
+        shape_improvement = _row_float(row, "eval.shape_improvement_over_no_control_m", default=float("nan"))
+        if math.isfinite(shape_improvement) and shape_improvement <= 0.0:
+            return "rejected_shape_not_better_than_no_control"
+        ip_improvement = _row_float(row, "eval.ip_improvement_over_no_control_a", default=float("nan"))
+        if math.isfinite(ip_improvement) and ip_improvement <= 0.0:
+            return "rejected_ip_not_better_than_no_control"
     return "eligible"
 
 
