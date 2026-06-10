@@ -139,7 +139,7 @@ class LearnerConfig:
 class TrainingConfig:
     steps: int = 10000
     num_envs: int = 16
-    device: Literal["cpu", "cuda", "auto"] = "auto"
+    device: str = "auto"
     seed: int = 1
     output_dir: Path = Path("outputs/run")
     checkpoint_interval_steps: int = 10000
@@ -147,6 +147,7 @@ class TrainingConfig:
     eval_episodes: int = 8
     eval_max_steps: int = 1000
     actor_workers: int = 1
+    actor_devices: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import queue
 import time
-from dataclasses import asdict
+from dataclasses import replace
 from multiprocessing import Event, Queue, get_context
 from pathlib import Path
 from typing import Any
@@ -22,7 +22,7 @@ def start_actor_workers(
     worker_count: int,
     envs_per_worker: int,
     rollout_chunk_length: int,
-    device: str,
+    actor_devices: tuple[str, ...],
     seed: int,
 ) -> tuple[list[Any], list[Queue], Queue, Event]:
     ctx = get_context("spawn")
@@ -31,9 +31,11 @@ def start_actor_workers(
     param_queues: list[Queue] = []
     procs = []
     for index in range(int(worker_count)):
+        device = str(actor_devices[index])
         pq: Queue = ctx.Queue(maxsize=2)
         pq.put({k: v.detach().cpu().numpy() for k, v in actor_state_dict.items()})
         proc = ctx.Process(
+            name=f"actor-worker-{index}-{device.replace(':', '_')}",
             target=_actor_loop,
             kwargs={
                 "config": config,
@@ -86,9 +88,14 @@ def _actor_loop(
     stop: Event,
 ) -> None:
     torch.set_num_threads(1)
-    dev = torch.device(device if device == "cpu" or torch.cuda.is_available() else "cpu")
-    env = TokamakMagneticControlEnv(config, batch_size=int(envs_per_worker), device=dev, seed=int(seed))
-    actor = FeedForwardGaussianActor(env.obs_dim, env.action_dim, config.network.hidden_dim).to(dev)
+    dev = _resolve_worker_device(device)
+    worker_config = config
+    if config.sim.compute_backend == "gpu":
+        if dev.type != "cuda":
+            raise RuntimeError(f"actor worker {worker_index} requested GPU simulator but actor device is not CUDA: {device}")
+        worker_config = replace(config, sim=replace(config.sim, gpu_device=str(dev)))
+    env = TokamakMagneticControlEnv(worker_config, batch_size=int(envs_per_worker), device=dev, seed=int(seed))
+    actor = FeedForwardGaussianActor(env.obs_dim, env.action_dim, worker_config.network.hidden_dim).to(dev)
     actor.load_state_dict({k: torch.as_tensor(v, device=dev) for k, v in params_q.get().items()})
     obs = env.reset()
     while not stop.is_set():
@@ -102,7 +109,7 @@ def _actor_loop(
             chunk["obs"].append(obs.detach().cpu())
             chunk["action"].append(action.detach().cpu())
             chunk["reward"].append(out.reward.detach().cpu())
-            chunk["discount"].append(torch.full_like(out.reward.detach().cpu(), float(config.learner.discount)))
+            chunk["discount"].append(torch.full_like(out.reward.detach().cpu(), float(worker_config.learner.discount)))
             chunk["next_obs"].append(out.obs.detach().cpu())
             chunk["done"].append(done.detach().cpu())
             obs = out.obs
@@ -110,7 +117,19 @@ def _actor_loop(
                 obs = env.reset()
         payload = {k: torch.stack(v, dim=0).numpy() for k, v in chunk.items()}
         payload["worker_index"] = int(worker_index)
+        payload["worker_device"] = str(dev)
         data_q.put(payload)
+
+
+def _resolve_worker_device(value: str) -> torch.device:
+    dev = torch.device(value)
+    if dev.type == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(f"CUDA actor device requested but torch.cuda.is_available() is false: {value}")
+        if dev.index is not None and dev.index >= torch.cuda.device_count():
+            raise RuntimeError(f"CUDA actor device index is not visible: {value}; visible device count is {torch.cuda.device_count()}")
+        torch.cuda.set_device(dev)
+    return dev
 
 
 def _drain_params(actor: FeedForwardGaussianActor, params_q: Queue, device: torch.device) -> None:

@@ -88,6 +88,21 @@ def _float_sequence(raw: object, name: str) -> tuple[float, ...]:
     return out
 
 
+def _string_tuple(raw: object, name: str) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if isinstance(raw, str):
+        values = [part.strip() for part in raw.split(",")]
+    elif isinstance(raw, (list, tuple)):
+        values = [str(part).strip() for part in raw]
+    else:
+        raise ValueError(f"{name} must be a comma-separated string or list")
+    out = tuple(value for value in values if value)
+    if raw is not None and not out:
+        raise ValueError(f"{name} must not be empty")
+    return out
+
+
 def _current_safety_limits(raw: Mapping[str, Any] | None) -> CurrentSafetyLimits | None:
     if not raw:
         return None
@@ -171,6 +186,7 @@ def _training(raw: Mapping[str, Any], base: Path) -> TrainingConfig:
         eval_episodes=int(raw.get("eval_episodes", defaults.eval_episodes)),
         eval_max_steps=int(raw.get("eval_max_steps", defaults.eval_max_steps)),
         actor_workers=int(raw.get("actor_workers", defaults.actor_workers)),
+        actor_devices=_string_tuple(raw.get("actor_devices"), "training.actor_devices"),
     )
 
 

@@ -534,7 +534,7 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--gpu-devices", default=None)
     ap.add_argument("--steps", type=int, default=None)
     ap.add_argument("--num-envs", type=int, default=None)
-    ap.add_argument("--device", choices=("cpu", "cuda", "auto"), default=None)
+    ap.add_argument("--device", default=None)
     ap.add_argument("--sim-compute-backend", choices=("cpu", "gpu"), default=None)
     ap.add_argument("--sim-gpu-device", default=None)
     ap.add_argument("--batch-size", type=int, default=None)

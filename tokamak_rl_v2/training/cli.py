@@ -12,7 +12,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--config", required=True)
     ap.add_argument("--steps", type=int, default=None)
     ap.add_argument("--num-envs", type=int, default=None)
-    ap.add_argument("--device", choices=("cpu", "cuda", "auto"), default=None)
+    ap.add_argument("--device", default=None)
     ap.add_argument("--output-dir", default=None)
     ap.add_argument("--sim-compute-backend", choices=("cpu", "gpu"), default=None)
     ap.add_argument("--sim-gpu-device", default=None)
@@ -31,6 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--eval-episodes", type=int, default=None)
     ap.add_argument("--eval-max-steps", type=int, default=None)
     ap.add_argument("--actor-workers", type=int, default=None)
+    ap.add_argument("--actor-devices", default=None)
     ap.add_argument("--wandb", action="store_true")
     ap.add_argument("--wandb-project", default="tokamak-rl-v2")
     ap.add_argument("--wandb-name", default=None)
@@ -63,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
                 critic_mlp_hidden_dim=args.critic_mlp_hidden_dim or cfg.network.critic_mlp_hidden_dim,
             ),
         )
-    if any(v is not None for v in (args.checkpoint_interval_steps, args.eval_interval_steps, args.eval_episodes, args.eval_max_steps, args.actor_workers)):
+    if any(v is not None for v in (args.checkpoint_interval_steps, args.eval_interval_steps, args.eval_episodes, args.eval_max_steps, args.actor_workers, args.actor_devices)):
         cfg = replace(
             cfg,
             training=replace(
@@ -73,6 +74,7 @@ def main(argv: list[str] | None = None) -> int:
                 eval_episodes=args.eval_episodes or cfg.training.eval_episodes,
                 eval_max_steps=args.eval_max_steps or cfg.training.eval_max_steps,
                 actor_workers=args.actor_workers or cfg.training.actor_workers,
+                actor_devices=_device_list(args.actor_devices) if args.actor_devices is not None else cfg.training.actor_devices,
             ),
         )
     wandb_run = None
@@ -85,6 +87,13 @@ def main(argv: list[str] | None = None) -> int:
         wandb_run.finish()
     print(result)
     return 0
+
+
+def _device_list(raw: str) -> tuple[str, ...]:
+    values = tuple(part.strip() for part in str(raw).split(",") if part.strip())
+    if not values:
+        raise ValueError("device list must not be empty")
+    return values
 
 
 if __name__ == "__main__":

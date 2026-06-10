@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import queue
 import time
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
@@ -40,6 +41,9 @@ class Trainer:
         self.output_dir = Path(config.training.output_dir if output_dir is None else output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.wandb_run = wandb_run
+        self._last_actor_devices: tuple[str, ...] = ()
+        self._last_envs_per_worker: int | None = None
+        self._last_total_training_envs: int | None = None
         torch.manual_seed(int(config.training.seed))
         np.random.seed(int(config.training.seed))
         self.env = TokamakMagneticControlEnv(config, batch_size=self.num_envs, device=self.device, seed=int(config.training.seed))
@@ -141,14 +145,18 @@ class Trainer:
     def _train_distributed(self) -> dict[str, Any]:
         self._write_config_snapshot()
         worker_count = int(self.config.training.actor_workers)
-        envs_per_worker = max(1, self.num_envs // worker_count)
+        envs_per_worker = self._distributed_envs_per_worker(worker_count)
+        actor_devices = self._resolve_actor_devices(worker_count)
+        self._last_actor_devices = actor_devices
+        self._last_envs_per_worker = envs_per_worker
+        self._last_total_training_envs = envs_per_worker * worker_count
         processes, param_queues, data_q, stop = start_actor_workers(
             config=self.config,
             actor_state_dict=self.actor.state_dict(),
             worker_count=worker_count,
             envs_per_worker=envs_per_worker,
             rollout_chunk_length=int(self.config.learner.rollout_chunk_length),
-            device=str(self.device),
+            actor_devices=actor_devices,
             seed=int(self.config.training.seed),
         )
         losses_path = self.output_dir / "losses.csv"
@@ -156,6 +164,9 @@ class Trainer:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         updates = 0
         env_steps = 0
+        last_checkpoint_step = 0
+        last_eval_step = 0
+        worker_rollout_counts = {str(index): 0 for index in range(worker_count)}
         start = time.time()
         try:
             with losses_path.open("w", newline="", encoding="utf-8") as loss_f:
@@ -163,8 +174,16 @@ class Trainer:
                 loss_writer.writeheader()
                 progress = tqdm(total=self.steps, desc="distributed-train", unit="step", dynamic_ncols=True)
                 while env_steps < self.steps:
-                    payload = data_q.get(timeout=300.0)
+                    self._raise_for_dead_actor_workers(processes, actor_devices)
+                    try:
+                        payload = data_q.get(timeout=300.0)
+                    except queue.Empty as exc:
+                        self._raise_for_dead_actor_workers(processes, actor_devices)
+                        raise RuntimeError("timed out waiting for actor worker rollout data") from exc
                     T, B = int(payload["reward"].shape[0]), int(payload["reward"].shape[1])
+                    worker_index = str(int(payload.get("worker_index", -1)))
+                    if worker_index in worker_rollout_counts:
+                        worker_rollout_counts[worker_index] += T * B
                     for t in range(T):
                         self.replay.add_batch(
                             torch.as_tensor(payload["obs"][t], dtype=torch.float32, device=self.device),
@@ -187,8 +206,19 @@ class Trainer:
                         if updates % 4 == 0:
                             broadcast_actor(param_queues, self.actor.state_dict())
                         break
-                    if env_steps % max(int(self.config.training.checkpoint_interval_steps), 1) < T * B:
+                    if env_steps - last_checkpoint_step >= max(int(self.config.training.checkpoint_interval_steps), 1):
                         self._save_checkpoint("latest.pt", step=env_steps, updates=updates)
+                        last_checkpoint_step = env_steps
+                    if env_steps - last_eval_step >= max(int(self.config.training.eval_interval_steps), 1):
+                        eval_metrics = self.evaluate_detailed(max_steps=int(self.config.training.eval_max_steps), episodes=int(self.config.training.eval_episodes))
+                        score = float(eval_metrics["mean_return"])
+                        self._wandb_log({f"eval/{k}": v for k, v in eval_metrics.items()}, step=env_steps)
+                        if score > self.best_eval:
+                            self.best_eval = score
+                            self.best_eval_details = dict(eval_metrics)
+                            self._save_checkpoint("best.pt", step=env_steps, updates=updates)
+                            self._export("exports/best_actor", step=env_steps, updates=updates, eval_score=score)
+                        last_eval_step = env_steps
                     progress.update(min(T * B, max(self.steps - (env_steps - T * B), 0)))
                     progress.set_postfix(replay=self.replay.size, updates=updates, refresh=False)
                 progress.close()
@@ -196,9 +226,63 @@ class Trainer:
             stop_actor_workers(processes, stop)
         self._save_checkpoint("final.pt", step=env_steps, updates=updates)
         self._export("exports/final_actor", step=env_steps, updates=updates, eval_score=None)
-        final = {"steps": env_steps, "updates": updates, "best_eval": self.best_eval, "device": str(self.device), "output_dir": str(self.output_dir), "actor_workers": worker_count}
+        final = {
+            "steps": env_steps,
+            "updates": updates,
+            "best_eval": self.best_eval,
+            "best_eval_details": self.best_eval_details,
+            "device": str(self.device),
+            "learner_device": str(self.device),
+            "output_dir": str(self.output_dir),
+            "actor_workers": worker_count,
+            "actor_devices": list(actor_devices),
+            "envs_per_worker": envs_per_worker,
+            "total_training_envs": envs_per_worker * worker_count,
+            "worker_rollout_counts": worker_rollout_counts,
+        }
         metrics_path.write_text(json.dumps(final, indent=2), encoding="utf-8")
         return final
+
+    def _distributed_envs_per_worker(self, worker_count: int) -> int:
+        if worker_count < 2:
+            raise ValueError("distributed training requires actor_workers >= 2")
+        if self.num_envs < worker_count:
+            raise ValueError("num_envs must be at least actor_workers for distributed training")
+        if self.num_envs % worker_count != 0:
+            raise ValueError("num_envs must be divisible by actor_workers so every actor GPU receives the same batch size")
+        return self.num_envs // worker_count
+
+    def _resolve_actor_devices(self, worker_count: int) -> tuple[str, ...]:
+        configured = tuple(str(device).strip() for device in self.config.training.actor_devices if str(device).strip())
+        if configured:
+            if len(configured) < worker_count:
+                raise ValueError(f"actor_workers={worker_count} requires at least {worker_count} actor_devices, got {len(configured)}")
+            devices = configured[:worker_count]
+        elif self.config.sim.compute_backend == "gpu":
+            raise ValueError("GPU distributed training requires --actor-devices, for example --actor-devices cuda:1,cuda:2,cuda:3")
+        else:
+            devices = tuple(str(self.device) for _ in range(worker_count))
+        for raw in devices:
+            dev = torch.device(raw)
+            if self.config.sim.compute_backend == "gpu" and dev.type != "cuda":
+                raise ValueError(f"GPU simulator actor workers require CUDA devices, got {raw}")
+            if dev.type == "cuda":
+                if not torch.cuda.is_available():
+                    raise RuntimeError(f"CUDA actor device requested but torch.cuda.is_available() is false: {raw}")
+                if dev.index is not None and dev.index >= torch.cuda.device_count():
+                    raise RuntimeError(f"CUDA actor device index is not visible: {raw}; visible device count is {torch.cuda.device_count()}")
+        return devices
+
+    @staticmethod
+    def _raise_for_dead_actor_workers(processes, actor_devices: tuple[str, ...]) -> None:
+        dead = []
+        for index, proc in enumerate(processes):
+            exitcode = proc.exitcode
+            if exitcode is not None and exitcode != 0:
+                device = actor_devices[index] if index < len(actor_devices) else "unknown"
+                dead.append(f"worker={index} device={device} exitcode={exitcode}")
+        if dead:
+            raise RuntimeError("actor worker failed: " + "; ".join(dead))
 
     @torch.no_grad()
     def evaluate(self, *, episodes: int, max_steps: int) -> float:
@@ -242,7 +326,13 @@ class Trainer:
         return metrics
 
     def _metadata(self, *, step: int, updates: int, eval_score: float | None = None) -> dict[str, object]:
-        return {"experiment": self.config.name, "step": int(step), "updates": int(updates), "eval_score": eval_score, "device": str(self.device), "algorithm": "Maximum a Posteriori Policy Optimisation", "plant": "tokamak-sim"}
+        out: dict[str, object] = {"experiment": self.config.name, "step": int(step), "updates": int(updates), "eval_score": eval_score, "device": str(self.device), "learner_device": str(self.device), "algorithm": "Maximum a Posteriori Policy Optimisation", "plant": "tokamak-sim", "sim_compute_backend": self.config.sim.compute_backend}
+        if self._last_actor_devices:
+            out["actor_devices"] = list(self._last_actor_devices)
+            out["actor_workers"] = len(self._last_actor_devices)
+            out["envs_per_worker"] = self._last_envs_per_worker
+            out["total_training_envs"] = self._last_total_training_envs
+        return out
 
     def _save_checkpoint(self, name: str, *, step: int, updates: int) -> Path:
         ckpt_dir = self.output_dir / "checkpoints"
@@ -284,4 +374,6 @@ def _resolve_device(value: str) -> torch.device:
     dev = torch.device(value)
     if dev.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA device requested but torch.cuda.is_available() is false")
+    if dev.type == "cuda" and dev.index is not None and dev.index >= torch.cuda.device_count():
+        raise RuntimeError(f"CUDA device index is not visible: {value}; visible device count is {torch.cuda.device_count()}")
     return dev

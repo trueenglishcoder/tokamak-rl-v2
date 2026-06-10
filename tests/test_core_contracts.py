@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 from tokamak_rl_v2.config import load_experiment_config
@@ -15,6 +17,7 @@ from tokamak_rl_v2.rewards import transforms
 from tokamak_rl_v2.training.mpo import MaximumAPosterioriPolicyOptimiser
 from tokamak_rl_v2.training.trainer import Trainer
 from tokamak_rl_v2.training.reward_search import _rank_rows, main as reward_search_main
+from tokamak_rl_v2.training.cli import _device_list
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -87,13 +90,45 @@ def test_small_training_writes_export(tmp_path: Path) -> None:
 
 def test_small_distributed_training_writes_export(tmp_path: Path) -> None:
     cfg = _small_config(tmp_path)
-    cfg = replace(cfg, training=replace(cfg.training, actor_workers=2, eval_interval_steps=1000))
+    cfg = replace(cfg, training=replace(cfg.training, actor_workers=2, actor_devices=("cpu", "cpu"), eval_interval_steps=1000))
     trainer = Trainer(cfg, device="cpu", output_dir=tmp_path)
     result = trainer.train()
     assert result["updates"] > 0
     assert result["actor_workers"] == 2
+    assert result["learner_device"] == "cpu"
+    assert result["actor_devices"] == ["cpu", "cpu"]
+    assert result["envs_per_worker"] == 1
+    assert result["total_training_envs"] == 2
+    metrics = json.loads((tmp_path / "metrics.json").read_text())
+    assert set(metrics["worker_rollout_counts"]) == {"0", "1"}
+    assert sum(metrics["worker_rollout_counts"].values()) >= result["steps"]
     assert (tmp_path / "checkpoints" / "final.pt").exists()
     assert (tmp_path / "exports" / "final_actor" / "policy_weights.npz").exists()
+
+
+def test_distributed_training_requires_enough_actor_devices(tmp_path: Path) -> None:
+    cfg = _small_config(tmp_path)
+    cfg = replace(cfg, training=replace(cfg.training, num_envs=3, actor_workers=3, actor_devices=("cpu", "cpu"), eval_interval_steps=1000))
+    trainer = Trainer(cfg, device="cpu", output_dir=tmp_path)
+    with pytest.raises(ValueError, match="actor_workers=3 requires at least 3 actor_devices"):
+        trainer.train()
+
+
+def test_training_cli_device_list_parser_accepts_explicit_cuda_devices() -> None:
+    assert _device_list("cuda:1,cuda:2,cuda:3") == ("cuda:1", "cuda:2", "cuda:3")
+
+
+def test_config_loader_reads_explicit_training_devices(tmp_path: Path) -> None:
+    data = json.loads(CONFIG.read_text())
+    data["training"]["device"] = "cuda:0"
+    data["training"]["actor_workers"] = 2
+    data["training"]["actor_devices"] = ["cuda:1", "cuda:2"]
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    cfg = load_experiment_config(path)
+    assert cfg.training.device == "cuda:0"
+    assert cfg.training.actor_workers == 2
+    assert cfg.training.actor_devices == ("cuda:1", "cuda:2")
 
 
 def test_reward_search_dry_run_writes_candidates(tmp_path: Path) -> None:
@@ -260,4 +295,3 @@ def test_successive_halving_parallel_cpu_workers_write_results(tmp_path: Path) -
     assert (out / "stage_01_short" / "results.csv").exists()
     assert (out / "stage_01_short" / "candidate_0000" / "worker_result.json").exists()
     assert "worker_returncode" in (out / "stage_01_short" / "results.csv").read_text()
-
