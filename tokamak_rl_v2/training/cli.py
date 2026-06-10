@@ -25,6 +25,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--rollout-chunk-length", type=int, default=None)
     ap.add_argument("--updates-per-rollout-chunk", type=int, default=None)
     ap.add_argument("--action-samples", type=int, default=None)
+    ap.add_argument("--actor-update-chunk-size", type=int, default=None)
     ap.add_argument("--checkpoint-interval-steps", type=int, default=None)
     ap.add_argument("--eval-interval-steps", type=int, default=None)
     ap.add_argument("--eval-episodes", type=int, default=None)
@@ -38,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_experiment_config(args.config)
     if args.sim_compute_backend is not None or args.sim_gpu_device is not None:
         cfg = replace(cfg, sim=replace(cfg.sim, compute_backend=args.sim_compute_backend or cfg.sim.compute_backend, gpu_device=args.sim_gpu_device or cfg.sim.gpu_device))
-    if any(v is not None for v in (args.batch_size, args.unroll_length, args.replay_capacity_episodes, args.rollout_chunk_length, args.updates_per_rollout_chunk, args.action_samples)):
+    if any(v is not None for v in (args.batch_size, args.unroll_length, args.replay_capacity_episodes, args.rollout_chunk_length, args.updates_per_rollout_chunk, args.action_samples, args.actor_update_chunk_size)):
         cfg = replace(
             cfg,
             learner=replace(
@@ -49,6 +50,7 @@ def main(argv: list[str] | None = None) -> int:
                 rollout_chunk_length=args.rollout_chunk_length or cfg.learner.rollout_chunk_length,
                 updates_per_rollout_chunk=args.updates_per_rollout_chunk or cfg.learner.updates_per_rollout_chunk,
                 action_samples=args.action_samples or cfg.learner.action_samples,
+                actor_update_chunk_size=args.actor_update_chunk_size or cfg.learner.actor_update_chunk_size,
             ),
         )
     if any(v is not None for v in (args.hidden_dim, args.critic_hidden_dim, args.critic_mlp_hidden_dim)):

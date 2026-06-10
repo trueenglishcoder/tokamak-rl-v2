@@ -79,10 +79,7 @@ class MaximumAPosterioriPolicyOptimiser:
             K = int(self.config.action_samples)
             raw = dist.rsample((K,))
             sampled = torch.tanh(raw)
-            obs_rep = obs[None, :, :].expand(K, -1, -1).reshape(K * obs.shape[0], obs.shape[-1])
-            act_rep = sampled.reshape(K * obs.shape[0], -1)
-            q_values, _ = self.critic(obs_rep, act_rep)
-            q_values = q_values.reshape(K, obs.shape[0])
+            q_values = self._sampled_q_values(obs, sampled)
             eta = torch.clamp(self.log_temperature.exp(), min=1.0e-6)
             weights = torch.softmax(q_values / eta, dim=0).detach()
         new = self.actor(obs)
@@ -102,6 +99,20 @@ class MaximumAPosterioriPolicyOptimiser:
         temp_loss.backward()
         self.temperature_optim.step()
         return float(actor_loss.detach().cpu()), float(mean_kl.detach().cpu()), float(std_kl.detach().cpu())
+
+    def _sampled_q_values(self, obs: Tensor, sampled_actions: Tensor) -> Tensor:
+        """Evaluate sampled-action Q values without materializing K copies of full observations."""
+        K = int(sampled_actions.shape[0])
+        N = int(obs.shape[0])
+        chunk_size = max(1, int(getattr(self.config, "actor_update_chunk_size", 2048)))
+        out = torch.empty((K, N), dtype=obs.dtype, device=obs.device)
+        for start in range(0, N, chunk_size):
+            end = min(start + chunk_size, N)
+            obs_chunk = obs[start:end]
+            for k in range(K):
+                q, _ = self.critic(obs_chunk, sampled_actions[k, start:end])
+                out[k, start:end] = q.reshape(-1)
+        return out
 
     def _soft_sync(self, tau: float) -> None:
         with torch.no_grad():

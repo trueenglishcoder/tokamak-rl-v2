@@ -7,10 +7,12 @@ import numpy as np
 import torch
 
 from tokamak_rl_v2.config import load_experiment_config
+from tokamak_rl_v2.config.schema import LearnerConfig
 from tokamak_rl_v2.env import TokamakMagneticControlEnv
 from tokamak_rl_v2.networks import FeedForwardGaussianActor, RecurrentQCritic
 from tokamak_rl_v2.rewards import T15StaticBoundaryReward
 from tokamak_rl_v2.rewards import transforms
+from tokamak_rl_v2.training.mpo import MaximumAPosterioriPolicyOptimiser
 from tokamak_rl_v2.training.trainer import Trainer
 from tokamak_rl_v2.training.reward_search import _rank_rows, main as reward_search_main
 
@@ -198,4 +200,29 @@ def test_reward_search_ranking_uses_physical_metrics_before_return() -> None:
     assert ranked[0]["candidate"] == 1
     assert ranked[-1]["candidate"] == 2
     assert ranked[-1]["promotion_reason"] == "rejected_boundary_not_reliable"
+
+
+def test_chunked_sampled_q_values_match_unbatched_reference() -> None:
+    torch.manual_seed(123)
+    obs_dim = 9
+    action_dim = 3
+    actor = FeedForwardGaussianActor(obs_dim=obs_dim, action_dim=action_dim, hidden_dim=8)
+    critic = RecurrentQCritic(obs_dim=obs_dim, action_dim=action_dim, lstm_hidden_dim=8, mlp_hidden_dim=8)
+    target_actor = FeedForwardGaussianActor(obs_dim=obs_dim, action_dim=action_dim, hidden_dim=8)
+    target_critic = RecurrentQCritic(obs_dim=obs_dim, action_dim=action_dim, lstm_hidden_dim=8, mlp_hidden_dim=8)
+    learner = MaximumAPosterioriPolicyOptimiser(
+        actor=actor,
+        critic=critic,
+        target_actor=target_actor,
+        target_critic=target_critic,
+        config=LearnerConfig(batch_size=2, unroll_length=2, action_samples=4, actor_update_chunk_size=2),
+        device="cpu",
+    )
+    obs = torch.randn((5, obs_dim), dtype=torch.float32)
+    sampled = torch.randn((4, 5, action_dim), dtype=torch.float32)
+    chunked = learner._sampled_q_values(obs, sampled)
+    obs_rep = obs[None, :, :].expand(4, -1, -1).reshape(20, obs_dim)
+    act_rep = sampled.reshape(20, action_dim)
+    reference, _ = critic(obs_rep, act_rep)
+    assert torch.allclose(chunked, reference.reshape(4, 5), atol=1.0e-6)
 

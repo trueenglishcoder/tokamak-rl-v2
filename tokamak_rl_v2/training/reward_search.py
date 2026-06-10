@@ -257,6 +257,7 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--rollout-chunk-length", type=int, default=None)
     ap.add_argument("--updates-per-rollout-chunk", type=int, default=None)
     ap.add_argument("--action-samples", type=int, default=None)
+    ap.add_argument("--actor-update-chunk-size", type=int, default=None)
     ap.add_argument("--checkpoint-interval-steps", type=int, default=None)
     ap.add_argument("--eval-interval-steps", type=int, default=None)
     ap.add_argument("--eval-episodes", type=int, default=None)
@@ -285,8 +286,8 @@ def _parser() -> argparse.ArgumentParser:
 def _apply_overrides(cfg: ExperimentConfig, args: argparse.Namespace) -> ExperimentConfig:
     if args.sim_compute_backend is not None or args.sim_gpu_device is not None:
         cfg = replace(cfg, sim=replace(cfg.sim, compute_backend=args.sim_compute_backend or cfg.sim.compute_backend, gpu_device=args.sim_gpu_device or cfg.sim.gpu_device))
-    if any(v is not None for v in (args.batch_size, args.unroll_length, args.replay_capacity_episodes, args.rollout_chunk_length, args.updates_per_rollout_chunk, args.action_samples)):
-        cfg = replace(cfg, learner=replace(cfg.learner, batch_size=args.batch_size or cfg.learner.batch_size, unroll_length=args.unroll_length or cfg.learner.unroll_length, replay_capacity_episodes=args.replay_capacity_episodes or cfg.learner.replay_capacity_episodes, rollout_chunk_length=args.rollout_chunk_length or cfg.learner.rollout_chunk_length, updates_per_rollout_chunk=args.updates_per_rollout_chunk or cfg.learner.updates_per_rollout_chunk, action_samples=args.action_samples or cfg.learner.action_samples))
+    if any(v is not None for v in (args.batch_size, args.unroll_length, args.replay_capacity_episodes, args.rollout_chunk_length, args.updates_per_rollout_chunk, args.action_samples, args.actor_update_chunk_size)):
+        cfg = replace(cfg, learner=replace(cfg.learner, batch_size=args.batch_size or cfg.learner.batch_size, unroll_length=args.unroll_length or cfg.learner.unroll_length, replay_capacity_episodes=args.replay_capacity_episodes or cfg.learner.replay_capacity_episodes, rollout_chunk_length=args.rollout_chunk_length or cfg.learner.rollout_chunk_length, updates_per_rollout_chunk=args.updates_per_rollout_chunk or cfg.learner.updates_per_rollout_chunk, action_samples=args.action_samples or cfg.learner.action_samples, actor_update_chunk_size=args.actor_update_chunk_size or cfg.learner.actor_update_chunk_size))
     if any(v is not None for v in (args.hidden_dim, args.critic_hidden_dim, args.critic_mlp_hidden_dim)):
         cfg = replace(cfg, network=replace(cfg.network, hidden_dim=args.hidden_dim or cfg.network.hidden_dim, critic_hidden_dim=args.critic_hidden_dim or cfg.network.critic_hidden_dim, critic_mlp_hidden_dim=args.critic_mlp_hidden_dim or cfg.network.critic_mlp_hidden_dim))
     if any(v is not None for v in (args.checkpoint_interval_steps, args.eval_interval_steps, args.eval_episodes, args.eval_max_steps, args.actor_workers)):
