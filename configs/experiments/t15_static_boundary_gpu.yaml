@@ -117,8 +117,8 @@
   "reward": {
     "shape_good_m": 0.003,
     "shape_bad_m": 0.08,
-    "ip_good_a": 1000.0,
-    "ip_bad_a": 25000.0,
+    "ip_good_a": 500.0,
+    "ip_bad_a": 40000.0,
     "current_good_a": 100.0,
     "current_bad_a": 50000.0,
     "derivative_good": 0.05,
