@@ -5,6 +5,10 @@ import csv
 import itertools
 import json
 import math
+import os
+import subprocess
+import sys
+import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -29,6 +33,34 @@ REWARD_FIELDS = [
     "reward_scale",
 ]
 STAGE_NAMES = ["stage_01_short", "stage_02_medium", "stage_03_final"]
+WORKER_ARG_NAMES = [
+    "config",
+    "output_dir",
+    "num_envs",
+    "device",
+    "sim_compute_backend",
+    "sim_gpu_device",
+    "batch_size",
+    "unroll_length",
+    "replay_capacity_episodes",
+    "hidden_dim",
+    "critic_hidden_dim",
+    "critic_mlp_hidden_dim",
+    "rollout_chunk_length",
+    "updates_per_rollout_chunk",
+    "action_samples",
+    "actor_update_chunk_size",
+    "checkpoint_interval_steps",
+    "eval_interval_steps",
+    "eval_episodes",
+    "eval_max_steps",
+    "actor_workers",
+    "wandb",
+    "wandb_project",
+    "wandb_name",
+    "wandb_group",
+    "wandb_mode",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +73,10 @@ class RewardCandidate:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.worker_task is not None:
+        return _run_worker_task(Path(args.worker_task))
+    if args.config is None:
+        raise ValueError("--config is required")
     base = _apply_overrides(load_experiment_config(args.config), args)
     out = Path(args.output_dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -66,6 +102,8 @@ def main(argv: list[str] | None = None) -> int:
         "stage_eval_episodes": _int_values(args.stage_eval_episodes) if args.strategy == "successive_halving" else None,
         "refine_top_k": int(args.refine_top_k),
         "refine_midpoints": bool(args.refine_midpoints),
+        "parallel_candidates": int(args.parallel_candidates),
+        "gpu_devices": _gpu_devices(args),
     }
     (out / "search_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     if args.strategy == "successive_halving":
@@ -132,29 +170,21 @@ def _run_successive_halving(*, base: ExperimentConfig, args: argparse.Namespace,
     final_ranked: list[dict[str, object]] = []
     for stage_idx, (stage_name, steps, keep, eval_episodes) in enumerate(zip(STAGE_NAMES, stage_steps, stage_keep, stage_eval_episodes), start=1):
         stage_dir = out / stage_name
-        stage_rows: list[dict[str, object]] = []
-        for position, candidate in enumerate(active):
-            print(f"[{stage_name} {position + 1}/{len(active)}] reward={_reward_label(candidate.reward)}", flush=True)
-            row = _candidate_row(candidate, stage=stage_name, candidate_dir=stage_dir / f"candidate_{candidate.index:04d}")
-            try:
-                trained = _train_candidate(base=base, args=args, candidate=candidate, candidate_dir=stage_dir / f"candidate_{candidate.index:04d}", steps=int(steps), eval_episodes=int(eval_episodes), stage_name=stage_name, stage_index=stage_idx)
-                row.update(trained)
-                baseline_row = baseline_by_key.get(_reward_key(candidate.reward), {})
-                baseline_return = _row_float(baseline_row, "baseline.mean_return", default=float("nan"))
-                eval_return = _row_float(row, "eval.mean_return", default=float("nan"))
-                row["eval.improvement_over_no_control"] = eval_return - baseline_return if math.isfinite(eval_return) and math.isfinite(baseline_return) else float("nan")
-                row["promotion_reason"] = _promotion_reason(row)
-            except Exception as exc:
-                row.update({"status": "error", "score": "", "error": repr(exc), "promotion_reason": "error"})
-                (stage_dir / f"candidate_{candidate.index:04d}" / "error.txt").write_text(repr(exc), encoding="utf-8")
-                if not args.continue_on_error:
-                    stage_rows.append(row)
-                    _write_results(stage_dir / "results.csv", stage_rows)
-                    raise
-            stage_rows.append(row)
-            all_rows.append(row)
-            _write_results(stage_dir / "results.csv", stage_rows)
-            _write_results(out / "results.csv", all_rows)
+        stage_rows = _run_stage_candidates(
+            base=base,
+            args=args,
+            candidates=active,
+            stage_dir=stage_dir,
+            stage_name=stage_name,
+            stage_index=stage_idx,
+            steps=int(steps),
+            eval_episodes=int(eval_episodes),
+            baseline_by_key=baseline_by_key,
+            aggregate_results_path=out / "results.csv",
+            aggregate_rows=all_rows,
+        )
+        all_rows.extend(stage_rows)
+        _write_results(out / "results.csv", all_rows)
         ranked = _rank_rows(stage_rows)
         final_ranked = ranked
         eligible = [row for row in ranked if row.get("status") == "ok" and row.get("promotion_reason") == "eligible"]
@@ -190,6 +220,262 @@ def _run_successive_halving(*, base: ExperimentConfig, args: argparse.Namespace,
         (out / "best_reward.yaml").write_text("".join(f"{k}: {v}\n" for k, v in asdict(best_reward).items()), encoding="utf-8")
     _write_results(out / "results.csv", all_rows)
     return 0
+
+
+def _run_stage_candidates(
+    *,
+    base: ExperimentConfig,
+    args: argparse.Namespace,
+    candidates: Sequence[RewardCandidate],
+    stage_dir: Path,
+    stage_name: str,
+    stage_index: int,
+    steps: int,
+    eval_episodes: int,
+    baseline_by_key: dict[tuple[float, ...], dict[str, object]],
+    aggregate_results_path: Path,
+    aggregate_rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    if int(args.parallel_candidates) <= 1:
+        return _run_stage_candidates_sequential(
+            base=base,
+            args=args,
+            candidates=candidates,
+            stage_dir=stage_dir,
+            stage_name=stage_name,
+            stage_index=stage_index,
+            steps=steps,
+            eval_episodes=eval_episodes,
+            baseline_by_key=baseline_by_key,
+        )
+    return _run_stage_candidates_parallel(
+        args=args,
+        candidates=candidates,
+        stage_dir=stage_dir,
+        stage_name=stage_name,
+        stage_index=stage_index,
+        steps=steps,
+        eval_episodes=eval_episodes,
+        baseline_by_key=baseline_by_key,
+        aggregate_results_path=aggregate_results_path,
+        aggregate_rows=aggregate_rows,
+    )
+
+
+def _run_stage_candidates_sequential(
+    *,
+    base: ExperimentConfig,
+    args: argparse.Namespace,
+    candidates: Sequence[RewardCandidate],
+    stage_dir: Path,
+    stage_name: str,
+    stage_index: int,
+    steps: int,
+    eval_episodes: int,
+    baseline_by_key: dict[tuple[float, ...], dict[str, object]],
+) -> list[dict[str, object]]:
+    stage_rows: list[dict[str, object]] = []
+    for position, candidate in enumerate(candidates):
+        print(f"[{stage_name} {position + 1}/{len(candidates)}] reward={_reward_label(candidate.reward)}", flush=True)
+        row = _run_one_stage_candidate(
+            base=base,
+            args=args,
+            candidate=candidate,
+            candidate_dir=stage_dir / f"candidate_{candidate.index:04d}",
+            stage_name=stage_name,
+            stage_index=stage_index,
+            steps=steps,
+            eval_episodes=eval_episodes,
+            baseline_by_key=baseline_by_key,
+        )
+        stage_rows.append(row)
+        _write_results(stage_dir / "results.csv", stage_rows)
+    return stage_rows
+
+
+def _run_one_stage_candidate(
+    *,
+    base: ExperimentConfig,
+    args: argparse.Namespace,
+    candidate: RewardCandidate,
+    candidate_dir: Path,
+    stage_name: str,
+    stage_index: int,
+    steps: int,
+    eval_episodes: int,
+    baseline_by_key: dict[tuple[float, ...], dict[str, object]],
+) -> dict[str, object]:
+    row = _candidate_row(candidate, stage=stage_name, candidate_dir=candidate_dir)
+    try:
+        trained = _train_candidate(base=base, args=args, candidate=candidate, candidate_dir=candidate_dir, steps=steps, eval_episodes=eval_episodes, stage_name=stage_name, stage_index=stage_index)
+        row.update(trained)
+        _attach_baseline_improvement(row, baseline_by_key=baseline_by_key, reward=candidate.reward)
+    except Exception as exc:
+        candidate_dir.mkdir(parents=True, exist_ok=True)
+        row.update({"status": "error", "score": "", "error": repr(exc), "promotion_reason": "error"})
+        (candidate_dir / "error.txt").write_text(repr(exc), encoding="utf-8")
+        if not args.continue_on_error:
+            raise
+    return row
+
+
+def _run_stage_candidates_parallel(
+    *,
+    args: argparse.Namespace,
+    candidates: Sequence[RewardCandidate],
+    stage_dir: Path,
+    stage_name: str,
+    stage_index: int,
+    steps: int,
+    eval_episodes: int,
+    baseline_by_key: dict[tuple[float, ...], dict[str, object]],
+    aggregate_results_path: Path,
+    aggregate_rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    gpu_devices = _gpu_devices(args)
+    parallel = int(args.parallel_candidates)
+    if parallel < 1:
+        raise ValueError("--parallel-candidates must be >= 1")
+    if len(gpu_devices) < parallel:
+        raise ValueError("--gpu-devices must provide at least --parallel-candidates entries")
+    pending = list(enumerate(candidates, start=1))
+    stage_rows: list[dict[str, object]] = []
+    running: list[dict[str, object]] = []
+    free_gpus = list(gpu_devices[:parallel])
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    while pending or running:
+        while pending and free_gpus:
+            position, candidate = pending.pop(0)
+            gpu = free_gpus.pop(0)
+            print(f"[{stage_name} {position}/{len(candidates)} gpu={gpu}] reward={_reward_label(candidate.reward)}", flush=True)
+            running.append(_launch_candidate_worker(args=args, candidate=candidate, stage_dir=stage_dir, stage_name=stage_name, stage_index=stage_index, steps=steps, eval_episodes=eval_episodes, gpu_device=gpu))
+        still_running: list[dict[str, object]] = []
+        for item in running:
+            proc: subprocess.Popen[bytes] = item["process"]  # type: ignore[assignment]
+            returncode = proc.poll()
+            if returncode is None:
+                still_running.append(item)
+                continue
+            stdout_f = item.get("stdout_f")
+            stderr_f = item.get("stderr_f")
+            if stdout_f is not None:
+                stdout_f.close()
+            if stderr_f is not None:
+                stderr_f.close()
+            gpu = str(item["gpu_device"])
+            free_gpus.append(gpu)
+            row = _read_worker_result(item, returncode=returncode, baseline_by_key=baseline_by_key)
+            stage_rows.append(row)
+            _write_results(stage_dir / "results.csv", stage_rows)
+            _write_results(aggregate_results_path, [*aggregate_rows, *stage_rows])
+            if returncode != 0 and not args.continue_on_error:
+                for other in still_running:
+                    other_proc: subprocess.Popen[bytes] = other["process"]  # type: ignore[assignment]
+                    other_proc.terminate()
+                raise RuntimeError(f"candidate worker failed for candidate {item['candidate_index']} with exit code {returncode}; see {item['stderr_path']}")
+        running = still_running
+        if running and not free_gpus:
+            time.sleep(2.0)
+    return stage_rows
+
+
+def _launch_candidate_worker(
+    *,
+    args: argparse.Namespace,
+    candidate: RewardCandidate,
+    stage_dir: Path,
+    stage_name: str,
+    stage_index: int,
+    steps: int,
+    eval_episodes: int,
+    gpu_device: str,
+) -> dict[str, object]:
+    candidate_dir = stage_dir / f"candidate_{candidate.index:04d}"
+    candidate_dir.mkdir(parents=True, exist_ok=True)
+    task_path = candidate_dir / "worker_task.json"
+    result_path = candidate_dir / "worker_result.json"
+    stdout_path = candidate_dir / "worker.out"
+    stderr_path = candidate_dir / "worker.err"
+    worker_args = _worker_args(args, gpu_device=gpu_device)
+    payload = {
+        "config": args.config,
+        "args": worker_args,
+        "candidate": {"index": candidate.index, "reward": asdict(candidate.reward), "source": candidate.source, "parent": candidate.parent},
+        "candidate_dir": str(candidate_dir),
+        "stage_name": stage_name,
+        "stage_index": int(stage_index),
+        "steps": int(steps),
+        "eval_episodes": int(eval_episodes),
+        "result_path": str(result_path),
+    }
+    task_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    stdout_f = stdout_path.open("wb")
+    stderr_f = stderr_path.open("wb")
+    env = os.environ.copy()
+    cmd = [sys.executable, "-m", "tokamak_rl_v2.training.reward_search", "--worker-task", str(task_path)]
+    process = subprocess.Popen(cmd, cwd=Path.cwd(), env=env, stdout=stdout_f, stderr=stderr_f)
+    return {"process": process, "gpu_device": gpu_device, "candidate_index": candidate.index, "candidate_reward": candidate.reward, "result_path": result_path, "stdout_path": stdout_path, "stderr_path": stderr_path, "stdout_f": stdout_f, "stderr_f": stderr_f}
+
+
+def _worker_args(args: argparse.Namespace, *, gpu_device: str) -> dict[str, object]:
+    out = {name: getattr(args, name, None) for name in WORKER_ARG_NAMES}
+    out["device"] = f"cuda:{gpu_device}" if str(gpu_device).isdigit() else str(gpu_device)
+    out["sim_gpu_device"] = f"cuda:{gpu_device}" if str(gpu_device).isdigit() else str(gpu_device)
+    out["sim_compute_backend"] = args.sim_compute_backend
+    out["actor_workers"] = 1
+    return out
+
+
+def _read_worker_result(item: dict[str, object], *, returncode: int, baseline_by_key: dict[tuple[float, ...], dict[str, object]]) -> dict[str, object]:
+    result_path = Path(item["result_path"])  # type: ignore[arg-type]
+    reward = item["candidate_reward"]
+    if result_path.exists():
+        row = json.loads(result_path.read_text(encoding="utf-8"))
+    else:
+        row = {"candidate": item["candidate_index"], "status": "error", "score": "", "error": f"worker exited {returncode} without result", "worker.stderr": str(item["stderr_path"])}
+    if isinstance(reward, RewardConfig):
+        _attach_baseline_improvement(row, baseline_by_key=baseline_by_key, reward=reward)
+    row["worker_returncode"] = int(returncode)
+    row["worker_stdout"] = str(item["stdout_path"])
+    row["worker_stderr"] = str(item["stderr_path"])
+    return row
+
+
+def _attach_baseline_improvement(row: dict[str, object], *, baseline_by_key: dict[tuple[float, ...], dict[str, object]], reward: RewardConfig) -> None:
+    baseline_row = baseline_by_key.get(_reward_key(reward), {})
+    baseline_return = _row_float(baseline_row, "baseline.mean_return", default=float("nan"))
+    eval_return = _row_float(row, "eval.mean_return", default=float("nan"))
+    row["eval.improvement_over_no_control"] = eval_return - baseline_return if math.isfinite(eval_return) and math.isfinite(baseline_return) else float("nan")
+    row["promotion_reason"] = _promotion_reason(row)
+
+
+def _run_worker_task(task_path: Path) -> int:
+    task = json.loads(task_path.read_text(encoding="utf-8"))
+    args = argparse.Namespace(**task["args"])
+    args.worker_task = None
+    args.config = task["config"]
+    base = _apply_overrides(load_experiment_config(args.config), args)
+    candidate_data = task["candidate"]
+    candidate = RewardCandidate(
+        index=int(candidate_data["index"]),
+        reward=RewardConfig(**candidate_data["reward"]),
+        source=str(candidate_data.get("source", "grid")),
+        parent=candidate_data.get("parent"),
+    )
+    candidate_dir = Path(task["candidate_dir"])
+    result_path = Path(task["result_path"])
+    row = _candidate_row(candidate, stage=str(task["stage_name"]), candidate_dir=candidate_dir)
+    try:
+        trained = _train_candidate(base=base, args=args, candidate=candidate, candidate_dir=candidate_dir, steps=int(task["steps"]), eval_episodes=int(task["eval_episodes"]), stage_name=str(task["stage_name"]), stage_index=int(task["stage_index"]))
+        row.update(trained)
+        result_path.write_text(json.dumps(row, indent=2), encoding="utf-8")
+        return 0
+    except Exception as exc:
+        candidate_dir.mkdir(parents=True, exist_ok=True)
+        row.update({"status": "error", "score": "", "error": repr(exc), "promotion_reason": "error"})
+        (candidate_dir / "error.txt").write_text(repr(exc), encoding="utf-8")
+        result_path.write_text(json.dumps(row, indent=2), encoding="utf-8")
+        raise
 
 
 def _train_candidate(*, base: ExperimentConfig, args: argparse.Namespace, candidate: RewardCandidate, candidate_dir: Path, steps: int, eval_episodes: int, stage_name: str, stage_index: int) -> dict[str, object]:
@@ -234,7 +520,8 @@ def _evaluate_baseline_candidate(*, base: ExperimentConfig, args: argparse.Names
 
 def _parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Search T15 static-boundary reward transform settings.")
-    ap.add_argument("--config", required=True)
+    ap.add_argument("--worker-task", default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--config", required=False)
     ap.add_argument("--output-dir", default="outputs/reward_search_t15_static_boundary")
     ap.add_argument("--strategy", choices=("grid", "successive_halving"), default="grid")
     ap.add_argument("--stage-steps", default="25000,100000,300000")
@@ -243,6 +530,8 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--baseline-policy", choices=("no_control",), default="no_control")
     ap.add_argument("--refine-top-k", type=int, default=4)
     ap.add_argument("--refine-midpoints", action="store_true")
+    ap.add_argument("--parallel-candidates", type=int, default=1)
+    ap.add_argument("--gpu-devices", default=None)
     ap.add_argument("--steps", type=int, default=None)
     ap.add_argument("--num-envs", type=int, default=None)
     ap.add_argument("--device", choices=("cpu", "cuda", "auto"), default=None)
@@ -325,6 +614,16 @@ def _candidate_rewards_from_values(base: RewardConfig, values: Sequence[tuple[st
         if key not in seen:
             seen.add(key)
             yield reward
+
+
+def _gpu_devices(args: argparse.Namespace) -> list[str]:
+    raw = args.gpu_devices
+    if raw is None or str(raw).strip() == "":
+        return [str(i) for i in range(max(1, int(getattr(args, "parallel_candidates", 1))))]
+    out = [part.strip() for part in str(raw).split(",") if part.strip()]
+    if not out:
+        raise ValueError("--gpu-devices must not be empty")
+    return out
 
 
 def _float_values(raw: str | None, default: float) -> list[float]:

@@ -226,3 +226,38 @@ def test_chunked_sampled_q_values_match_unbatched_reference() -> None:
     reference, _ = critic(obs_rep, act_rep)
     assert torch.allclose(chunked, reference.reshape(4, 5), atol=1.0e-6)
 
+
+def test_successive_halving_parallel_cpu_workers_write_results(tmp_path: Path) -> None:
+    out = tmp_path / "parallel_search"
+    code = reward_search_main([
+        "--config", str(CONFIG),
+        "--output-dir", str(out),
+        "--strategy", "successive_halving",
+        "--stage-steps", "2,3,4",
+        "--stage-keep", "1,1,1",
+        "--stage-eval-episodes", "1,1,1",
+        "--max-candidates", "2",
+        "--parallel-candidates", "2",
+        "--gpu-devices", "cpu,cpu",
+        "--num-envs", "1",
+        "--device", "cpu",
+        "--sim-compute-backend", "cpu",
+        "--batch-size", "2",
+        "--unroll-length", "2",
+        "--replay-capacity-episodes", "1",
+        "--rollout-chunk-length", "2",
+        "--updates-per-rollout-chunk", "1",
+        "--hidden-dim", "16",
+        "--critic-hidden-dim", "16",
+        "--critic-mlp-hidden-dim", "16",
+        "--action-samples", "4",
+        "--actor-update-chunk-size", "2",
+        "--eval-max-steps", "4",
+        "--shape-good-values", "0.004,0.006",
+        "--shape-bad-values", "0.05",
+    ])
+    assert code == 0
+    assert (out / "stage_01_short" / "results.csv").exists()
+    assert (out / "stage_01_short" / "candidate_0000" / "worker_result.json").exists()
+    assert "worker_returncode" in (out / "stage_01_short" / "results.csv").read_text()
+

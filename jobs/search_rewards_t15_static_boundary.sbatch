@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=tokamak-rl-v2-rewards
 #SBATCH --partition=batch
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:4
 #SBATCH --nodes=1
 #SBATCH --output=slurm_logs/tokamak-rl-v2-reward-search-%j.out
 #SBATCH --error=slurm_logs/tokamak-rl-v2-reward-search-%j.err
@@ -23,7 +23,7 @@ srun \
     ln -sf /tmp/nvidia-lib/libnvidia-ml.so.1 /tmp/nvidia-lib/libnvidia-ml.so
 
     export LD_LIBRARY_PATH=/tmp/nvidia-lib:${LD_LIBRARY_PATH:-}
-    export CUDA_VISIBLE_DEVICES=0
+    export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     export PYTHONPATH=/workspace/tokamak-sim:/workspace/tokamak-rl-v2:${PYTHONPATH:-}
 
@@ -39,13 +39,14 @@ PYCUDA
     python scripts/search_rewards.py \
       --config configs/experiments/t15_static_boundary_gpu.yaml \
       --strategy successive_halving \
-      --output-dir outputs/reward_search_t15_static_boundary_intentional_v2 \
-      --stage-steps 10000,50000,150000 \
+      --output-dir outputs/reward_search_t15_static_boundary_intentional_fast_4gpu_v1 \
+      --stage-steps 1000,3000,9000 \
       --stage-keep 12,4,2 \
-      --stage-eval-episodes 16,32,64 \
+      --stage-eval-episodes 4,8,16 \
       --baseline-policy no_control \
       --refine-top-k 4 \
-      --refine-midpoints \
+      --parallel-candidates 4 \
+      --gpu-devices 0,1,2,3 \
       --num-envs 64 \
       --batch-size 256 \
       --unroll-length 64 \
@@ -71,7 +72,7 @@ PYCUDA
       --reward-scale-values 0.1 \
       --wandb \
       --wandb-project tokamak-rl-v2 \
-      --wandb-name reward_search_t15_static_boundary_intentional_v2 \
+      --wandb-name reward_search_t15_static_boundary_intentional_fast_4gpu_v1 \
       --wandb-group reward_search_intentional \
       --wandb-mode online
   '
