@@ -17,9 +17,9 @@ srun --container-image /scratch/$USER/tokamak/tokamak-rl-v2.sqsh \
     ln -sf /tmp/nvidia-lib/libcuda.so.1 /tmp/nvidia-lib/libcuda.so
     ln -sf /host-libs/libnvidia-ml.so.1 /tmp/nvidia-lib/libnvidia-ml.so.1
     ln -sf /tmp/nvidia-lib/libnvidia-ml.so.1 /tmp/nvidia-lib/libnvidia-ml.so
-    export LD_LIBRARY_PATH=/tmp/nvidia-lib:$LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH=/tmp/nvidia-lib:${LD_LIBRARY_PATH:-}
     export CUDA_VISIBLE_DEVICES=0
-    export PYTHONPATH=/workspace/tokamak-sim:/workspace/tokamak-rl-v2:$PYTHONPATH
+    export PYTHONPATH=/workspace/tokamak-sim:/workspace/tokamak-rl-v2:${PYTHONPATH:-}
     cd /workspace/tokamak-rl-v2
     python scripts/train.py --config configs/experiments/t15_static_boundary_gpu.yaml --device cuda --wandb --wandb-project tokamak-rl-v2 --wandb-name t15_static_boundary_candidate16_full_gpu
   '

@@ -22,10 +22,10 @@ srun \
     ln -sf /host-libs/libnvidia-ml.so.1 /tmp/nvidia-lib/libnvidia-ml.so.1
     ln -sf /tmp/nvidia-lib/libnvidia-ml.so.1 /tmp/nvidia-lib/libnvidia-ml.so
 
-    export LD_LIBRARY_PATH=/tmp/nvidia-lib:$LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH=/tmp/nvidia-lib:${LD_LIBRARY_PATH:-}
     export CUDA_VISIBLE_DEVICES=0
     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-    export PYTHONPATH=/workspace/tokamak-sim:/workspace/tokamak-rl-v2:$PYTHONPATH
+    export PYTHONPATH=/workspace/tokamak-sim:/workspace/tokamak-rl-v2:${PYTHONPATH:-}
 
     cd /workspace/tokamak-rl-v2
 
