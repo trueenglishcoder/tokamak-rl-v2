@@ -80,10 +80,14 @@ class RewardConfig:
     shape_bad_m: float = 0.05
     ip_good_a: float = 500.0
     ip_bad_a: float = 20000.0
+    shape_weight: float = 3.0
+    ip_weight: float = 2.0
     current_good_a: float = 100.0
     current_bad_a: float = 50000.0
     derivative_good: float = 0.05
     derivative_bad: float = 1.0
+    action_penalty_weight: float = 0.02
+    delta_action_penalty_weight: float = 0.01
     terminal_reward: float = -5.0
     reward_scale: float = 0.01
 

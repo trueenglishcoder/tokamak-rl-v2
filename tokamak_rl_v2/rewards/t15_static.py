@@ -47,10 +47,15 @@ class T15StaticBoundaryReward:
         delta_action = action - previous_action
         action_mag = torch.sqrt(torch.mean(action.pow(2), dim=-1))
         delta_mag = torch.sqrt(torch.mean(delta_action.pow(2), dim=-1))
-        r_action = transforms.softplus(action_mag, good=0.0, bad=1.0)
-        r_delta = transforms.softplus(delta_mag, good=0.0, bad=1.0)
-        qualities = torch.stack([r_shape, r_ip, r_current, r_action, r_delta], dim=-1)
-        combined = combiners.smooth_max(qualities, alpha=-0.5, dim=-1)
+        tracking = torch.stack([r_shape, r_ip], dim=-1)
+        tracking_weights = torch.as_tensor([c.shape_weight, c.ip_weight], dtype=tracking.dtype, device=tracking.device)
+        tracking_quality = combiners.smooth_max(tracking, alpha=-5.0, weights=tracking_weights, dim=-1)
+        action_penalty = torch.clamp(float(c.action_penalty_weight) * action_mag.pow(2), min=0.0)
+        delta_action_penalty = torch.clamp(float(c.delta_action_penalty_weight) * delta_mag.pow(2), min=0.0)
+        r_action = torch.clamp(1.0 - action_penalty, 0.0, 1.0)
+        r_delta = torch.clamp(1.0 - delta_action_penalty, 0.0, 1.0)
+        regularization_quality = torch.clamp(1.0 - action_penalty - delta_action_penalty, 0.0, 1.0)
+        combined = tracking_quality * r_current * regularization_quality
         combined = torch.where(boundary_found, combined, torch.zeros_like(combined))
         reward = combined * float(c.reward_scale)
         terminal = torch.full_like(reward, float(c.terminal_reward) * float(c.reward_scale))
@@ -63,10 +68,16 @@ class T15StaticBoundaryReward:
                 "shape_quality": r_shape,
                 "ip_error_a": ip_error,
                 "ip_quality": r_ip,
+                "tracking_quality": tracking_quality,
                 "current_over_limit_a": current_error,
                 "current_quality": r_current,
+                "action_rms": action_mag,
+                "delta_action_rms": delta_mag,
+                "action_penalty": action_penalty,
+                "delta_action_penalty": delta_action_penalty,
                 "action_quality": r_action,
                 "delta_action_quality": r_delta,
+                "regularization_quality": regularization_quality,
                 "combined_quality": combined,
                 "boundary_found": boundary_found.to(dtype=reward.dtype),
             },

@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from tokamak_rl_v2.config import load_experiment_config
-from tokamak_rl_v2.config.schema import LearnerConfig
+from tokamak_rl_v2.config.schema import LearnerConfig, RewardConfig
 from tokamak_rl_v2.env import TokamakMagneticControlEnv
 from tokamak_rl_v2.networks import FeedForwardGaussianActor, RecurrentQCritic
 from tokamak_rl_v2.rewards import T15StaticBoundaryReward
@@ -53,6 +53,31 @@ def test_quality_transforms_hit_declared_points() -> None:
     s = transforms.sigmoid(torch.tensor([500.0, 20000.0]), good=500.0, bad=20000.0)
     assert s[0] > 0.94
     assert s[1] < 0.06
+
+
+def test_tracking_reward_cannot_be_replaced_by_low_action() -> None:
+    reward_fn = T15StaticBoundaryReward(RewardConfig(reward_scale=1.0), control_rate_hz=1000.0)
+    ref = torch.zeros((2, 32, 2), dtype=torch.float32)
+    boundary = ref.clone()
+    boundary[1, :, 0] = 0.20
+    zero_action = torch.zeros((2, 9), dtype=torch.float32)
+    active_action = torch.ones((2, 9), dtype=torch.float32)
+    common = dict(
+        ip=torch.tensor([200000.0, 200000.0]),
+        ip_ref=torch.tensor([200000.0, 200000.0]),
+        boundary_points=boundary,
+        reference_points=ref,
+        previous_action=zero_action,
+        current_over_limit_a=torch.zeros((2,), dtype=torch.float32),
+        derivative_margin=torch.ones((2,), dtype=torch.float32),
+        boundary_found=torch.ones((2,), dtype=torch.bool),
+        terminated=torch.zeros((2,), dtype=torch.bool),
+    )
+    zero = reward_fn(action=zero_action, **common)
+    active = reward_fn(action=active_action, **common)
+    assert zero.reward[0] > zero.reward[1]
+    assert active.reward[0] > zero.reward[1]
+    assert active.reward[0] < zero.reward[0]
 
 
 def test_environment_reset_step_contract() -> None:

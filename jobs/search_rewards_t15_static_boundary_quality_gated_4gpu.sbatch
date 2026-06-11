@@ -3,6 +3,7 @@
 #SBATCH --partition=batch
 #SBATCH --gres=gpu:4
 #SBATCH --nodes=1
+#SBATCH --time=02:00:00
 #SBATCH --output=slurm_logs/tokamak-rl-v2-quality-search-%j.out
 #SBATCH --error=slurm_logs/tokamak-rl-v2-quality-search-%j.err
 
@@ -26,6 +27,8 @@ srun \
     export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     export PYTHONPATH=/workspace/tokamak-sim:/workspace/tokamak-rl-v2:${PYTHONPATH:-}
+    export RUN_NAME=reward_search_t15_static_boundary_tracking_primary_2h_${SLURM_JOB_ID:-manual}
+    export WANDB_PROJECT_NAME=tokamak-rl-v2-${SLURM_JOB_ID:-manual}
 
     cd /workspace/tokamak-rl-v2
 
@@ -39,10 +42,10 @@ PYCUDA
     python scripts/search_rewards.py \
       --config configs/experiments/t15_static_boundary_gpu.yaml \
       --strategy successive_halving \
-      --output-dir outputs/reward_search_t15_static_boundary_quality_gated_4gpu_v1 \
-      --stage-steps 50000,150000,300000 \
-      --stage-keep 4,2,1 \
-      --stage-eval-episodes 16,32,64 \
+      --output-dir outputs/${RUN_NAME} \
+      --stage-steps 12000,24000,36000 \
+      --stage-keep 2,1,1 \
+      --stage-eval-episodes 4,8,12 \
       --baseline-policy no_control \
       --require-no-control-improvement \
       --parallel-candidates 4 \
@@ -50,7 +53,7 @@ PYCUDA
       --num-envs 64 \
       --batch-size 256 \
       --unroll-length 64 \
-      --replay-capacity-episodes 128 \
+      --replay-capacity-episodes 64 \
       --rollout-chunk-length 64 \
       --updates-per-rollout-chunk 16 \
       --hidden-dim 256 \
@@ -58,21 +61,21 @@ PYCUDA
       --critic-mlp-hidden-dim 256 \
       --action-samples 20 \
       --actor-update-chunk-size 2048 \
-      --eval-max-steps 1000 \
+      --eval-max-steps 500 \
       --device cuda \
       --sim-compute-backend gpu \
       --sim-gpu-device cuda:0 \
       --shape-good-values 0.003 \
-      --shape-bad-values 0.04,0.06,0.08 \
+      --shape-bad-values 0.04,0.08 \
       --ip-good-values 500 \
-      --ip-bad-values 15000,25000,40000 \
+      --ip-bad-values 15000,40000 \
       --current-good-values 100 \
       --current-bad-values 50000 \
       --terminal-reward-values -5 \
       --reward-scale-values 0.1 \
       --wandb \
-      --wandb-project tokamak-rl-v2 \
-      --wandb-name reward_search_t15_static_boundary_quality_gated_4gpu_v1 \
-      --wandb-group reward_search_quality_gated \
+      --wandb-project ${WANDB_PROJECT_NAME} \
+      --wandb-name ${RUN_NAME} \
+      --wandb-group ${RUN_NAME} \
       --wandb-mode online
   '
