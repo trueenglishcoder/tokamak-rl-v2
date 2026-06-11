@@ -32,7 +32,7 @@ class T15StaticBoundaryReward:
         action: Tensor,
         previous_action: Tensor,
         current_over_limit_a: Tensor,
-        derivative_margin: Tensor,
+        derivative_usage: Tensor,
         boundary_found: Tensor,
         terminated: Tensor,
     ) -> RewardBatch:
@@ -44,6 +44,8 @@ class T15StaticBoundaryReward:
         r_ip = transforms.softplus(ip_error, good=c.ip_good_a, bad=c.ip_bad_a)
         current_error = torch.clamp(current_over_limit_a, min=0.0)
         r_current = transforms.softplus(current_error, good=c.current_good_a, bad=max(c.current_bad_a, c.current_good_a + 1.0))
+        derivative_usage = torch.clamp(derivative_usage, min=0.0)
+        r_derivative = transforms.softplus(derivative_usage, good=c.derivative_good, bad=max(c.derivative_bad, c.derivative_good + 1.0e-6))
         delta_action = action - previous_action
         action_mag = torch.sqrt(torch.mean(action.pow(2), dim=-1))
         delta_mag = torch.sqrt(torch.mean(delta_action.pow(2), dim=-1))
@@ -55,7 +57,7 @@ class T15StaticBoundaryReward:
         r_action = torch.clamp(1.0 - action_penalty, 0.0, 1.0)
         r_delta = torch.clamp(1.0 - delta_action_penalty, 0.0, 1.0)
         regularization_quality = torch.clamp(1.0 - action_penalty - delta_action_penalty, 0.0, 1.0)
-        combined = tracking_quality * r_current * regularization_quality
+        combined = tracking_quality * r_current * r_derivative * regularization_quality
         combined = torch.where(boundary_found, combined, torch.zeros_like(combined))
         reward = combined * float(c.reward_scale)
         terminal = torch.full_like(reward, float(c.terminal_reward) * float(c.reward_scale))
@@ -71,6 +73,8 @@ class T15StaticBoundaryReward:
                 "tracking_quality": tracking_quality,
                 "current_over_limit_a": current_error,
                 "current_quality": r_current,
+                "derivative_usage": derivative_usage,
+                "derivative_quality": r_derivative,
                 "action_rms": action_mag,
                 "delta_action_rms": delta_mag,
                 "action_penalty": action_penalty,

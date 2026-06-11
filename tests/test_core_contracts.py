@@ -15,6 +15,7 @@ from tokamak_rl_v2.networks import FeedForwardGaussianActor, RecurrentQCritic
 from tokamak_rl_v2.rewards import T15StaticBoundaryReward
 from tokamak_rl_v2.rewards import transforms
 from tokamak_rl_v2.training.mpo import MaximumAPosterioriPolicyOptimiser
+from tokamak_rl_v2.training.replay import FIFOSequenceReplay, SequenceBatch
 from tokamak_rl_v2.training.trainer import Trainer
 from tokamak_rl_v2.training.reward_search import _promotion_reason, _rank_rows, main as reward_search_main
 from tokamak_rl_v2.training.cli import _device_list
@@ -69,7 +70,7 @@ def test_tracking_reward_cannot_be_replaced_by_low_action() -> None:
         reference_points=ref,
         previous_action=zero_action,
         current_over_limit_a=torch.zeros((2,), dtype=torch.float32),
-        derivative_margin=torch.ones((2,), dtype=torch.float32),
+        derivative_usage=torch.zeros((2,), dtype=torch.float32),
         boundary_found=torch.ones((2,), dtype=torch.bool),
         terminated=torch.zeros((2,), dtype=torch.bool),
     )
@@ -100,6 +101,38 @@ def test_environment_reset_step_contract() -> None:
     assert result.obs.shape == (2, env.obs_dim)
     assert result.reward.shape == (2,)
     assert torch.isfinite(result.reward).all()
+
+
+def test_episode_replay_never_crosses_env_or_done_boundaries() -> None:
+    replay = FIFOSequenceReplay(capacity_episodes=4, max_episode_steps=5, active_envs=2, obs_dim=2, action_dim=1, device="cpu")
+    for t in range(4):
+        obs = torch.tensor([[0.0, float(t)], [1.0, float(t)]])
+        next_obs = obs + torch.tensor([[0.0, 0.1], [0.0, 0.1]])
+        done = torch.tensor([t == 1, False])
+        replay.add_batch(obs, torch.zeros((2, 1)), torch.zeros((2,)), torch.ones((2,)), next_obs, done)
+    assert replay.ready(sequence_length=2, batch_size=8)
+    for _ in range(20):
+        batch = replay.sample(batch_size=8, sequence_length=2)
+        assert torch.all(batch.obs[:, :, 0] == batch.obs[:, :1, 0])
+        assert not torch.any(batch.done[:, :-1])
+
+
+def test_environment_reset_indices_only_resets_done_slot() -> None:
+    cfg = load_experiment_config(CONFIG)
+    cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=8))
+    env = TokamakMagneticControlEnv(cfg, batch_size=2, device="cpu", seed=7)
+    env.reset()
+    ref_before = env.reference.ip.detach().clone()
+    action = torch.full((2, env.action_dim), 0.25, dtype=torch.float32)
+    out = env.step(action)
+    assert torch.all(env.step_index == 1)
+    obs = env.reset_indices(torch.tensor([True, False]))
+    assert obs.shape == (2, env.obs_dim)
+    assert int(env.step_index[0].item()) == 0
+    assert int(env.step_index[1].item()) == 1
+    assert torch.allclose(env.reference.ip[1], ref_before[1])
+    assert torch.allclose(env.previous_action[1], action[1])
+    assert torch.allclose(env.previous_action[0], torch.zeros_like(env.previous_action[0]))
 
 
 def test_small_training_writes_export(tmp_path: Path) -> None:
@@ -200,6 +233,23 @@ def test_export_metadata_records_update_count(tmp_path: Path) -> None:
     metadata = json.loads((tmp_path / "exports" / "final_actor" / "metadata.json").read_text())
     assert metadata["updates"] == result["updates"]
     assert metadata["updates"] > 0
+
+
+def test_training_checkpoint_resume_restores_replay_and_counters(tmp_path: Path) -> None:
+    first_dir = tmp_path / "first"
+    cfg = _small_config(first_dir)
+    cfg = replace(cfg, training=replace(cfg.training, steps=4, output_dir=first_dir, checkpoint_interval_steps=4, eval_interval_steps=1000))
+    first = Trainer(cfg, device="cpu", output_dir=first_dir).train()
+    checkpoint = first_dir / "checkpoints" / "final.pt"
+    assert checkpoint.exists()
+    second_dir = tmp_path / "second"
+    resumed_cfg = replace(cfg, training=replace(cfg.training, steps=6, output_dir=second_dir, checkpoint_interval_steps=6, eval_interval_steps=1000))
+    resumed = Trainer(resumed_cfg, device="cpu", output_dir=second_dir, resume_checkpoint=checkpoint).train()
+    assert resumed["start_step"] == 4
+    assert resumed["steps"] == 6
+    state = torch.load(second_dir / "checkpoints" / "final.pt", map_location="cpu", weights_only=False)
+    assert state["training_state"]["step"] == 6
+    assert state["replay_state"]["size"] > 0
 
 
 def test_evaluate_detailed_reports_physical_metrics(tmp_path: Path) -> None:
@@ -356,7 +406,7 @@ def test_reward_search_allows_bounded_shape_degradation_for_ip_gain() -> None:
     assert _promotion_reason(not_enough_ip_gain) == "rejected_ip_improvement_below_minimum"
 
 
-def test_chunked_sampled_q_values_match_unbatched_reference() -> None:
+def test_sequence_sampled_q_values_match_recurrent_reference() -> None:
     torch.manual_seed(123)
     obs_dim = 9
     action_dim = 3
@@ -369,16 +419,50 @@ def test_chunked_sampled_q_values_match_unbatched_reference() -> None:
         critic=critic,
         target_actor=target_actor,
         target_critic=target_critic,
-        config=LearnerConfig(batch_size=2, unroll_length=2, action_samples=4, actor_update_chunk_size=2),
+        config=LearnerConfig(batch_size=2, unroll_length=3, action_samples=4, actor_update_chunk_size=2),
         device="cpu",
     )
-    obs = torch.randn((5, obs_dim), dtype=torch.float32)
-    sampled = torch.randn((4, 5, action_dim), dtype=torch.float32)
-    chunked = learner._sampled_q_values(obs, sampled)
-    obs_rep = obs[None, :, :].expand(4, -1, -1).reshape(20, obs_dim)
-    act_rep = sampled.reshape(20, action_dim)
-    reference, _ = critic(obs_rep, act_rep)
-    assert torch.allclose(chunked, reference.reshape(4, 5), atol=1.0e-6)
+    obs = torch.randn((2, 3, obs_dim), dtype=torch.float32)
+    sampled = torch.randn((4, 2, 3, action_dim), dtype=torch.float32)
+    mask = torch.ones((2, 3), dtype=torch.float32)
+    chunked = learner._sampled_q_values(obs, sampled, mask=mask)
+    reference = []
+    for k in range(4):
+        q, _ = critic(obs, sampled[k], mask=mask)
+        reference.append(q)
+    assert torch.allclose(chunked, torch.stack(reference, dim=0), atol=1.0e-6)
+
+
+def test_actor_update_changes_policy_parameters_on_sequence_batch() -> None:
+    torch.manual_seed(321)
+    obs_dim = 7
+    action_dim = 2
+    actor = FeedForwardGaussianActor(obs_dim=obs_dim, action_dim=action_dim, hidden_dim=8)
+    critic = RecurrentQCritic(obs_dim=obs_dim, action_dim=action_dim, lstm_hidden_dim=8, mlp_hidden_dim=8)
+    target_actor = FeedForwardGaussianActor(obs_dim=obs_dim, action_dim=action_dim, hidden_dim=8)
+    target_critic = RecurrentQCritic(obs_dim=obs_dim, action_dim=action_dim, lstm_hidden_dim=8, mlp_hidden_dim=8)
+    learner = MaximumAPosterioriPolicyOptimiser(
+        actor=actor,
+        critic=critic,
+        target_actor=target_actor,
+        target_critic=target_critic,
+        config=LearnerConfig(batch_size=4, unroll_length=3, action_samples=5),
+        device="cpu",
+    )
+    batch = SequenceBatch(
+        obs=torch.randn((4, 3, obs_dim)),
+        action=torch.tanh(torch.randn((4, 3, action_dim))),
+        reward=torch.randn((4, 3)),
+        discount=torch.full((4, 3), 0.99),
+        next_obs=torch.randn((4, 3, obs_dim)),
+        done=torch.zeros((4, 3), dtype=torch.bool),
+        mask=torch.ones((4, 3)),
+    )
+    metrics = learner.update(batch)
+    assert metrics.actor_param_delta_norm > 0.0
+    assert np.isfinite(metrics.sampled_q_spread)
+    assert np.isfinite(metrics.policy_weight_entropy)
+
 
 
 def test_successive_halving_parallel_cpu_workers_write_results(tmp_path: Path) -> None:
@@ -413,7 +497,9 @@ def test_successive_halving_parallel_cpu_workers_write_results(tmp_path: Path) -
     assert code == 0
     assert (out / "stage_01_short" / "results.csv").exists()
     assert (out / "stage_01_short" / "candidate_0000" / "worker_result.json").exists()
-    assert "worker_returncode" in (out / "stage_01_short" / "results.csv").read_text()
+    stage1_text = (out / "stage_01_short" / "results.csv").read_text()
+    assert "worker_returncode" in stage1_text
+    assert "checkpoint_path" in stage1_text
 
 
 def test_stage_only_search_resumes_from_previous_results(tmp_path: Path) -> None:
@@ -477,5 +563,9 @@ def test_stage_only_search_resumes_from_previous_results(tmp_path: Path) -> None
     ])
     assert code == 0
     assert (out2 / "baseline_results.csv").exists()
-    assert (out2 / "stage_02_medium" / "results.csv").exists()
+    stage2_results = (out2 / "stage_02_medium" / "results.csv")
+    assert stage2_results.exists()
+    text = stage2_results.read_text()
+    assert "resumed_from_checkpoint" in text
+    assert "start_step" in text
     assert (out2 / "stage_02_medium" / "promoted_candidates.csv").exists()

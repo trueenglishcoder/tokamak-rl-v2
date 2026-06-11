@@ -65,25 +65,10 @@ class TokamakMagneticControlEnv:
         return self.cfg.sol
 
     def reset(self) -> Tensor:
-        if self.config.sim.initial_ranges is None:
-            raise ValueError("training config must provide replay-bounded initial_ranges")
-        ip0, pfc0, sol0, params0 = sample_initial_conditions(self.rng, self.config.sim.initial_ranges, self.batch_size)
-        steps = int(self.config.sim.max_episode_steps)
-        self.reference = generate_reference_batch(
-            config=self.config.reference,
-            initial_ip=ip0,
-            initial_parameters=params0,
-            steps=steps,
-            device=self.device,
-            seed=int(self.rng.integers(0, 2**31 - 1)),
-        )
+        ip0, pfc0, sol0, params0, reference = self._sample_reset_payload(self.batch_size)
+        self.reference = reference
         self.previous_action.zero_()
-        if self.config.randomization.enabled and (self.config.randomization.action_offset_min != 0.0 or self.config.randomization.action_offset_max != 0.0):
-            low = float(self.config.randomization.action_offset_min)
-            high = float(self.config.randomization.action_offset_max)
-            self.action_offset = torch.empty((self.batch_size, self.action_dim), dtype=torch.float32, device=self.device).uniform_(low, high)
-        else:
-            self.action_offset = torch.zeros((self.batch_size, self.action_dim), dtype=torch.float32, device=self.device)
+        self.action_offset = self._sample_action_offset(self.batch_size)
         self.step_index.zero_()
         self.done.zero_()
         if self.config.sim.compute_backend == "gpu":
@@ -99,14 +84,62 @@ class TokamakMagneticControlEnv:
             )
             self._gpu_sim.reset(ip=ip0, pfc_currents=pfc0, sol_currents=sol0)
             return self._obs_gpu()
-        self._cpu_models = []
-        for b in range(self.batch_size):
-            cfg_b = self.cfg
-            pfc = cfg_b.pfc.__class__(name=cfg_b.pfc.name, coils=list(cfg_b.pfc.coils), currents=pfc0[b])
-            sol = cfg_b.sol.__class__(name=cfg_b.sol.name, coils=list(cfg_b.sol.coils), currents=sol0[b])
-            physics = replace(cfg_b.physics, Ip0=float(ip0[b]))
-            self._cpu_models.append(PlasmaModel.from_settings(grid=cfg_b.grid, pfc=pfc, sol=sol, settings=physics))
+        self._cpu_models = [self._new_cpu_model(ip=float(ip0[b]), pfc_currents=pfc0[b], sol_currents=sol0[b]) for b in range(self.batch_size)]
         return self._obs_cpu()
+
+    def reset_indices(self, done_mask: Tensor | np.ndarray | list[bool]) -> Tensor:
+        mask = torch.as_tensor(done_mask, dtype=torch.bool, device=self.device).reshape(self.batch_size)
+        if not bool(torch.any(mask).item()):
+            if self.config.sim.compute_backend == "gpu":
+                return self._obs_gpu()
+            return self._obs_cpu()
+        indices_t = torch.nonzero(mask, as_tuple=False).reshape(-1)
+        indices = [int(v) for v in indices_t.detach().cpu().tolist()]
+        count = len(indices)
+        ip0, pfc0, sol0, params0, reference = self._sample_reset_payload(count)
+        assert self.reference is not None
+        self.reference.ip[indices_t] = reference.ip
+        self.reference.parameters[indices_t] = reference.parameters
+        self.reference.points[indices_t] = reference.points
+        self.reference.radii[indices_t] = reference.radii
+        self.previous_action[indices_t] = 0.0
+        self.action_offset[indices_t] = self._sample_action_offset(count)
+        self.step_index[indices_t] = 0
+        self.done[indices_t] = False
+        if self.config.sim.compute_backend == "gpu":
+            assert self._gpu_sim is not None
+            result = self._gpu_sim.reset_indices(indices, ip=ip0, pfc_currents=pfc0, sol_currents=sol0)
+            return self._obs_gpu(result=result)
+        for local, env_index in enumerate(indices):
+            self._cpu_models[env_index] = self._new_cpu_model(ip=float(ip0[local]), pfc_currents=pfc0[local], sol_currents=sol0[local])
+        return self._obs_cpu()
+
+    def _sample_reset_payload(self, count: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, ReferenceBatch]:
+        if self.config.sim.initial_ranges is None:
+            raise ValueError("training config must provide replay-bounded initial_ranges")
+        ip0, pfc0, sol0, params0 = sample_initial_conditions(self.rng, self.config.sim.initial_ranges, int(count))
+        reference = generate_reference_batch(
+            config=self.config.reference,
+            initial_ip=ip0,
+            initial_parameters=params0,
+            steps=int(self.config.sim.max_episode_steps),
+            device=self.device,
+            seed=int(self.rng.integers(0, 2**31 - 1)),
+        )
+        return ip0, pfc0, sol0, params0, reference
+
+    def _sample_action_offset(self, count: int) -> Tensor:
+        if self.config.randomization.enabled and (self.config.randomization.action_offset_min != 0.0 or self.config.randomization.action_offset_max != 0.0):
+            low = float(self.config.randomization.action_offset_min)
+            high = float(self.config.randomization.action_offset_max)
+            return torch.empty((int(count), self.action_dim), dtype=torch.float32, device=self.device).uniform_(low, high)
+        return torch.zeros((int(count), self.action_dim), dtype=torch.float32, device=self.device)
+
+    def _new_cpu_model(self, *, ip: float, pfc_currents: np.ndarray, sol_currents: np.ndarray) -> PlasmaModel:
+        pfc = self.cfg.pfc.__class__(name=self.cfg.pfc.name, coils=list(self.cfg.pfc.coils), currents=pfc_currents)
+        sol = self.cfg.sol.__class__(name=self.cfg.sol.name, coils=list(self.cfg.sol.coils), currents=sol_currents)
+        physics = replace(self.cfg.physics, Ip0=float(ip))
+        return PlasmaModel.from_settings(grid=self.cfg.grid, pfc=pfc, sol=sol, settings=physics)
 
     def step(self, action: Tensor) -> BatchStep:
         action = torch.as_tensor(action, dtype=torch.float32, device=self.device).reshape(self.batch_size, self.action_dim)
@@ -264,12 +297,12 @@ class TokamakMagneticControlEnv:
         current = torch.cat([result.state.pfc_currents, result.state.sol_currents], dim=1).to(torch.float32)
         deriv = torch.cat([result.state.pfc_current_derivs, result.state.sol_current_derivs], dim=1).to(torch.float32)
         current_over_limit = torch.max(torch.clamp(torch.abs(current) - self.current_limits[None, :], min=0.0), dim=1).values
-        der_margin = torch.min(1.0 - torch.abs(deriv) / self.derivative_limits[None, :], dim=1).values
+        derivative_usage = torch.max(torch.abs(deriv) / torch.where(torch.isfinite(self.derivative_limits) & (self.derivative_limits > 0.0), self.derivative_limits, torch.ones_like(self.derivative_limits))[None, :], dim=1).values
         boundary_points = result.boundary.points[:, : int(self.config.sim.angles)].to(torch.float32)
         ref = ref_points[:, : int(self.config.sim.angles)].to(torch.float32)
         found = result.boundary.found.to(torch.bool)
         terminated = ~found
-        rb = self.reward_fn(ip=result.state.Ip.to(torch.float32), ip_ref=ip_ref, boundary_points=boundary_points, reference_points=ref, action=action, previous_action=self.previous_action, current_over_limit_a=current_over_limit, derivative_margin=der_margin, boundary_found=found, terminated=terminated)
+        rb = self.reward_fn(ip=result.state.Ip.to(torch.float32), ip_ref=ip_ref, boundary_points=boundary_points, reference_points=ref, action=action, previous_action=self.previous_action, current_over_limit_a=current_over_limit, derivative_usage=derivative_usage, boundary_found=found, terminated=terminated)
         return rb.reward, terminated, {"reward_components": {k: v.detach().cpu().numpy() for k, v in rb.components.items()}}
 
     def _reward_cpu(self, action: Tensor) -> tuple[Tensor, Tensor, dict[str, object]]:
@@ -295,10 +328,10 @@ class TokamakMagneticControlEnv:
         current_t = torch.as_tensor(np.stack(currents), dtype=torch.float32, device=self.device)
         deriv_t = torch.as_tensor(np.stack(derivs), dtype=torch.float32, device=self.device)
         current_over_limit = torch.max(torch.clamp(torch.abs(current_t) - self.current_limits[None, :], min=0.0), dim=1).values
-        der_margin = torch.min(1.0 - torch.abs(deriv_t) / self.derivative_limits[None, :], dim=1).values
+        derivative_usage = torch.max(torch.abs(deriv_t) / torch.where(torch.isfinite(self.derivative_limits) & (self.derivative_limits > 0.0), self.derivative_limits, torch.ones_like(self.derivative_limits))[None, :], dim=1).values
         found_t = torch.as_tensor(found, dtype=torch.bool, device=self.device)
         terminated = ~found_t
-        rb = self.reward_fn(ip=torch.as_tensor(ips, dtype=torch.float32, device=self.device), ip_ref=ip_ref, boundary_points=torch.nan_to_num(torch.as_tensor(np.stack(boundary_points), dtype=torch.float32, device=self.device)), reference_points=ref_points[:, : int(self.config.sim.angles)].to(torch.float32), action=action, previous_action=self.previous_action, current_over_limit_a=current_over_limit, derivative_margin=der_margin, boundary_found=found_t, terminated=terminated)
+        rb = self.reward_fn(ip=torch.as_tensor(ips, dtype=torch.float32, device=self.device), ip_ref=ip_ref, boundary_points=torch.nan_to_num(torch.as_tensor(np.stack(boundary_points), dtype=torch.float32, device=self.device)), reference_points=ref_points[:, : int(self.config.sim.angles)].to(torch.float32), action=action, previous_action=self.previous_action, current_over_limit_a=current_over_limit, derivative_usage=derivative_usage, boundary_found=found_t, terminated=terminated)
         return rb.reward, terminated, {"reward_components": {k: v.detach().cpu().numpy() for k, v in rb.components.items()}}
 
     def export_schema(self) -> dict[str, object]:
@@ -326,6 +359,90 @@ class TokamakMagneticControlEnv:
             "current_scale": self.current_limits.detach().cpu().numpy().astype(float).tolist(),
             "derivative_scale": self.derivative_limits.detach().cpu().numpy().astype(float).tolist(),
         }
+
+
+    def state_dict(self) -> dict[str, object]:
+        if self.reference is None:
+            raise RuntimeError("environment has not been reset")
+        state: dict[str, object] = {
+            "batch_size": self.batch_size,
+            "compute_backend": self.config.sim.compute_backend,
+            "rng_state": self.rng.bit_generator.state,
+            "reference": {
+                "ip": self.reference.ip.detach().cpu(),
+                "parameters": self.reference.parameters.detach().cpu(),
+                "points": self.reference.points.detach().cpu(),
+                "radii": self.reference.radii.detach().cpu(),
+                "theta": self.reference.theta.detach().cpu(),
+            },
+            "step_index": self.step_index.detach().cpu(),
+            "done": self.done.detach().cpu(),
+            "previous_action": self.previous_action.detach().cpu(),
+            "action_offset": self.action_offset.detach().cpu(),
+        }
+        if self.config.sim.compute_backend == "gpu":
+            assert self._gpu_sim is not None
+            state["gpu_sim"] = {
+                "Ip": self._gpu_sim.Ip.detach().cpu(),
+                "pfc_currents": self._gpu_sim.pfc_currents.detach().cpu(),
+                "sol_currents": self._gpu_sim.sol_currents.detach().cpu(),
+                "pfc_derivs": self._gpu_sim.pfc_derivs.detach().cpu(),
+                "sol_derivs": self._gpu_sim.sol_derivs.detach().cpu(),
+                "step_index": self._gpu_sim.step_index.detach().cpu(),
+                "time_s": self._gpu_sim.time_s.detach().cpu(),
+                "psi": self._gpu_sim.psi.detach().cpu(),
+            }
+        else:
+            state["cpu_model_states"] = [model.snapshot_state() for model in self._cpu_models]
+        return state
+
+    def load_state_dict(self, state: dict[str, object]) -> Tensor:
+        if int(state["batch_size"]) != self.batch_size:
+            raise ValueError(f"environment batch size mismatch: expected {self.batch_size}, got {state['batch_size']}")
+        if str(state["compute_backend"]) != self.config.sim.compute_backend:
+            raise ValueError(f"environment backend mismatch: expected {self.config.sim.compute_backend}, got {state['compute_backend']}")
+        self.rng = np.random.default_rng()
+        self.rng.bit_generator.state = state["rng_state"]
+        ref = state["reference"]
+        self.reference = ReferenceBatch(
+            ip=torch.as_tensor(ref["ip"], dtype=torch.float64, device=self.device),
+            parameters=torch.as_tensor(ref["parameters"], dtype=torch.float64, device=self.device),
+            points=torch.as_tensor(ref["points"], dtype=torch.float64, device=self.device),
+            radii=torch.as_tensor(ref["radii"], dtype=torch.float64, device=self.device),
+            theta=torch.as_tensor(ref["theta"], dtype=torch.float64, device=self.device),
+        )
+        self.step_index = torch.as_tensor(state["step_index"], dtype=torch.long, device=self.device).clone()
+        self.done = torch.as_tensor(state["done"], dtype=torch.bool, device=self.device).clone()
+        self.previous_action = torch.as_tensor(state["previous_action"], dtype=torch.float32, device=self.device).clone()
+        self.action_offset = torch.as_tensor(state["action_offset"], dtype=torch.float32, device=self.device).clone()
+        if self.config.sim.compute_backend == "gpu":
+            if self._gpu_sim is None:
+                self._gpu_sim = BatchedGpuTokamakSimulator(
+                    grid=self.cfg.grid,
+                    pfc=self.cfg.pfc,
+                    sol=self.cfg.sol,
+                    settings=self.cfg.physics,
+                    batch_size=self.batch_size,
+                    angles_rad=self.angles,
+                    limiter_shape=self.cfg.limiter_shape,
+                    gpu_device=self.config.sim.gpu_device,
+                )
+            sim = state["gpu_sim"]
+            self._gpu_sim.Ip = torch.as_tensor(sim["Ip"], dtype=self._gpu_sim.dtype, device=self._gpu_sim.device).clone()
+            self._gpu_sim.pfc_currents = torch.as_tensor(sim["pfc_currents"], dtype=self._gpu_sim.dtype, device=self._gpu_sim.device).clone()
+            self._gpu_sim.sol_currents = torch.as_tensor(sim["sol_currents"], dtype=self._gpu_sim.dtype, device=self._gpu_sim.device).clone()
+            self._gpu_sim.pfc_derivs = torch.as_tensor(sim["pfc_derivs"], dtype=self._gpu_sim.dtype, device=self._gpu_sim.device).clone()
+            self._gpu_sim.sol_derivs = torch.as_tensor(sim["sol_derivs"], dtype=self._gpu_sim.dtype, device=self._gpu_sim.device).clone()
+            self._gpu_sim.step_index = torch.as_tensor(sim["step_index"], dtype=torch.long, device=self._gpu_sim.device).clone()
+            self._gpu_sim.time_s = torch.as_tensor(sim["time_s"], dtype=self._gpu_sim.dtype, device=self._gpu_sim.device).clone()
+            self._gpu_sim.psi = torch.as_tensor(sim["psi"], dtype=self._gpu_sim.dtype, device=self._gpu_sim.device).clone()
+            return self._obs_gpu()
+        cpu_states = list(state["cpu_model_states"])
+        self._cpu_models = []
+        for saved in cpu_states:
+            self._cpu_models.append(self._new_cpu_model(ip=float(saved.Ip), pfc_currents=np.asarray(saved.pfc_currents), sol_currents=np.asarray(saved.sol_currents)))
+            self._cpu_models[-1].restore_state(saved)
+        return self._obs_cpu()
 
 
 def _current_limit_vector(config: ExperimentConfig, loaded_cfg) -> np.ndarray:

@@ -4,6 +4,7 @@ import csv
 import json
 import queue
 import time
+import random
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -33,7 +34,7 @@ from tokamak_rl_v2.training.replay import FIFOSequenceReplay
 
 
 class Trainer:
-    def __init__(self, config: ExperimentConfig, *, steps: int | None = None, num_envs: int | None = None, device: str | None = None, output_dir: str | Path | None = None, wandb_run=None) -> None:
+    def __init__(self, config: ExperimentConfig, *, steps: int | None = None, num_envs: int | None = None, device: str | None = None, output_dir: str | Path | None = None, wandb_run=None, resume_checkpoint: str | Path | None = None) -> None:
         self.config = config
         self.steps = int(config.training.steps if steps is None else steps)
         self.num_envs = int(config.training.num_envs if num_envs is None else num_envs)
@@ -41,6 +42,9 @@ class Trainer:
         self.output_dir = Path(config.training.output_dir if output_dir is None else output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.wandb_run = wandb_run
+        self.resume_checkpoint = Path(resume_checkpoint) if resume_checkpoint is not None else None
+        self.start_step = 0
+        self.start_updates = 0
         self._last_actor_devices: tuple[str, ...] = ()
         self._last_envs_per_worker: int | None = None
         self._last_total_training_envs: int | None = None
@@ -52,8 +56,7 @@ class Trainer:
         self.target_actor = FeedForwardGaussianActor(self.env.obs_dim, self.env.action_dim, config.network.hidden_dim).to(self.device)
         self.target_critic = RecurrentQCritic(self.env.obs_dim, self.env.action_dim, config.network.critic_hidden_dim, config.network.critic_mlp_hidden_dim).to(self.device)
         self.learner = MaximumAPosterioriPolicyOptimiser(actor=self.actor, critic=self.critic, target_actor=self.target_actor, target_critic=self.target_critic, config=config.learner, device=self.device)
-        capacity = int(config.learner.replay_capacity_episodes) * int(config.sim.max_episode_steps)
-        self.replay = FIFOSequenceReplay(capacity_steps=capacity, obs_dim=self.env.obs_dim, action_dim=self.env.action_dim, device=self.device)
+        self.replay = FIFOSequenceReplay(capacity_episodes=int(config.learner.replay_capacity_episodes), max_episode_steps=int(config.sim.max_episode_steps), active_envs=self.num_envs, obs_dim=self.env.obs_dim, action_dim=self.env.action_dim, device=self.device)
         self.schema = self.env.export_schema()
         self.normalization = self.env.normalization()
         self.best_eval = -float("inf")
@@ -84,23 +87,23 @@ class Trainer:
         metrics_path = self.output_dir / "metrics.json"
         rewards_path = self.output_dir / "reward_components.csv"
         with losses_path.open("w", newline="", encoding="utf-8") as loss_f, rewards_path.open("w", newline="", encoding="utf-8") as reward_f:
-            loss_writer = csv.DictWriter(loss_f, fieldnames=["step", "critic_loss", "actor_loss", "mean_kl", "std_kl", "q_mean", "target_q_mean", "env_steps_per_second"])
+            loss_writer = csv.DictWriter(loss_f, fieldnames=["step", "critic_loss", "actor_loss", "mean_kl", "std_kl", "q_mean", "target_q_mean", "actor_mle_loss", "actor_param_delta_norm", "action_mean_abs", "action_std_mean", "sampled_q_spread", "policy_weight_entropy", "env_steps_per_second"])
             reward_writer = None
             loss_writer.writeheader()
             obs = self.env.reset()
+            if self.resume_checkpoint is not None:
+                obs = self._load_checkpoint(self.resume_checkpoint)
             start = time.time()
-            updates = 0
-            progress = tqdm(total=self.steps, desc="train", unit="step", dynamic_ncols=True)
-            for step in range(1, self.steps + 1):
+            updates = int(self.start_updates)
+            progress = tqdm(total=max(self.steps - self.start_step, 0), desc="train", unit="step", dynamic_ncols=True)
+            for step in range(self.start_step + 1, self.steps + 1):
                 with torch.no_grad():
                     action, _logp, _mean = self.actor.sample(obs)
                 batch_step = self.env.step(action)
                 discount = torch.full((self.num_envs,), float(self.config.learner.discount), dtype=torch.float32, device=self.device)
                 done = batch_step.terminated | batch_step.truncated
                 self.replay.add_batch(obs, action, batch_step.reward, discount, batch_step.obs, done)
-                obs = batch_step.obs
-                if bool(torch.any(done).item()):
-                    obs = self.env.reset()
+                obs = self.env.reset_indices(done) if bool(torch.any(done).item()) else batch_step.obs
                 metrics = None
                 if self.replay.ready(self.config.learner.unroll_length, self.config.learner.batch_size) and step % int(self.config.learner.rollout_chunk_length) == 0:
                     for _ in range(int(self.config.learner.updates_per_rollout_chunk)):
@@ -135,7 +138,7 @@ class Trainer:
                 progress.update(1)
                 progress.set_postfix(replay=self.replay.size, updates=updates, reward=f"{float(batch_step.reward.mean().detach().cpu()):.4f}", refresh=False)
             progress.close()
-        final = {"steps": self.steps, "updates": updates, "best_eval": self.best_eval, "best_eval_details": self.best_eval_details, "device": str(self.device), "output_dir": str(self.output_dir)}
+        final = {"start_step": self.start_step, "steps": self.steps, "updates": updates, "best_eval": self.best_eval, "best_eval_details": self.best_eval_details, "device": str(self.device), "output_dir": str(self.output_dir)}
         self._save_checkpoint("final.pt", step=self.steps, updates=updates)
         self._export("exports/final_actor", step=self.steps, updates=updates, eval_score=self.best_eval)
         metrics_path.write_text(json.dumps(final, indent=2), encoding="utf-8")
@@ -150,6 +153,8 @@ class Trainer:
         self._last_actor_devices = actor_devices
         self._last_envs_per_worker = envs_per_worker
         self._last_total_training_envs = envs_per_worker * worker_count
+        if self.resume_checkpoint is not None:
+            self._load_checkpoint(self.resume_checkpoint, restore_env=False)
         processes, param_queues, data_q, stop = start_actor_workers(
             config=self.config,
             actor_state_dict=self.actor.state_dict(),
@@ -162,17 +167,17 @@ class Trainer:
         losses_path = self.output_dir / "losses.csv"
         metrics_path = self.output_dir / "metrics.json"
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        updates = 0
-        env_steps = 0
+        updates = int(self.start_updates)
+        env_steps = int(self.start_step)
         last_checkpoint_step = 0
         last_eval_step = 0
         worker_rollout_counts = {str(index): 0 for index in range(worker_count)}
         start = time.time()
         try:
             with losses_path.open("w", newline="", encoding="utf-8") as loss_f:
-                loss_writer = csv.DictWriter(loss_f, fieldnames=["step", "critic_loss", "actor_loss", "mean_kl", "std_kl", "q_mean", "target_q_mean", "env_steps_per_second"])
+                loss_writer = csv.DictWriter(loss_f, fieldnames=["step", "critic_loss", "actor_loss", "mean_kl", "std_kl", "q_mean", "target_q_mean", "actor_mle_loss", "actor_param_delta_norm", "action_mean_abs", "action_std_mean", "sampled_q_spread", "policy_weight_entropy", "env_steps_per_second"])
                 loss_writer.writeheader()
-                progress = tqdm(total=self.steps, desc="distributed-train", unit="step", dynamic_ncols=True)
+                progress = tqdm(total=max(self.steps - self.start_step, 0), desc="distributed-train", unit="step", dynamic_ncols=True)
                 while env_steps < self.steps:
                     self._raise_for_dead_actor_workers(processes, actor_devices)
                     try:
@@ -184,6 +189,8 @@ class Trainer:
                     worker_index = str(int(payload.get("worker_index", -1)))
                     if worker_index in worker_rollout_counts:
                         worker_rollout_counts[worker_index] += T * B
+                    worker_lane_offset = int(payload.get("worker_index", 0)) * envs_per_worker
+                    worker_lanes = list(range(worker_lane_offset, worker_lane_offset + B))
                     for t in range(T):
                         self.replay.add_batch(
                             torch.as_tensor(payload["obs"][t], dtype=torch.float32, device=self.device),
@@ -192,6 +199,7 @@ class Trainer:
                             torch.as_tensor(payload["discount"][t], dtype=torch.float32, device=self.device),
                             torch.as_tensor(payload["next_obs"][t], dtype=torch.float32, device=self.device),
                             torch.as_tensor(payload["done"][t], dtype=torch.bool, device=self.device),
+                            lane_indices=worker_lanes,
                         )
                     env_steps += T * B
                     while self.replay.ready(self.config.learner.unroll_length, self.config.learner.batch_size):
@@ -227,6 +235,7 @@ class Trainer:
         self._save_checkpoint("final.pt", step=env_steps, updates=updates)
         self._export("exports/final_actor", step=env_steps, updates=updates, eval_score=None)
         final = {
+            "start_step": self.start_step,
             "steps": env_steps,
             "updates": updates,
             "best_eval": self.best_eval,
@@ -292,31 +301,39 @@ class Trainer:
     def evaluate_detailed(self, *, episodes: int, max_steps: int, policy: Literal["actor", "no_control"] = "actor") -> dict[str, float]:
         if policy not in {"actor", "no_control"}:
             raise ValueError(f"unsupported evaluation policy: {policy}")
-        env = TokamakMagneticControlEnv(self.config, batch_size=max(1, min(int(episodes), self.num_envs)), device=self.device, seed=int(self.config.training.seed) + 100000)
+        batch_size = max(1, min(int(episodes), self.num_envs))
+        env = TokamakMagneticControlEnv(self.config, batch_size=batch_size, device=self.device, seed=int(self.config.training.seed) + 100000)
+        obs = env.reset()
         returns: list[float] = []
+        totals = torch.zeros((env.batch_size,), dtype=torch.float32, device=self.device)
+        steps = torch.zeros((env.batch_size,), dtype=torch.long, device=self.device)
         component_values: dict[str, list[float]] = {}
-        remaining = int(episodes)
-        while remaining > 0:
-            obs = env.reset()
-            total = torch.zeros((env.batch_size,), dtype=torch.float32, device=self.device)
-            for _ in range(int(max_steps)):
-                if policy == "actor":
-                    action = self.actor.deterministic(obs)
-                else:
-                    action = torch.zeros((env.batch_size, env.action_dim), dtype=torch.float32, device=self.device)
-                out = env.step(action)
-                total += out.reward
-                comps = out.info.get("reward_components", {}) if isinstance(out.info, dict) else {}
-                if isinstance(comps, dict):
-                    for name, value in comps.items():
-                        arr = np.asarray(value, dtype=float).reshape(-1)
-                        if arr.size:
-                            component_values.setdefault(str(name), []).extend(arr[np.isfinite(arr)].astype(float).tolist())
+        while len(returns) < int(episodes):
+            if policy == "actor":
+                action = self.actor.deterministic(obs)
+            else:
+                action = torch.zeros((env.batch_size, env.action_dim), dtype=torch.float32, device=self.device)
+            out = env.step(action)
+            totals += out.reward
+            steps += 1
+            comps = out.info.get("reward_components", {}) if isinstance(out.info, dict) else {}
+            if isinstance(comps, dict):
+                for name, value in comps.items():
+                    arr = np.asarray(value, dtype=float).reshape(-1)
+                    if arr.size:
+                        component_values.setdefault(str(name), []).extend(arr[np.isfinite(arr)].astype(float).tolist())
+            done = out.terminated | out.truncated | (steps >= int(max_steps))
+            if bool(torch.any(done).item()):
+                done_cpu = done.detach().cpu().numpy().astype(bool)
+                totals_cpu = totals.detach().cpu().numpy().astype(float)
+                for index, is_done in enumerate(done_cpu):
+                    if is_done and len(returns) < int(episodes):
+                        returns.append(float(totals_cpu[index]))
+                totals = torch.where(done, torch.zeros_like(totals), totals)
+                steps = torch.where(done, torch.zeros_like(steps), steps)
+                obs = env.reset_indices(done) if len(returns) < int(episodes) else out.obs
+            else:
                 obs = out.obs
-                if bool(torch.all(out.terminated | out.truncated).item()):
-                    break
-            returns.extend(total.detach().cpu().numpy().astype(float).tolist())
-            remaining -= env.batch_size
         selected_returns = np.asarray(returns[: int(episodes)], dtype=float)
         metrics: dict[str, float] = {"mean_return": float(np.nanmean(selected_returns)) if selected_returns.size else float("nan")}
         for name, values in component_values.items():
@@ -338,18 +355,118 @@ class Trainer:
         ckpt_dir = self.output_dir / "checkpoints"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
         path = ckpt_dir / name
+        rng_state: dict[str, object] = {
+            "torch": torch.get_rng_state(),
+            "numpy": np.random.get_state(),
+            "python": random.getstate(),
+        }
+        if torch.cuda.is_available():
+            rng_state["torch_cuda"] = torch.cuda.get_rng_state_all()
+        try:
+            env_state = self.env.state_dict()
+        except RuntimeError:
+            env_state = None
         torch.save({
+            "checkpoint_version": 2,
             "actor_state_dict": self.actor.state_dict(),
             "critic_state_dict": self.critic.state_dict(),
             "target_actor_state_dict": self.target_actor.state_dict(),
             "target_critic_state_dict": self.target_critic.state_dict(),
+            "learner_state": self.learner.state_dict(),
+            "replay_state": self.replay.state_dict(),
+            "env_state": env_state,
+            "rng_state": rng_state,
+            "best_eval": self.best_eval,
+            "best_eval_details": self.best_eval_details,
             "schema": self.schema,
             "normalization": self.normalization,
             "metadata": self._metadata(step=step, updates=updates),
             "network": asdict(self.config.network),
             "learner": asdict(self.config.learner),
+            "reward": asdict(self.config.reward),
+            "sim": self._sim_resume_fragment(),
+            "training_state": {"step": int(step), "updates": int(updates)},
         }, path)
         return path
+
+    def _load_checkpoint(self, path: str | Path, *, restore_env: bool = True) -> torch.Tensor:
+        checkpoint_path = Path(path)
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"resume checkpoint does not exist: {checkpoint_path}")
+        data = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        if int(data.get("checkpoint_version", 0)) < 2:
+            raise ValueError(f"checkpoint is not resumable by this trainer: {checkpoint_path}")
+        self._validate_checkpoint(data, checkpoint_path)
+        self.actor.load_state_dict(data["actor_state_dict"])
+        self.critic.load_state_dict(data["critic_state_dict"])
+        self.target_actor.load_state_dict(data["target_actor_state_dict"])
+        self.target_critic.load_state_dict(data["target_critic_state_dict"])
+        self.learner.load_state_dict(data["learner_state"])
+        self.replay.load_state_dict(data["replay_state"])
+        self.best_eval = float(data.get("best_eval", -float("inf")))
+        raw_details = data.get("best_eval_details", {})
+        self.best_eval_details = dict(raw_details) if isinstance(raw_details, dict) else {}
+        training_state = data.get("training_state", {})
+        self.start_step = int(training_state.get("step", data.get("metadata", {}).get("step", 0)))
+        self.start_updates = int(training_state.get("updates", data.get("metadata", {}).get("updates", 0)))
+        if self.steps <= self.start_step:
+            raise ValueError(f"resume target steps must be greater than checkpoint step: target={self.steps}, checkpoint={self.start_step}")
+        rng = data.get("rng_state", {})
+        if isinstance(rng, dict):
+            if "torch" in rng:
+                torch.set_rng_state(rng["torch"].detach().cpu())
+            if "torch_cuda" in rng and torch.cuda.is_available():
+                try:
+                    torch.cuda.set_rng_state_all(rng["torch_cuda"])
+                except Exception:
+                    pass
+            if "numpy" in rng:
+                np.random.set_state(rng["numpy"])
+            if "python" in rng:
+                random.setstate(rng["python"])
+        if restore_env:
+            if data.get("env_state") is None:
+                raise ValueError(f"checkpoint does not contain environment state and cannot be exactly resumed: {checkpoint_path}")
+            return self.env.load_state_dict(data["env_state"])
+        return self.env.reset()
+
+    def _validate_checkpoint(self, data: dict[str, object], path: Path) -> None:
+        if data.get("schema", {}).get("observation_kind") != self.schema.get("observation_kind"):
+            raise ValueError(f"checkpoint observation schema mismatch: {path}")
+        if int(data.get("schema", {}).get("obs_dim", -1)) != int(self.schema.get("obs_dim", -2)):
+            raise ValueError(f"checkpoint observation dimension mismatch: {path}")
+        if int(data.get("schema", {}).get("action_dim", -1)) != int(self.schema.get("action_dim", -2)):
+            raise ValueError(f"checkpoint action dimension mismatch: {path}")
+        expected = {
+            "network": asdict(self.config.network),
+            "learner": asdict(self.config.learner),
+            "reward": asdict(self.config.reward),
+            "sim": self._sim_resume_fragment(),
+        }
+        for name, value in expected.items():
+            if data.get(name) != value:
+                raise ValueError(f"checkpoint {name} config mismatch: {path}")
+
+    def _sim_resume_fragment(self) -> object:
+        fragment = self._config_fragment(self.config.sim)
+        if isinstance(fragment, dict) and "gpu_device" in fragment:
+            fragment = dict(fragment)
+            fragment["gpu_device"] = "<runtime>"
+        return fragment
+
+    @staticmethod
+    def _config_fragment(obj) -> object:
+        def convert(value):
+            if isinstance(value, Path):
+                return str(value)
+            if is_dataclass(value):
+                return {k: convert(v) for k, v in asdict(value).items()}
+            if isinstance(value, dict):
+                return {str(k): convert(v) for k, v in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [convert(v) for v in value]
+            return value
+        return convert(obj)
 
     def _export(self, relative: str, *, step: int, updates: int, eval_score: float | None) -> Path:
         return export_deterministic_actor(actor=self.actor, export_dir=self.output_dir / relative, schema=self.schema, normalization=self.normalization, metadata=self._metadata(step=step, updates=updates, eval_score=eval_score))

@@ -14,6 +14,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--num-envs", type=int, default=None)
     ap.add_argument("--device", default=None)
     ap.add_argument("--output-dir", default=None)
+    ap.add_argument("--resume-checkpoint", default=None)
     ap.add_argument("--sim-compute-backend", choices=("cpu", "gpu"), default=None)
     ap.add_argument("--sim-gpu-device", default=None)
     ap.add_argument("--batch-size", type=int, default=None)
@@ -81,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.wandb and args.wandb_mode != "disabled":
         import wandb
         wandb_run = wandb.init(project=args.wandb_project, name=args.wandb_name or cfg.name, mode=args.wandb_mode, config={"experiment": cfg.name})
-    trainer = Trainer(cfg, steps=args.steps, num_envs=args.num_envs, device=args.device, output_dir=args.output_dir, wandb_run=wandb_run)
+    trainer = Trainer(cfg, steps=args.steps, num_envs=args.num_envs, device=args.device, output_dir=args.output_dir, wandb_run=wandb_run, resume_checkpoint=args.resume_checkpoint)
     result = trainer.train()
     if wandb_run is not None:
         wandb_run.finish()

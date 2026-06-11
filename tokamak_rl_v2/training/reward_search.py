@@ -69,6 +69,7 @@ WORKER_ARG_NAMES = [
     "require_no_control_improvement",
     "stage_max_shape_degradation_m",
     "stage_min_ip_improvement_a",
+    "resume_checkpoint",
 ]
 
 
@@ -78,6 +79,7 @@ class RewardCandidate:
     reward: RewardConfig
     source: str = "grid"
     parent: int | None = None
+    resume_checkpoint: str | None = None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -217,7 +219,7 @@ def _run_successive_halving(*, base: ExperimentConfig, args: argparse.Namespace,
             promo = {"stage": stage_name, "candidate": row.get("candidate"), "rank": rank, "promoted": int(int(row.get("candidate", -1)) in promoted_ids), "promotion_reason": row.get("promotion_reason", ""), "eval.mean_return": row.get("eval.mean_return", ""), "eval.shape_error_mean_m": row.get("eval.shape_error_mean_m", ""), "eval.ip_error_a": row.get("eval.ip_error_a", ""), "eval.current_over_limit_a": row.get("eval.current_over_limit_a", ""), "eval.boundary_found": row.get("eval.boundary_found", ""), "eval.shape_improvement_over_no_control_m": row.get("eval.shape_improvement_over_no_control_m", ""), "eval.ip_improvement_over_no_control_a": row.get("eval.ip_improvement_over_no_control_a", ""), "eval.improvement_over_no_control": row.get("eval.improvement_over_no_control", "")}
             promotion_rows.append(promo)
         _write_results(out / "promotion_history.csv", promotion_rows)
-        promoted_candidates = [_candidate_by_index(active, int(row["candidate"])) for row in promoted_rows]
+        promoted_candidates = [_candidate_from_row(row) for row in promoted_rows]
         if stage_idx == 1 and args.refine_midpoints:
             refined = _refine_candidates(promoted_candidates[: int(args.refine_top_k)], value_grid=value_grid, existing={_reward_key(c.reward) for c in list(candidates) + promoted_candidates}, next_index=next_candidate_index)
             next_candidate_index += len(refined)
@@ -350,6 +352,18 @@ def _write_promotion_artifacts(*, out: Path, stage_name: str, ranked: Sequence[d
     _write_results(out / stage_name / "promoted_candidates.csv", [row for row in ranked if int(row.get("candidate", -1)) in promoted_ids])
 
 
+def _validate_resume_checkpoints(candidates: Sequence[RewardCandidate], *, stage_name: str) -> None:
+    missing = []
+    for candidate in candidates:
+        if not candidate.resume_checkpoint:
+            missing.append(f"candidate {candidate.index}: no checkpoint recorded")
+            continue
+        if not Path(candidate.resume_checkpoint).exists():
+            missing.append(f"candidate {candidate.index}: {candidate.resume_checkpoint}")
+    if missing:
+        raise FileNotFoundError(f"{stage_name} requires valid promoted checkpoints before launching compute: " + "; ".join(missing))
+
+
 def _run_stage_candidates(
     *,
     base: ExperimentConfig,
@@ -364,6 +378,8 @@ def _run_stage_candidates(
     aggregate_results_path: Path,
     aggregate_rows: list[dict[str, object]],
 ) -> list[dict[str, object]]:
+    if int(stage_index) > 1:
+        _validate_resume_checkpoints(candidates, stage_name=stage_name)
     if int(args.parallel_candidates) <= 1:
         return _run_stage_candidates_sequential(
             base=base,
@@ -539,7 +555,7 @@ def _launch_candidate_worker(
     payload = {
         "config": args.config,
         "args": worker_args,
-        "candidate": {"index": candidate.index, "reward": asdict(candidate.reward), "source": candidate.source, "parent": candidate.parent},
+        "candidate": {"index": candidate.index, "reward": asdict(candidate.reward), "source": candidate.source, "parent": candidate.parent, "resume_checkpoint": candidate.resume_checkpoint},
         "candidate_dir": str(candidate_dir),
         "stage_name": stage_name,
         "stage_index": int(stage_index),
@@ -611,6 +627,7 @@ def _run_worker_task(task_path: Path) -> int:
         reward=RewardConfig(**candidate_data["reward"]),
         source=str(candidate_data.get("source", "grid")),
         parent=candidate_data.get("parent"),
+        resume_checkpoint=candidate_data.get("resume_checkpoint"),
     )
     candidate_dir = Path(task["candidate_dir"])
     result_path = Path(task["result_path"])
@@ -635,12 +652,19 @@ def _train_candidate(*, base: ExperimentConfig, args: argparse.Namespace, candid
     cfg = replace(base, reward=candidate.reward, training=training)
     wandb_run = _start_wandb(args=args, cfg=cfg, candidate=candidate, stage_name=stage_name, stage_index=stage_index)
     try:
-        result = Trainer(cfg, steps=int(steps), num_envs=args.num_envs, device=args.device, output_dir=candidate_dir, wandb_run=wandb_run).train()
+        result = Trainer(cfg, steps=int(steps), num_envs=args.num_envs, device=args.device, output_dir=candidate_dir, wandb_run=wandb_run, resume_checkpoint=candidate.resume_checkpoint).train()
         summary = _summarize_reward_components(candidate_dir / "reward_components.csv")
         eval_metrics = _best_eval_metrics(result)
         score = float(eval_metrics.get("mean_return", result.get("best_eval", -float("inf"))))
+        checkpoint_path = candidate_dir / "checkpoints" / "final.pt"
+        best_checkpoint_path = candidate_dir / "checkpoints" / "best.pt"
         row: dict[str, object] = {"status": "ok", "score": score, **{f"metric.{k}": v for k, v in result.items() if not isinstance(v, dict)}, **{f"eval.{k}": v for k, v in eval_metrics.items()}, **summary}
         row["stage_index"] = int(stage_index)
+        row["resumed_from_checkpoint"] = candidate.resume_checkpoint or ""
+        row["start_step"] = int(result.get("start_step", 0))
+        row["final_step"] = int(result.get("steps", steps))
+        row["checkpoint_path"] = str(checkpoint_path)
+        row["best_checkpoint_path"] = str(best_checkpoint_path if best_checkpoint_path.exists() else checkpoint_path)
         _attach_baseline_improvement(row, baseline_row=baseline_row, require_no_control_improvement=bool(getattr(args, "require_no_control_improvement", False)), promotion_policy=promotion_policy)
         if wandb_run is not None:
             wandb_run.summary["search/promotion_reason"] = row["promotion_reason"]
@@ -687,6 +711,7 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--stage-eval-episodes", default="16,32,64")
     ap.add_argument("--stage-max-shape-degradation-m", default=None)
     ap.add_argument("--stage-min-ip-improvement-a", default=None)
+    ap.add_argument("--resume-checkpoint", default=None)
     ap.add_argument("--baseline-policy", choices=("no_control",), default="no_control")
     ap.add_argument("--refine-top-k", type=int, default=4)
     ap.add_argument("--refine-midpoints", action="store_true")
@@ -952,27 +977,34 @@ def _evaluate_no_control(*, config: ExperimentConfig, args: argparse.Namespace, 
     device = _resolve_torch_device(args.device or config.training.device)
     batch_size = max(1, min(int(episodes), int(args.num_envs or config.training.num_envs)))
     env = TokamakMagneticControlEnv(config, batch_size=batch_size, device=device, seed=int(config.training.seed) + 100000)
+    obs = env.reset()
     returns: list[float] = []
+    totals = torch.zeros((env.batch_size,), dtype=torch.float32, device=device)
+    steps = torch.zeros((env.batch_size,), dtype=torch.long, device=device)
     component_values: dict[str, list[float]] = {}
-    remaining = int(episodes)
-    while remaining > 0:
-        obs = env.reset()
-        total = torch.zeros((env.batch_size,), dtype=torch.float32, device=device)
-        for _ in range(int(max_steps)):
-            action = torch.zeros((env.batch_size, env.action_dim), dtype=torch.float32, device=device)
-            out = env.step(action)
-            total += out.reward
-            comps = out.info.get("reward_components", {}) if isinstance(out.info, dict) else {}
-            if isinstance(comps, dict):
-                for name, value in comps.items():
-                    arr = np.asarray(value, dtype=float).reshape(-1)
-                    if arr.size:
-                        component_values.setdefault(str(name), []).extend(arr[np.isfinite(arr)].astype(float).tolist())
+    while len(returns) < int(episodes):
+        action = torch.zeros((env.batch_size, env.action_dim), dtype=torch.float32, device=device)
+        out = env.step(action)
+        totals += out.reward
+        steps += 1
+        comps = out.info.get("reward_components", {}) if isinstance(out.info, dict) else {}
+        if isinstance(comps, dict):
+            for name, value in comps.items():
+                arr = np.asarray(value, dtype=float).reshape(-1)
+                if arr.size:
+                    component_values.setdefault(str(name), []).extend(arr[np.isfinite(arr)].astype(float).tolist())
+        done = out.terminated | out.truncated | (steps >= int(max_steps))
+        if bool(torch.any(done).item()):
+            done_cpu = done.detach().cpu().numpy().astype(bool)
+            totals_cpu = totals.detach().cpu().numpy().astype(float)
+            for index, is_done in enumerate(done_cpu):
+                if is_done and len(returns) < int(episodes):
+                    returns.append(float(totals_cpu[index]))
+            totals = torch.where(done, torch.zeros_like(totals), totals)
+            steps = torch.where(done, torch.zeros_like(steps), steps)
+            obs = env.reset_indices(done) if len(returns) < int(episodes) else out.obs
+        else:
             obs = out.obs
-            if bool(torch.all(out.terminated | out.truncated).item()):
-                break
-        returns.extend(total.detach().cpu().numpy().astype(float).tolist())
-        remaining -= env.batch_size
     selected_returns = np.asarray(returns[: int(episodes)], dtype=float)
     metrics: dict[str, float] = {"mean_return": float(np.nanmean(selected_returns)) if selected_returns.size else float("nan")}
     for name, values in component_values.items():
@@ -980,7 +1012,6 @@ def _evaluate_no_control(*, config: ExperimentConfig, args: argparse.Namespace, 
         if arr.size:
             metrics[name] = float(np.nanmean(arr))
     return metrics
-
 
 def _resolve_torch_device(value: str) -> torch.device:
     if value == "auto":
@@ -1009,7 +1040,7 @@ def _start_wandb(*, args: argparse.Namespace, cfg: ExperimentConfig, candidate: 
 
 
 def _candidate_row(candidate: RewardCandidate, *, stage: str, candidate_dir: Path) -> dict[str, object]:
-    return {"candidate": candidate.index, "stage": stage, "status": "pending", "candidate_source": candidate.source, "candidate_parent": "" if candidate.parent is None else candidate.parent, "candidate_dir": str(candidate_dir), **{f"reward.{k}": v for k, v in asdict(candidate.reward).items()}}
+    return {"candidate": candidate.index, "stage": stage, "status": "pending", "candidate_source": candidate.source, "candidate_parent": "" if candidate.parent is None else candidate.parent, "candidate_dir": str(candidate_dir), "resumed_from_checkpoint": candidate.resume_checkpoint or "", **{f"reward.{k}": v for k, v in asdict(candidate.reward).items()}}
 
 
 def _candidate_by_index(candidates: Sequence[RewardCandidate], index: int) -> RewardCandidate:
@@ -1025,7 +1056,8 @@ def _reward_from_row(row: dict[str, object]) -> RewardConfig:
 
 
 def _candidate_from_row(row: dict[str, object]) -> RewardCandidate:
-    return RewardCandidate(index=int(row["candidate"]), reward=_reward_from_row(row), source=str(row.get("candidate_source", "resume")), parent=_optional_int(row.get("candidate_parent")))
+    checkpoint = str(row.get("checkpoint_path") or row.get("best_checkpoint_path") or "").strip()
+    return RewardCandidate(index=int(row["candidate"]), reward=_reward_from_row(row), source=str(row.get("candidate_source", "resume")), parent=_optional_int(row.get("candidate_parent")), resume_checkpoint=checkpoint or None)
 
 
 def _reward_key(reward: RewardConfig) -> tuple[float, ...]:

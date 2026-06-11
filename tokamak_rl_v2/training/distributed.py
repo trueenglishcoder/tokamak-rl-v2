@@ -112,9 +112,7 @@ def _actor_loop(
             chunk["discount"].append(torch.full_like(out.reward.detach().cpu(), float(worker_config.learner.discount)))
             chunk["next_obs"].append(out.obs.detach().cpu())
             chunk["done"].append(done.detach().cpu())
-            obs = out.obs
-            if bool(torch.any(done).item()):
-                obs = env.reset()
+            obs = env.reset_indices(done) if bool(torch.any(done).item()) else out.obs
         payload = {k: torch.stack(v, dim=0).numpy() for k, v in chunk.items()}
         payload["worker_index"] = int(worker_index)
         payload["worker_device"] = str(dev)
