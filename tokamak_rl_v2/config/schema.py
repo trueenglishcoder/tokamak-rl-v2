@@ -90,6 +90,8 @@ class RewardConfig:
     delta_action_penalty_weight: float = 0.01
     terminal_reward: float = -5.0
     reward_scale: float = 0.01
+    tracking_combiner: str = "smooth_min"
+    shape_aggregator: str = "smooth_worst"
 
 
 @dataclass(frozen=True, slots=True)

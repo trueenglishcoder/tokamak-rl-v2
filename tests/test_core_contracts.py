@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import csv
 import json
 from pathlib import Path
 
@@ -226,10 +227,52 @@ def test_reward_search_weight_grid_generates_expected_candidates(tmp_path: Path)
     assert manifest["reward_values"]["ip_weight"] == [1.5, 3.0]
 
 
+
+
+def test_control_discovery_preset_is_broad_and_not_local_grid(tmp_path: Path) -> None:
+    out = tmp_path / "control_discovery"
+    code = reward_search_main([
+        "--config", str(CONFIG),
+        "--output-dir", str(out),
+        "--strategy", "successive_halving",
+        "--candidate-preset", "control_discovery",
+        "--dry-run",
+        "--stage-steps", "2,3,4",
+        "--stage-keep", "4,2,1",
+        "--stage-eval-episodes", "1,1,1",
+    ])
+    assert code == 0
+    manifest = json.loads((out / "search_manifest.json").read_text())
+    assert manifest["candidate_preset"] == "control_discovery"
+    assert manifest["candidate_count"] >= 24
+    rows = list(csv.DictReader((out / "results.csv").open()))
+    assert len({row["reward.tracking_combiner"] for row in rows}) >= 3
+    assert len({row["reward.action_penalty_weight"] for row in rows}) >= 3
+    assert len({row["reward.ip_weight"] for row in rows}) >= 6
+    assert len({row["reward.shape_bad_m"] for row in rows}) >= 6
+
+
+def test_reward_search_rejects_low_control_activity() -> None:
+    row = {
+        "status": "ok",
+        "eval.boundary_found": 1.0,
+        "eval.current_over_limit_a": 0.0,
+        "eval.shape_error_mean_m": 0.10,
+        "eval.ip_error_a": 90000.0,
+        "eval.shape_improvement_over_no_control_m": -0.001,
+        "eval.ip_improvement_over_no_control_a": 40000.0,
+        "eval.action_rms": 0.001,
+        "search.min_action_rms": 0.005,
+        "search.max_shape_error_m": 0.14,
+        "search.max_ip_error_a": 105000.0,
+    }
+    assert _promotion_reason(row) == "rejected_low_control_activity"
+    active = dict(row, **{"eval.action_rms": 0.02})
+    assert _promotion_reason(active) == "eligible"
+
 def test_export_metadata_records_update_count(tmp_path: Path) -> None:
     cfg = _small_config(tmp_path)
     result = Trainer(cfg, device="cpu", output_dir=tmp_path).train()
-    import json
     metadata = json.loads((tmp_path / "exports" / "final_actor" / "metadata.json").read_text())
     assert metadata["updates"] == result["updates"]
     assert metadata["updates"] > 0
@@ -327,7 +370,7 @@ def test_reward_search_ranking_uses_physical_metrics_before_return() -> None:
         },
     ]
     ranked = _rank_rows(rows)
-    assert ranked[0]["candidate"] == 1
+    assert ranked[0]["candidate"] == 0
     assert ranked[-1]["candidate"] == 2
     assert ranked[-1]["promotion_reason"] == "rejected_boundary_not_reliable"
 

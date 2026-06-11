@@ -37,6 +37,8 @@ REWARD_FIELDS = [
     "delta_action_penalty_weight",
     "terminal_reward",
     "reward_scale",
+    "tracking_combiner",
+    "shape_aggregator",
 ]
 STAGE_NAMES = ["stage_01_short", "stage_02_medium", "stage_03_final"]
 WORKER_ARG_NAMES = [
@@ -67,8 +69,13 @@ WORKER_ARG_NAMES = [
     "wandb_group",
     "wandb_mode",
     "require_no_control_improvement",
+    "ranking_profile",
     "stage_max_shape_degradation_m",
     "stage_min_ip_improvement_a",
+    "stage_max_shape_error_m",
+    "stage_max_ip_error_a",
+    "stage_min_action_rms",
+    "stage_max_action_rms",
     "resume_checkpoint",
 ]
 
@@ -92,14 +99,19 @@ def main(argv: list[str] | None = None) -> int:
     out = Path(args.output_dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
     value_grid = _reward_value_grid(base.reward, args)
-    rewards = list(_candidate_rewards_from_values(base.reward, value_grid))
+    if args.candidate_preset == "control_discovery":
+        rewards = list(_control_discovery_rewards(base.reward))
+    elif args.candidate_preset == "grid":
+        rewards = list(_candidate_rewards_from_values(base.reward, value_grid))
+    else:
+        raise ValueError(f"unsupported candidate preset: {args.candidate_preset}")
     if args.strategy == "grid" and args.search_seed is not None:
         rng = np.random.default_rng(int(args.search_seed))
         order = rng.permutation(len(rewards))
         rewards = [rewards[int(i)] for i in order]
     if args.max_candidates is not None:
         rewards = rewards[: int(args.max_candidates)]
-    candidates = [RewardCandidate(index=i, reward=reward) for i, reward in enumerate(rewards)]
+    candidates = [RewardCandidate(index=i, reward=reward, source=args.candidate_preset) for i, reward in enumerate(rewards)]
     manifest = {
         "strategy": args.strategy,
         "stage_only": args.stage_only,
@@ -114,6 +126,8 @@ def main(argv: list[str] | None = None) -> int:
         "stage_eval_episodes": _int_values(args.stage_eval_episodes) if args.strategy == "successive_halving" else None,
         "refine_top_k": int(args.refine_top_k),
         "refine_midpoints": bool(args.refine_midpoints),
+        "candidate_preset": args.candidate_preset,
+        "ranking_profile": args.ranking_profile,
         "require_no_control_improvement": bool(args.require_no_control_improvement),
         "parallel_candidates": int(args.parallel_candidates),
         "gpu_devices": _gpu_devices(args),
@@ -122,6 +136,10 @@ def main(argv: list[str] | None = None) -> int:
         "stage_input_count": args.stage_input_count,
         "stage_max_shape_degradation_m": _optional_float_values(args.stage_max_shape_degradation_m),
         "stage_min_ip_improvement_a": _optional_float_values(args.stage_min_ip_improvement_a),
+        "stage_max_shape_error_m": _optional_float_values(args.stage_max_shape_error_m),
+        "stage_max_ip_error_a": _optional_float_values(args.stage_max_ip_error_a),
+        "stage_min_action_rms": _optional_float_values(args.stage_min_action_rms),
+        "stage_max_action_rms": _optional_float_values(args.stage_max_action_rms),
     }
     (out / "search_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     if args.stage_only != "all":
@@ -612,6 +630,7 @@ def _attach_baseline_improvement(row: dict[str, object], *, baseline_row: dict[s
     row["search.require_no_control_improvement"] = int(bool(require_no_control_improvement))
     for key, value in dict(promotion_policy or {}).items():
         row[f"search.{key}"] = "" if value is None else float(value)
+    row.setdefault("search.ranking_profile", "")
     row["promotion_reason"] = _promotion_reason(row)
 
 
@@ -702,6 +721,8 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--config", required=False)
     ap.add_argument("--output-dir", default="outputs/reward_search_t15_static_boundary")
     ap.add_argument("--strategy", choices=("grid", "successive_halving"), default="grid")
+    ap.add_argument("--candidate-preset", choices=("grid", "control_discovery"), default="grid")
+    ap.add_argument("--ranking-profile", choices=("conservative", "control_discovery"), default="conservative")
     ap.add_argument("--stage-only", choices=("all", "stage_00_baseline", "stage_01_short", "stage_02_medium", "stage_03_final"), default="all")
     ap.add_argument("--baseline-results", default=None)
     ap.add_argument("--previous-stage-results", default=None)
@@ -711,6 +732,10 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--stage-eval-episodes", default="16,32,64")
     ap.add_argument("--stage-max-shape-degradation-m", default=None)
     ap.add_argument("--stage-min-ip-improvement-a", default=None)
+    ap.add_argument("--stage-max-shape-error-m", default=None)
+    ap.add_argument("--stage-max-ip-error-a", default=None)
+    ap.add_argument("--stage-min-action-rms", default=None)
+    ap.add_argument("--stage-max-action-rms", default=None)
     ap.add_argument("--resume-checkpoint", default=None)
     ap.add_argument("--baseline-policy", choices=("no_control",), default="no_control")
     ap.add_argument("--refine-top-k", type=int, default=4)
@@ -750,8 +775,14 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--ip-weight-values", default=None)
     ap.add_argument("--current-good-values", default=None)
     ap.add_argument("--current-bad-values", default=None)
+    ap.add_argument("--derivative-good-values", default=None)
+    ap.add_argument("--derivative-bad-values", default=None)
+    ap.add_argument("--action-penalty-weight-values", default=None)
+    ap.add_argument("--delta-action-penalty-weight-values", default=None)
     ap.add_argument("--terminal-reward-values", default=None)
     ap.add_argument("--reward-scale-values", default=None)
+    ap.add_argument("--tracking-combiner-values", default=None)
+    ap.add_argument("--shape-aggregator-values", default=None)
     ap.add_argument("--wandb", action="store_true")
     ap.add_argument("--wandb-project", default="tokamak-rl-v2")
     ap.add_argument("--wandb-name", default=None)
@@ -782,10 +813,16 @@ def _reward_value_grid(base: RewardConfig, args: argparse.Namespace) -> list[tup
         ("ip_weight", args.ip_weight_values),
         ("current_good_a", args.current_good_values),
         ("current_bad_a", args.current_bad_values),
+        ("derivative_good", args.derivative_good_values),
+        ("derivative_bad", args.derivative_bad_values),
+        ("action_penalty_weight", args.action_penalty_weight_values),
+        ("delta_action_penalty_weight", args.delta_action_penalty_weight_values),
         ("terminal_reward", args.terminal_reward_values),
         ("reward_scale", args.reward_scale_values),
+        ("tracking_combiner", args.tracking_combiner_values),
+        ("shape_aggregator", args.shape_aggregator_values),
     ]
-    return [(name, _float_values(raw, getattr(base, name))) for name, raw in raw_values]
+    return [(name, _values_for_field(raw, getattr(base, name))) for name, raw in raw_values]
 
 
 def _candidate_rewards(base: RewardConfig, args: argparse.Namespace) -> Iterable[RewardConfig]:
@@ -797,13 +834,69 @@ def _candidate_rewards_from_values(base: RewardConfig, values: Sequence[tuple[st
     for combo in itertools.product(*(vals for _name, vals in values)):
         data = asdict(base)
         for (name, _vals), value in zip(values, combo):
-            data[name] = float(value)
+            data[name] = value
         _validate_reward_candidate(data)
         reward = RewardConfig(**data)
         key = _reward_key(reward)
         if key not in seen:
             seen.add(key)
             yield reward
+
+
+def _control_discovery_rewards(base: RewardConfig) -> Iterable[RewardConfig]:
+    """Deterministic broad search over qualitatively different control incentives.
+
+    This is deliberately not a local grid. The regimes test whether the learner can
+    acquire Ip, preserve shape while acting, tolerate smooth but nonzero control, and
+    survive stricter shape/current gates. A candidate set that cannot act cannot win
+    because the promotion gates reject low action activity.
+    """
+    common = asdict(base)
+    regimes: list[dict[str, object]] = []
+
+    def add(**kwargs: object) -> None:
+        data = dict(common)
+        data.update(kwargs)
+        _validate_reward_candidate(data)
+        regimes.append(data)
+
+    # Ip acquisition: action is cheap, Ip matters strongly, shape is a guard not a cage.
+    for ip_bad in (80000.0, 140000.0, 220000.0):
+        for ip_weight in (6.0, 12.0):
+            add(shape_good_m=0.003, shape_bad_m=0.12, ip_good_a=1000.0, ip_bad_a=ip_bad, shape_weight=0.75, ip_weight=ip_weight, action_penalty_weight=0.0, delta_action_penalty_weight=0.0, derivative_good=0.25, derivative_bad=1.0, tracking_combiner="weighted_mean", shape_aggregator="mean", reward_scale=0.1)
+
+    # Balanced: still cheap to act, but shape quality is allowed to constrain policy.
+    for shape_bad in (0.06, 0.10):
+        for ip_weight in (4.0, 8.0):
+            add(shape_good_m=0.003, shape_bad_m=shape_bad, ip_good_a=500.0, ip_bad_a=100000.0, shape_weight=2.0, ip_weight=ip_weight, action_penalty_weight=0.001, delta_action_penalty_weight=0.0005, derivative_good=0.20, derivative_bad=1.0, tracking_combiner="geometric_mean", shape_aggregator="smooth_worst", reward_scale=0.1)
+
+    # Shape guard with real Ip pressure: this should not win unless it also controls Ip.
+    for shape_weight in (4.0, 8.0):
+        for ip_weight in (4.0, 8.0):
+            add(shape_good_m=0.003, shape_bad_m=0.045, ip_good_a=500.0, ip_bad_a=80000.0, shape_weight=shape_weight, ip_weight=ip_weight, action_penalty_weight=0.002, delta_action_penalty_weight=0.001, derivative_good=0.15, derivative_bad=1.0, tracking_combiner="smooth_min", shape_aggregator="smooth_worst", reward_scale=0.1)
+
+    # Smooth-control variants: not zero action, but penalize violent twitching.
+    for delta_weight in (0.002, 0.01):
+        for combiner in ("weighted_mean", "geometric_mean"):
+            add(shape_good_m=0.004, shape_bad_m=0.08, ip_good_a=1000.0, ip_bad_a=120000.0, shape_weight=1.5, ip_weight=8.0, action_penalty_weight=0.001, delta_action_penalty_weight=delta_weight, derivative_good=0.18, derivative_bad=0.85, tracking_combiner=combiner, shape_aggregator="mean", reward_scale=0.1)
+
+    # Stricter terminal/shape variants: check whether hard failure pressure helps.
+    for terminal in (-5.0, -20.0):
+        for ip_weight in (6.0, 10.0):
+            add(shape_good_m=0.003, shape_bad_m=0.07, ip_good_a=500.0, ip_bad_a=90000.0, shape_weight=3.0, ip_weight=ip_weight, action_penalty_weight=0.0005, delta_action_penalty_weight=0.0005, derivative_good=0.20, derivative_bad=1.0, terminal_reward=terminal, tracking_combiner="geometric_mean", shape_aggregator="smooth_worst", reward_scale=0.1)
+
+    # A few high-authority candidates: if these fail, the issue is not action penalty.
+    for shape_bad, ip_bad, ip_weight in ((0.15, 250000.0, 16.0), (0.10, 180000.0, 16.0), (0.08, 140000.0, 20.0), (0.06, 100000.0, 14.0)):
+        add(shape_good_m=0.004, shape_bad_m=shape_bad, ip_good_a=1500.0, ip_bad_a=ip_bad, shape_weight=1.0, ip_weight=ip_weight, action_penalty_weight=0.0, delta_action_penalty_weight=0.0, derivative_good=0.35, derivative_bad=1.0, tracking_combiner="weighted_mean", shape_aggregator="mean", reward_scale=0.1)
+
+    seen: set[tuple[object, ...]] = set()
+    for data in regimes:
+        reward = RewardConfig(**data)
+        key = _reward_key(reward)
+        if key in seen:
+            continue
+        seen.add(key)
+        yield reward
 
 
 def _gpu_devices(args: argparse.Namespace) -> list[str]:
@@ -813,6 +906,25 @@ def _gpu_devices(args: argparse.Namespace) -> list[str]:
     out = [part.strip() for part in str(raw).split(",") if part.strip()]
     if not out:
         raise ValueError("--gpu-devices must not be empty")
+    return out
+
+
+def _values_for_field(raw: str | None, default: object) -> list[object]:
+    if isinstance(default, str):
+        return _string_values(raw, default)
+    return _float_values(raw, float(default))
+
+
+def _string_values(raw: str | None, default: str) -> list[str]:
+    if raw is None or str(raw).strip() == "":
+        return [str(default)]
+    out: list[str] = []
+    for value in str(raw).split(","):
+        parsed = value.strip()
+        if parsed and parsed not in out:
+            out.append(parsed)
+    if not out:
+        raise ValueError("value list must not be empty")
     return out
 
 
@@ -856,26 +968,40 @@ def _stage_float_value(raw: str | None, stage_index: int) -> float | None:
 
 def _promotion_policy_for_stage(args: argparse.Namespace, stage_index: int) -> dict[str, float | None]:
     if int(stage_index) < 1:
-        return {"max_shape_degradation_m": None, "min_ip_improvement_a": None}
+        return {"max_shape_degradation_m": None, "min_ip_improvement_a": None, "max_shape_error_m": None, "max_ip_error_a": None, "min_action_rms": None, "max_action_rms": None}
     return {
         "max_shape_degradation_m": _stage_float_value(args.stage_max_shape_degradation_m, stage_index),
         "min_ip_improvement_a": _stage_float_value(args.stage_min_ip_improvement_a, stage_index),
+        "max_shape_error_m": _stage_float_value(args.stage_max_shape_error_m, stage_index),
+        "max_ip_error_a": _stage_float_value(args.stage_max_ip_error_a, stage_index),
+        "min_action_rms": _stage_float_value(args.stage_min_action_rms, stage_index),
+        "max_action_rms": _stage_float_value(args.stage_max_action_rms, stage_index),
     }
 
 
-def _validate_reward_candidate(data: dict[str, float]) -> None:
-    if data["shape_bad_m"] <= data["shape_good_m"]:
+def _validate_reward_candidate(data: dict[str, object]) -> None:
+    if float(data["shape_bad_m"]) <= float(data["shape_good_m"]):
         raise ValueError("shape_bad_m must be greater than shape_good_m")
-    if data["ip_bad_a"] <= data["ip_good_a"]:
+    if float(data["ip_bad_a"]) <= float(data["ip_good_a"]):
         raise ValueError("ip_bad_a must be greater than ip_good_a")
-    if data["current_bad_a"] <= data["current_good_a"]:
+    if float(data["current_bad_a"]) <= float(data["current_good_a"]):
         raise ValueError("current_bad_a must be greater than current_good_a")
-    if data["shape_weight"] <= 0.0:
+    if float(data["derivative_bad"]) <= float(data["derivative_good"]):
+        raise ValueError("derivative_bad must be greater than derivative_good")
+    if float(data["shape_weight"]) <= 0.0:
         raise ValueError("shape_weight must be positive")
-    if data["ip_weight"] <= 0.0:
+    if float(data["ip_weight"]) <= 0.0:
         raise ValueError("ip_weight must be positive")
-    if data["reward_scale"] <= 0.0:
+    if float(data["action_penalty_weight"]) < 0.0:
+        raise ValueError("action_penalty_weight must be non-negative")
+    if float(data["delta_action_penalty_weight"]) < 0.0:
+        raise ValueError("delta_action_penalty_weight must be non-negative")
+    if float(data["reward_scale"]) <= 0.0:
         raise ValueError("reward_scale must be positive")
+    if str(data.get("tracking_combiner", "smooth_min")) not in {"smooth_min", "weighted_mean", "geometric_mean", "product"}:
+        raise ValueError("unsupported tracking_combiner")
+    if str(data.get("shape_aggregator", "smooth_worst")) not in {"smooth_worst", "mean", "geometric_mean"}:
+        raise ValueError("unsupported shape_aggregator")
 
 
 def _rank_rows(rows: Sequence[dict[str, object]]) -> list[dict[str, object]]:
@@ -895,10 +1021,23 @@ def _ranking_key(row: dict[str, object]) -> tuple[float, ...]:
     improvement = _row_float(row, "eval.improvement_over_no_control", default=-float("inf"))
     shape_improvement = _row_float(row, "eval.shape_improvement_over_no_control_m", default=-float("inf"))
     ip_improvement = _row_float(row, "eval.ip_improvement_over_no_control_a", default=-float("inf"))
-    delta_quality = _row_float(row, "eval.delta_action_quality", default=-float("inf"))
-    action_quality = _row_float(row, "eval.action_quality", default=-float("inf"))
+    action_rms = _row_float(row, "eval.action_rms", default=0.0)
+    delta_rms = _row_float(row, "eval.delta_action_rms", default=float("inf"))
     mean_return = _row_float(row, "eval.mean_return", default=-float("inf"))
-    return (status_bad, rejected, shape, -ip_improvement, ip, -shape_improvement, -improvement, -delta_quality, -action_quality if math.isfinite(action_quality) else float("inf"), -mean_return)
+    # Control-discovery ranking: after hard eligibility gates, prefer policies that
+    # actually improve Ip and use nonzero authority, while keeping shape bounded.
+    return (
+        status_bad,
+        rejected,
+        -ip_improvement,
+        ip,
+        shape,
+        -improvement,
+        -shape_improvement,
+        -action_rms if math.isfinite(action_rms) else float("inf"),
+        delta_rms if math.isfinite(delta_rms) else float("inf"),
+        -mean_return,
+    )
 
 
 def _promotion_reason(row: dict[str, object]) -> str:
@@ -919,6 +1058,19 @@ def _promotion_reason(row: dict[str, object]) -> str:
     min_ip_improvement = _row_float(row, "search.min_ip_improvement_a", default=float("nan"))
     shape_improvement = _row_float(row, "eval.shape_improvement_over_no_control_m", default=float("nan"))
     ip_improvement = _row_float(row, "eval.ip_improvement_over_no_control_a", default=float("nan"))
+    max_shape_error = _row_float(row, "search.max_shape_error_m", default=float("nan"))
+    max_ip_error = _row_float(row, "search.max_ip_error_a", default=float("nan"))
+    min_action_rms = _row_float(row, "search.min_action_rms", default=float("nan"))
+    max_action_rms = _row_float(row, "search.max_action_rms", default=float("nan"))
+    action_rms = _row_float(row, "eval.action_rms", default=float("nan"))
+    if math.isfinite(max_shape_error) and shape > float(max_shape_error):
+        return "rejected_shape_error_above_limit"
+    if math.isfinite(max_ip_error) and ip > float(max_ip_error):
+        return "rejected_ip_error_above_limit"
+    if math.isfinite(min_action_rms) and (not math.isfinite(action_rms) or action_rms < float(min_action_rms)):
+        return "rejected_low_control_activity"
+    if math.isfinite(max_action_rms) and math.isfinite(action_rms) and action_rms > float(max_action_rms):
+        return "rejected_excessive_control_activity"
     if math.isfinite(max_shape_degradation) and math.isfinite(shape_improvement) and shape_improvement < -float(max_shape_degradation):
         return "rejected_shape_degradation_over_limit"
     if math.isfinite(min_ip_improvement) and math.isfinite(ip_improvement) and ip_improvement < float(min_ip_improvement):
@@ -934,8 +1086,8 @@ def _promotion_reason(row: dict[str, object]) -> str:
 def _refine_candidates(top_candidates: Sequence[RewardCandidate], *, value_grid: Sequence[tuple[str, list[float]]], existing: set[tuple[float, ...]], next_index: int) -> list[RewardCandidate]:
     if len(top_candidates) < 2:
         return []
-    values_by_name = {name: sorted(set(float(v) for v in values)) for name, values in value_grid}
-    variable_fields = [name for name in REWARD_FIELDS if len({float(getattr(candidate.reward, name)) for candidate in top_candidates}) > 1]
+    values_by_name = {name: sorted(set(float(v) for v in values)) for name, values in value_grid if values and not isinstance(values[0], str)}
+    variable_fields = [name for name in values_by_name if len({float(getattr(candidate.reward, name)) for candidate in top_candidates}) > 1]
     refined: list[RewardCandidate] = []
     for candidate in top_candidates:
         for name in variable_fields:
@@ -1051,7 +1203,12 @@ def _candidate_by_index(candidates: Sequence[RewardCandidate], index: int) -> Re
 
 
 def _reward_from_row(row: dict[str, object]) -> RewardConfig:
-    data = {field: float(row[f"reward.{field}"]) for field in REWARD_FIELDS}
+    defaults = RewardConfig()
+    data = {}
+    for field in REWARD_FIELDS:
+        default = getattr(defaults, field)
+        raw = row[f"reward.{field}"]
+        data[field] = str(raw) if isinstance(default, str) else float(raw)
     return RewardConfig(**data)
 
 
@@ -1060,8 +1217,8 @@ def _candidate_from_row(row: dict[str, object]) -> RewardCandidate:
     return RewardCandidate(index=int(row["candidate"]), reward=_reward_from_row(row), source=str(row.get("candidate_source", "resume")), parent=_optional_int(row.get("candidate_parent")), resume_checkpoint=checkpoint or None)
 
 
-def _reward_key(reward: RewardConfig) -> tuple[float, ...]:
-    return tuple(float(getattr(reward, name)) for name in REWARD_FIELDS)
+def _reward_key(reward: RewardConfig) -> tuple[object, ...]:
+    return tuple(getattr(reward, name) for name in REWARD_FIELDS)
 
 
 def _steps_or_default(args: argparse.Namespace, base: ExperimentConfig) -> int:
@@ -1137,7 +1294,13 @@ def _read_results(path: Path) -> list[dict[str, object]]:
 
 
 def _reward_label(reward: RewardConfig) -> str:
-    return ", ".join(f"{k}={v:g}" for k, v in asdict(reward).items())
+    parts = []
+    for key, value in asdict(reward).items():
+        if isinstance(value, (int, float)):
+            parts.append(f"{key}={value:g}")
+        else:
+            parts.append(f"{key}={value}")
+    return ", ".join(parts)
 
 
 if __name__ == "__main__":
