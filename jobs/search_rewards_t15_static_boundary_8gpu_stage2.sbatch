@@ -3,7 +3,7 @@
 #SBATCH --partition=batch
 #SBATCH --gres=gpu:8
 #SBATCH --nodes=1
-#SBATCH --time=02:00:00
+#SBATCH --time=03:00:00
 #SBATCH --output=slurm_logs/tokamak-rl-v2-rs8-stage2-%j.out
 #SBATCH --error=slurm_logs/tokamak-rl-v2-rs8-stage2-%j.err
 
@@ -16,6 +16,9 @@ export PREVIOUS_STAGE_RESULTS=${PREVIOUS_STAGE_RESULTS:-${SEARCH_ROOT}/stage_01_
 export BASELINE_RESULTS=${BASELINE_RESULTS:-${SEARCH_ROOT}/baseline_results.csv}
 export RUN_NAME=${RUN_NAME:-reward_search_t15_static_boundary_8gpu_stage2_${SLURM_JOB_ID:-manual}}
 export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-tokamak-rl-v2-reward-8gpu-stage2-${SLURM_JOB_ID:-manual}}
+
+# The workload below is tuned to finish in roughly 2 hours. The Slurm time
+# limit is intentionally larger so useful partial work is not killed at 2h.
 
 srun \
   --container-image /scratch/$USER/tokamak/tokamak-rl-v2.sqsh \
@@ -51,7 +54,7 @@ PYCUDA
       --baseline-results ${BASELINE_RESULTS} \
       --previous-stage-results ${PREVIOUS_STAGE_RESULTS} \
       --stage-input-count 6 \
-      --stage-steps 20000,60000,120000 \
+      --stage-steps 8000,16000,24000 \
       --stage-keep 6,2,1 \
       --stage-eval-episodes 4,8,16 \
       --stage-max-shape-degradation-m 0.025,0.020,0.015 \
