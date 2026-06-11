@@ -16,7 +16,7 @@ from tokamak_rl_v2.rewards import T15StaticBoundaryReward
 from tokamak_rl_v2.rewards import transforms
 from tokamak_rl_v2.training.mpo import MaximumAPosterioriPolicyOptimiser
 from tokamak_rl_v2.training.trainer import Trainer
-from tokamak_rl_v2.training.reward_search import _rank_rows, main as reward_search_main
+from tokamak_rl_v2.training.reward_search import _promotion_reason, _rank_rows, main as reward_search_main
 from tokamak_rl_v2.training.cli import _device_list
 
 
@@ -173,6 +173,26 @@ def test_reward_search_dry_run_writes_candidates(tmp_path: Path) -> None:
     assert "dry_run" in results
 
 
+def test_reward_search_weight_grid_generates_expected_candidates(tmp_path: Path) -> None:
+    out = tmp_path / "weight_grid_search"
+    code = reward_search_main([
+        "--config", str(CONFIG),
+        "--output-dir", str(out),
+        "--dry-run",
+        "--shape-good-values", "0.003",
+        "--shape-bad-values", "0.04,0.08",
+        "--ip-good-values", "500",
+        "--ip-bad-values", "25000,40000",
+        "--shape-weight-values", "2.0,4.0",
+        "--ip-weight-values", "1.5,3.0",
+    ])
+    assert code == 0
+    manifest = json.loads((out / "search_manifest.json").read_text())
+    assert manifest["candidate_count"] == 16
+    assert manifest["reward_values"]["shape_weight"] == [2.0, 4.0]
+    assert manifest["reward_values"]["ip_weight"] == [1.5, 3.0]
+
+
 def test_export_metadata_records_update_count(tmp_path: Path) -> None:
     cfg = _small_config(tmp_path)
     result = Trainer(cfg, device="cpu", output_dir=tmp_path).train()
@@ -317,6 +337,25 @@ def test_reward_search_rejects_candidates_worse_than_no_control() -> None:
     assert reasons[1] == "rejected_ip_not_better_than_no_control"
 
 
+def test_reward_search_allows_bounded_shape_degradation_for_ip_gain() -> None:
+    row = {
+        "status": "ok",
+        "eval.boundary_found": 1.0,
+        "eval.current_over_limit_a": 0.0,
+        "eval.shape_error_mean_m": 0.11,
+        "eval.ip_error_a": 80000.0,
+        "eval.shape_improvement_over_no_control_m": -0.014,
+        "eval.ip_improvement_over_no_control_a": 20000.0,
+        "search.max_shape_degradation_m": 0.015,
+        "search.min_ip_improvement_a": 15000.0,
+    }
+    assert _promotion_reason(row) == "eligible"
+    too_much_shape_loss = dict(row, **{"eval.shape_improvement_over_no_control_m": -0.020})
+    assert _promotion_reason(too_much_shape_loss) == "rejected_shape_degradation_over_limit"
+    not_enough_ip_gain = dict(row, **{"eval.ip_improvement_over_no_control_a": 1000.0})
+    assert _promotion_reason(not_enough_ip_gain) == "rejected_ip_improvement_below_minimum"
+
+
 def test_chunked_sampled_q_values_match_unbatched_reference() -> None:
     torch.manual_seed(123)
     obs_dim = 9
@@ -375,3 +414,68 @@ def test_successive_halving_parallel_cpu_workers_write_results(tmp_path: Path) -
     assert (out / "stage_01_short" / "results.csv").exists()
     assert (out / "stage_01_short" / "candidate_0000" / "worker_result.json").exists()
     assert "worker_returncode" in (out / "stage_01_short" / "results.csv").read_text()
+
+
+def test_stage_only_search_resumes_from_previous_results(tmp_path: Path) -> None:
+    out1 = tmp_path / "stage1"
+    code = reward_search_main([
+        "--config", str(CONFIG),
+        "--output-dir", str(out1),
+        "--strategy", "successive_halving",
+        "--stage-only", "stage_01_short",
+        "--stage-steps", "2,3,4",
+        "--stage-keep", "2,1,1",
+        "--stage-eval-episodes", "1,1,1",
+        "--parallel-candidates", "1",
+        "--num-envs", "1",
+        "--device", "cpu",
+        "--sim-compute-backend", "cpu",
+        "--batch-size", "2",
+        "--unroll-length", "2",
+        "--replay-capacity-episodes", "1",
+        "--rollout-chunk-length", "2",
+        "--updates-per-rollout-chunk", "1",
+        "--hidden-dim", "16",
+        "--critic-hidden-dim", "16",
+        "--critic-mlp-hidden-dim", "16",
+        "--action-samples", "4",
+        "--actor-update-chunk-size", "2",
+        "--eval-max-steps", "4",
+        "--shape-good-values", "0.004,0.006",
+        "--shape-bad-values", "0.05",
+    ])
+    assert code == 0
+    out2 = tmp_path / "stage2"
+    code = reward_search_main([
+        "--config", str(CONFIG),
+        "--output-dir", str(out2),
+        "--strategy", "successive_halving",
+        "--stage-only", "stage_02_medium",
+        "--baseline-results", str(out1 / "baseline_results.csv"),
+        "--previous-stage-results", str(out1 / "stage_01_short" / "results.csv"),
+        "--stage-input-count", "1",
+        "--stage-steps", "2,3,4",
+        "--stage-keep", "2,1,1",
+        "--stage-eval-episodes", "1,1,1",
+        "--parallel-candidates", "1",
+        "--num-envs", "1",
+        "--device", "cpu",
+        "--sim-compute-backend", "cpu",
+        "--batch-size", "2",
+        "--unroll-length", "2",
+        "--replay-capacity-episodes", "1",
+        "--rollout-chunk-length", "2",
+        "--updates-per-rollout-chunk", "1",
+        "--hidden-dim", "16",
+        "--critic-hidden-dim", "16",
+        "--critic-mlp-hidden-dim", "16",
+        "--action-samples", "4",
+        "--actor-update-chunk-size", "2",
+        "--eval-max-steps", "4",
+        "--shape-good-values", "0.004,0.006",
+        "--shape-bad-values", "0.05",
+    ])
+    assert code == 0
+    assert (out2 / "baseline_results.csv").exists()
+    assert (out2 / "stage_02_medium" / "results.csv").exists()
+    assert (out2 / "stage_02_medium" / "promoted_candidates.csv").exists()
