@@ -67,12 +67,18 @@ def broadcast_actor(param_queues: list[Queue], state_dict: dict[str, torch.Tenso
         q.put(payload)
 
 
-def stop_actor_workers(processes: list[Any], stop: Event) -> None:
+def stop_actor_workers(processes: list[Any], stop: Event, *, param_queues: list[Queue] | None = None, data_q: Queue | None = None) -> None:
     stop.set()
     for proc in processes:
-        proc.join(timeout=5.0)
+        proc.join(timeout=10.0)
         if proc.is_alive():
             proc.terminate()
+            proc.join(timeout=10.0)
+        if proc.is_alive() and hasattr(proc, "kill"):
+            proc.kill()
+            proc.join(timeout=5.0)
+    for q in [*(param_queues or []), *([] if data_q is None else [data_q])]:
+        _close_queue(q)
 
 
 def _actor_loop(
@@ -102,6 +108,8 @@ def _actor_loop(
         _drain_params(actor, params_q, dev)
         chunk = {"obs": [], "action": [], "reward": [], "discount": [], "next_obs": [], "done": []}
         for _ in range(int(rollout_chunk_length)):
+            if stop.is_set():
+                break
             with torch.no_grad():
                 action, _logp, _mean = actor.sample(obs)
             out = env.step(action)
@@ -113,10 +121,17 @@ def _actor_loop(
             chunk["next_obs"].append(out.obs.detach().cpu())
             chunk["done"].append(done.detach().cpu())
             obs = env.reset_indices(done) if bool(torch.any(done).item()) else out.obs
+        if not chunk["reward"]:
+            break
         payload = {k: torch.stack(v, dim=0).numpy() for k, v in chunk.items()}
         payload["worker_index"] = int(worker_index)
         payload["worker_device"] = str(dev)
-        data_q.put(payload)
+        while not stop.is_set():
+            try:
+                data_q.put(payload, timeout=1.0)
+                break
+            except queue.Full:
+                continue
 
 
 def _resolve_worker_device(value: str) -> torch.device:
@@ -139,3 +154,14 @@ def _drain_params(actor: FeedForwardGaussianActor, params_q: Queue, device: torc
         pass
     if latest is not None:
         actor.load_state_dict({k: torch.as_tensor(v, device=device) for k, v in latest.items()})
+
+
+def _close_queue(q: Queue) -> None:
+    try:
+        q.cancel_join_thread()
+    except Exception:
+        pass
+    try:
+        q.close()
+    except Exception:
+        pass

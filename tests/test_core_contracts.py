@@ -42,7 +42,7 @@ def test_network_shapes() -> None:
     out = actor(obs)
     assert out.mean.shape == (3, 5)
     assert out.std.shape == (3, 5)
-    assert torch.mean(out.std).item() == pytest.approx(0.1, rel=1.0e-3)
+    assert torch.mean(out.std).item() == pytest.approx(0.2, rel=1.0e-3)
     q, state = critic(obs, torch.zeros((3, 5)))
     assert q.shape == (3, 1)
     assert state.h.shape[-1] == 16

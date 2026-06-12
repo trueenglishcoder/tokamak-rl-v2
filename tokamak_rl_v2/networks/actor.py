@@ -24,7 +24,7 @@ class ActorOutput:
 class FeedForwardGaussianActor(nn.Module):
     """Published feedforward stochastic policy architecture."""
 
-    def __init__(self, obs_dim: int, action_dim: int, hidden_dim: int = 256, min_std: float = 1.0e-4, initial_std: float = 0.1) -> None:
+    def __init__(self, obs_dim: int, action_dim: int, hidden_dim: int = 256, min_std: float = 1.0e-4, initial_std: float = 0.2) -> None:
         super().__init__()
         self.obs_dim = int(obs_dim)
         self.action_dim = int(action_dim)

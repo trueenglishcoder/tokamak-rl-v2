@@ -15,6 +15,7 @@ export TRAIN_OUTPUT=${TRAIN_OUTPUT:-outputs/t15_hold_reset_boundary_policy_${SLU
 export RUN_NAME=${RUN_NAME:-t15_hold_reset_boundary_policy_${SLURM_JOB_ID:-manual}}
 export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-tokamak-rl-v2-policy-${SLURM_JOB_ID:-manual}}
 export WANDB_MODE=${WANDB_MODE:-online}
+export WANDB__SERVICE_WAIT=${WANDB__SERVICE_WAIT:-30}
 
 srun \
   --container-image /scratch/$USER/tokamak/tokamak-rl-v2.sqsh \
@@ -36,14 +37,14 @@ srun \
     cd /workspace/tokamak-rl-v2
     mkdir -p slurm_logs outputs
 
-    python - <<PYCUDA
+    python3 - <<PYCUDA
 import torch
 print("cuda_available", torch.cuda.is_available())
 print("device_count", torch.cuda.device_count())
 print("devices", [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())])
 PYCUDA
 
-    python scripts/train_policy_pipeline.py \
+    python3 scripts/train_policy_pipeline.py \
       --config ${POLICY_CONFIG} \
       --output-dir ${TRAIN_OUTPUT} \
       ${TRAIN_STEPS:+--steps ${TRAIN_STEPS}} \
@@ -68,4 +69,6 @@ PYCUDA
       --wandb-name ${RUN_NAME} \
       --wandb-group ${RUN_NAME} \
       --wandb-mode ${WANDB_MODE}
+
+    echo "train_policy_pipeline completed at $(date -Is)"
   '

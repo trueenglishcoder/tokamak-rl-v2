@@ -232,7 +232,7 @@ class Trainer:
                     progress.set_postfix(replay=self.replay.size, updates=updates, refresh=False)
                 progress.close()
         finally:
-            stop_actor_workers(processes, stop)
+            stop_actor_workers(processes, stop, param_queues=param_queues, data_q=data_q)
         self._save_checkpoint("final.pt", step=env_steps, updates=updates)
         self._export("exports/final_actor", step=env_steps, updates=updates, eval_score=None)
         final = {
