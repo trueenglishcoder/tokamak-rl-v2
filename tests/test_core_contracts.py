@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-import csv
 import json
 from pathlib import Path
 
@@ -10,19 +9,17 @@ import pytest
 import torch
 
 from tokamak_rl_v2.config import load_experiment_config
-from tokamak_rl_v2.config.schema import LearnerConfig, RewardConfig
+from tokamak_rl_v2.config.schema import IpReferenceConfig, LearnerConfig, RewardConfig
 from tokamak_rl_v2.env import TokamakMagneticControlEnv
 from tokamak_rl_v2.networks import FeedForwardGaussianActor, RecurrentQCritic
-from tokamak_rl_v2.rewards import T15StaticBoundaryReward
-from tokamak_rl_v2.rewards import transforms
+from tokamak_rl_v2.rewards import T15PhysicalReward
 from tokamak_rl_v2.export.cli import main as export_cli_main
 from tokamak_rl_v2.training.mpo import MaximumAPosterioriPolicyOptimiser
 from tokamak_rl_v2.training.policy_pipeline import evaluate_policy_gates, run_reset_sanity
 from tokamak_rl_v2.training.replay import FIFOSequenceReplay, SequenceBatch
 from tokamak_rl_v2.training.trainer import Trainer
-from tokamak_rl_v2.training.reward_search import _promotion_reason, _rank_rows, _stage_float_value, _write_promotion_artifacts, main as reward_search_main
-from tokamak_rl_v2.env.references import _segment_lengths, generate_reference_batch
-from tokamak_rl_v2.training.cli import _device_list, _load_reward_override
+from tokamak_rl_v2.env.references import _segmented_ip, _segment_lengths, generate_reference_batch
+from tokamak_rl_v2.training.cli import _device_list
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,23 +42,14 @@ def test_network_shapes() -> None:
     out = actor(obs)
     assert out.mean.shape == (3, 5)
     assert out.std.shape == (3, 5)
+    assert torch.mean(out.std).item() == pytest.approx(0.1, rel=1.0e-3)
     q, state = critic(obs, torch.zeros((3, 5)))
     assert q.shape == (3, 1)
     assert state.h.shape[-1] == 16
 
 
-def test_quality_transforms_hit_declared_points() -> None:
-    x = torch.tensor([0.005, 0.05], dtype=torch.float32)
-    y = transforms.softplus(x, good=0.005, bad=0.05)
-    assert torch.isclose(y[0], torch.tensor(1.0), atol=1.0e-5)
-    assert torch.isclose(y[1], torch.tensor(0.1), atol=1.0e-4)
-    s = transforms.sigmoid(torch.tensor([500.0, 20000.0]), good=500.0, bad=20000.0)
-    assert s[0] > 0.94
-    assert s[1] < 0.06
-
-
-def test_tracking_reward_cannot_be_replaced_by_low_action() -> None:
-    reward_fn = T15StaticBoundaryReward(RewardConfig(reward_scale=1.0), control_rate_hz=1000.0)
+def test_physical_reward_cannot_replace_tracking_with_low_action() -> None:
+    reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0), control_rate_hz=1000.0)
     ref = torch.zeros((2, 32, 2), dtype=torch.float32)
     boundary = ref.clone()
     boundary[1, :, 0] = 0.20
@@ -74,6 +62,8 @@ def test_tracking_reward_cannot_be_replaced_by_low_action() -> None:
         reference_points=ref,
         previous_action=zero_action,
         current_over_limit_a=torch.zeros((2,), dtype=torch.float32),
+        current_usage_fraction=torch.full((2,), 0.5, dtype=torch.float32),
+        current_margin_fraction=torch.full((2,), 0.5, dtype=torch.float32),
         derivative_usage=torch.zeros((2,), dtype=torch.float32),
         boundary_found=torch.ones((2,), dtype=torch.bool),
         terminated=torch.zeros((2,), dtype=torch.bool),
@@ -86,7 +76,7 @@ def test_tracking_reward_cannot_be_replaced_by_low_action() -> None:
 
 
 def test_reward_components_remain_finite_when_boundary_is_missing() -> None:
-    reward_fn = T15StaticBoundaryReward(RewardConfig(reward_scale=1.0), control_rate_hz=1000.0)
+    reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0), control_rate_hz=1000.0)
     boundary = torch.full((1, 32, 2), float("nan"), dtype=torch.float32)
     ref = torch.zeros((1, 32, 2), dtype=torch.float32)
     rb = reward_fn(
@@ -97,6 +87,8 @@ def test_reward_components_remain_finite_when_boundary_is_missing() -> None:
         action=torch.zeros((1, 9), dtype=torch.float32),
         previous_action=torch.zeros((1, 9), dtype=torch.float32),
         current_over_limit_a=torch.zeros((1,), dtype=torch.float32),
+        current_usage_fraction=torch.full((1,), 0.5, dtype=torch.float32),
+        current_margin_fraction=torch.full((1,), 0.5, dtype=torch.float32),
         derivative_usage=torch.zeros((1,), dtype=torch.float32),
         boundary_found=torch.zeros((1,), dtype=torch.bool),
         terminated=torch.ones((1,), dtype=torch.bool),
@@ -104,11 +96,11 @@ def test_reward_components_remain_finite_when_boundary_is_missing() -> None:
     assert torch.isfinite(rb.reward).all()
     for value in rb.components.values():
         assert torch.isfinite(value).all()
-    assert float(rb.components["shape_error_mean_m"].item()) == pytest.approx(0.05)
+    assert float(rb.components["shape_error_mean_m"].item()) == pytest.approx(0.1)
 
 
-def test_dense_reward_can_make_missing_boundary_expensive() -> None:
-    reward_fn = T15StaticBoundaryReward(RewardConfig(mode="dense_physical", reward_scale=1.0, shape_bad_m=0.025, boundary_missing_error_m=0.1), control_rate_hz=1000.0)
+def test_physical_reward_makes_missing_boundary_expensive() -> None:
+    reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0, shape_bad_m=0.025, boundary_missing_error_m=0.1), control_rate_hz=1000.0)
     rb = reward_fn(
         ip=torch.tensor([200000.0]),
         ip_ref=torch.tensor([200000.0]),
@@ -117,16 +109,19 @@ def test_dense_reward_can_make_missing_boundary_expensive() -> None:
         action=torch.zeros((1, 9), dtype=torch.float32),
         previous_action=torch.zeros((1, 9), dtype=torch.float32),
         current_over_limit_a=torch.zeros((1,), dtype=torch.float32),
+        current_usage_fraction=torch.full((1,), 0.5, dtype=torch.float32),
+        current_margin_fraction=torch.full((1,), 0.5, dtype=torch.float32),
         derivative_usage=torch.zeros((1,), dtype=torch.float32),
         boundary_found=torch.zeros((1,), dtype=torch.bool),
         terminated=torch.zeros((1,), dtype=torch.bool),
     )
     assert float(rb.components["shape_error_mean_m"].item()) == pytest.approx(0.1)
-    assert float(rb.components["dense_weighted_shape_loss"].item()) > 10.0
+    assert float(rb.components["shape_loss"].item()) > 3.0
+    assert float(rb.components["physical_cost"].item()) > 6.0
 
 
-def test_dense_physical_reward_improves_when_tracking_errors_improve() -> None:
-    reward_fn = T15StaticBoundaryReward(RewardConfig(mode="dense_physical", reward_scale=1.0, shape_bad_m=0.03, ip_bad_a=40000.0), control_rate_hz=1000.0)
+def test_physical_reward_improves_when_tracking_errors_improve() -> None:
+    reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0, shape_bad_m=0.03, ip_bad_a=40000.0), control_rate_hz=1000.0)
     ref = torch.zeros((2, 32, 2), dtype=torch.float32)
     boundary = ref.clone()
     boundary[1, :, 0] = 0.06
@@ -139,13 +134,67 @@ def test_dense_physical_reward_improves_when_tracking_errors_improve() -> None:
         action=action,
         previous_action=action,
         current_over_limit_a=torch.zeros((2,), dtype=torch.float32),
+        current_usage_fraction=torch.full((2,), 0.5, dtype=torch.float32),
+        current_margin_fraction=torch.full((2,), 0.5, dtype=torch.float32),
         derivative_usage=torch.zeros((2,), dtype=torch.float32),
         boundary_found=torch.ones((2,), dtype=torch.bool),
         terminated=torch.zeros((2,), dtype=torch.bool),
     )
     assert rb.reward[0] > rb.reward[1]
-    assert rb.components["dense_shape_loss"][0] < rb.components["dense_shape_loss"][1]
-    assert rb.components["dense_ip_loss"][0] < rb.components["dense_ip_loss"][1]
+    assert rb.components["shape_loss"][0] < rb.components["shape_loss"][1]
+    assert rb.components["ip_loss"][0] < rb.components["ip_loss"][1]
+
+
+def test_physical_reward_current_margin_warns_before_limit() -> None:
+    reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0), control_rate_hz=1000.0)
+    ref = torch.zeros((3, 32, 2), dtype=torch.float32)
+    action = torch.zeros((3, 9), dtype=torch.float32)
+    rb = reward_fn(
+        ip=torch.full((3,), 200000.0),
+        ip_ref=torch.full((3,), 200000.0),
+        boundary_points=ref,
+        reference_points=ref,
+        action=action,
+        previous_action=action,
+        current_over_limit_a=torch.tensor([0.0, 0.0, 1000.0], dtype=torch.float32),
+        current_usage_fraction=torch.tensor([0.50, 0.95, 1.20], dtype=torch.float32),
+        current_margin_fraction=torch.tensor([0.50, 0.05, -0.20], dtype=torch.float32),
+        derivative_usage=torch.zeros((3,), dtype=torch.float32),
+        boundary_found=torch.ones((3,), dtype=torch.bool),
+        terminated=torch.zeros((3,), dtype=torch.bool),
+    )
+    assert float(rb.components["current_margin_loss"][0].item()) == pytest.approx(0.0)
+    assert float(rb.components["current_margin_loss"][1].item()) > 0.0
+    assert rb.components["current_margin_loss"][2] > rb.components["current_margin_loss"][1]
+    assert rb.reward[0] > rb.reward[1] > rb.reward[2]
+
+
+def test_physical_reward_actuator_penalties_start_near_saturation() -> None:
+    reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0), control_rate_hz=1000.0)
+    ref = torch.zeros((2, 32, 2), dtype=torch.float32)
+    low_action = torch.full((1, 9), 0.5, dtype=torch.float32)
+    high_action = torch.full((1, 9), 0.95, dtype=torch.float32)
+    action = torch.cat([low_action, high_action], dim=0)
+    previous = torch.zeros((2, 9), dtype=torch.float32)
+    rb = reward_fn(
+        ip=torch.full((2,), 200000.0),
+        ip_ref=torch.full((2,), 200000.0),
+        boundary_points=ref,
+        reference_points=ref,
+        action=action,
+        previous_action=previous,
+        current_over_limit_a=torch.zeros((2,), dtype=torch.float32),
+        current_usage_fraction=torch.full((2,), 0.5, dtype=torch.float32),
+        current_margin_fraction=torch.full((2,), 0.5, dtype=torch.float32),
+        derivative_usage=torch.tensor([0.5, 0.95], dtype=torch.float32),
+        boundary_found=torch.ones((2,), dtype=torch.bool),
+        terminated=torch.zeros((2,), dtype=torch.bool),
+    )
+    assert float(rb.components["derivative_loss"][0].item()) == pytest.approx(0.0)
+    assert float(rb.components["action_saturation_loss"][0].item()) == pytest.approx(0.0)
+    assert rb.components["derivative_loss"][1] > 0.0
+    assert rb.components["action_saturation_loss"][1] > 0.0
+    assert rb.components["delta_action_loss"][1] > rb.components["delta_action_loss"][0]
 
 
 def test_environment_reset_step_contract() -> None:
@@ -283,27 +332,58 @@ def test_ip_reference_segment_count_controls_generation() -> None:
     assert torch.allclose(batch.ip[:, 0], torch.tensor([250000.0, 300000.0], dtype=torch.float64))
 
 
-def test_reward_override_file_is_validated(tmp_path: Path) -> None:
-    base = RewardConfig()
-    valid = tmp_path / "reward.json"
-    valid.write_text(json.dumps({"mode": "dense_physical", "shape_weight": 8.0, "ip_weight": 12.0, "tracking_combiner": "weighted_mean", "shape_aggregator": "mean"}), encoding="utf-8")
-    reward = _load_reward_override(str(valid), base=base)
-    assert reward.mode == "dense_physical"
-    assert reward.shape_weight == 8.0
-    assert reward.ip_weight == 12.0
-    assert reward.tracking_combiner == "weighted_mean"
-    bad = tmp_path / "bad_reward.json"
-    bad.write_text(json.dumps({"shape_bad_m": 0.001, "shape_good_m": 0.01}), encoding="utf-8")
-    with pytest.raises(ValueError, match="shape_bad_m > shape_good_m"):
-        _load_reward_override(str(bad), base=base)
-    bad_string = tmp_path / "bad_reward_string.json"
-    bad_string.write_text(json.dumps({"tracking_combiner": "not_real"}), encoding="utf-8")
-    with pytest.raises(ValueError, match="unsupported tracking_combiner"):
-        _load_reward_override(str(bad_string), base=base)
-    bad_mode = tmp_path / "bad_reward_mode.json"
-    bad_mode.write_text(json.dumps({"mode": "not_real"}), encoding="utf-8")
-    with pytest.raises(ValueError, match="unsupported mode"):
-        _load_reward_override(str(bad_mode), base=base)
+def test_ip_reference_inserts_hold_between_opposite_ramps() -> None:
+    cfg = IpReferenceConfig(
+        min=100000.0,
+        max=160000.0,
+        rate_limit=2.0e6,
+        segment_min_steps=5,
+        segment_max_steps=8,
+        segment_count_min=20,
+        segment_count_max=20,
+        hold_probability=0.0,
+    )
+    saw_hold = False
+    for seed in range(40):
+        values = _segmented_ip(cfg, 125000.0, 120, np.random.default_rng(seed), dt=0.001)
+        assert np.all(values > 0.0)
+        signs = np.sign(np.diff(values))
+        signs[np.abs(np.diff(values)) < 1.0e-7] = 0.0
+        runs = [int(signs[0])] if signs.size else []
+        for sign in signs[1:]:
+            sign_i = int(sign)
+            if sign_i != runs[-1]:
+                runs.append(sign_i)
+        saw_hold = saw_hold or 0 in runs
+        for left, right in zip(runs, runs[1:], strict=False):
+            assert not (left != 0 and right != 0 and left != right)
+    assert saw_hold
+
+
+def test_config_rejects_ip_reference_ranges_that_cross_zero(tmp_path: Path) -> None:
+    data = json.loads(CONFIG.read_text())
+    data["reference"]["ip"]["min"] = -100000.0
+    data["reference"]["ip"]["max"] = 100000.0
+    bad_reference = tmp_path / "bad_reference_ip.json"
+    bad_reference.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="reference.ip range must stay strictly on one side of zero"):
+        load_experiment_config(bad_reference)
+
+    data = json.loads(CONFIG.read_text())
+    data["sim"]["initial_ranges"]["ip"]["min"] = -1000.0
+    data["sim"]["initial_ranges"]["ip"]["max"] = 1000.0
+    bad_initial = tmp_path / "bad_initial_ip.json"
+    bad_initial.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="sim.initial_ranges.ip must stay strictly on one side of zero"):
+        load_experiment_config(bad_initial)
+
+    data = json.loads(CONFIG.read_text())
+    data["sim"]["initial_ranges"]["ip"]["min"] = -130000.0
+    data["sim"]["initial_ranges"]["ip"]["max"] = -120000.0
+    bad_sign = tmp_path / "bad_initial_ip_sign.json"
+    bad_sign.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="sim.initial_ranges.ip must have the same sign as reference.ip"):
+        load_experiment_config(bad_sign)
 
 
 def test_small_training_writes_export(tmp_path: Path) -> None:
@@ -362,10 +442,10 @@ def test_config_loader_reads_explicit_training_devices(tmp_path: Path) -> None:
 
 def test_config_loader_rejects_invalid_values(tmp_path: Path) -> None:
     data = json.loads(CONFIG.read_text())
-    data["reward"]["tracking_combiner"] = "not_real"
+    data["reward"]["unused_reward_key"] = "not_real"
     bad_reward = tmp_path / "bad_reward.json"
     bad_reward.write_text(json.dumps(data), encoding="utf-8")
-    with pytest.raises(ValueError, match="tracking_combiner"):
+    with pytest.raises(ValueError, match="unsupported keys"):
         load_experiment_config(bad_reward)
 
     data = json.loads(CONFIG.read_text())
@@ -383,11 +463,32 @@ def test_config_loader_rejects_invalid_values(tmp_path: Path) -> None:
         load_experiment_config(bad_mode)
 
     data = json.loads(CONFIG.read_text())
+    data["reward"]["current_margin_start_fraction"] = 1.0
+    bad_current_margin = tmp_path / "bad_current_margin.json"
+    bad_current_margin.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="current_margin_start_fraction"):
+        load_experiment_config(bad_current_margin)
+
+    data = json.loads(CONFIG.read_text())
+    data["reward"]["delta_action_bad"] = data["reward"]["delta_action_penalty_start"]
+    bad_delta = tmp_path / "bad_delta.json"
+    bad_delta.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="delta_action_bad"):
+        load_experiment_config(bad_delta)
+
+    data = json.loads(CONFIG.read_text())
     data["sim"]["action_scale"] = 0.0
     bad_action_scale = tmp_path / "bad_action_scale.json"
     bad_action_scale.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(ValueError, match="action_scale"):
         load_experiment_config(bad_action_scale)
+
+    data = json.loads(CONFIG.read_text())
+    data["network"]["actor_initial_std"] = 1.0e-5
+    bad_actor_std = tmp_path / "bad_actor_std.json"
+    bad_actor_std.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="actor_initial_std"):
+        load_experiment_config(bad_actor_std)
 
     data = json.loads(CONFIG.read_text())
     data["reward"]["boundary_missing_error_m"] = -1.0
@@ -475,119 +576,6 @@ def test_experiment_configs_use_neutral_output_names() -> None:
         data = json.loads(path.read_text())
         output_dir = str(data.get("training", {}).get("output_dir", ""))
         assert "candidate" not in output_dir
-
-
-def test_reward_search_dry_run_writes_candidates(tmp_path: Path) -> None:
-    out = tmp_path / "search"
-    code = reward_search_main([
-        "--config", str(CONFIG),
-        "--output-dir", str(out),
-        "--dry-run",
-        "--max-candidates", "2",
-        "--shape-good-values", "0.004,0.006",
-        "--shape-bad-values", "0.05",
-    ])
-    assert code == 0
-    assert (out / "search_manifest.json").exists()
-    results = (out / "results.csv").read_text()
-    assert "candidate" in results
-    assert "dry_run" in results
-
-
-def test_reward_search_weight_grid_generates_expected_candidates(tmp_path: Path) -> None:
-    out = tmp_path / "weight_grid_search"
-    code = reward_search_main([
-        "--config", str(CONFIG),
-        "--output-dir", str(out),
-        "--dry-run",
-        "--shape-good-values", "0.003",
-        "--shape-bad-values", "0.04,0.08",
-        "--ip-good-values", "500",
-        "--ip-bad-values", "25000,40000",
-        "--shape-weight-values", "2.0,4.0",
-        "--ip-weight-values", "1.5,3.0",
-    ])
-    assert code == 0
-    manifest = json.loads((out / "search_manifest.json").read_text())
-    assert manifest["candidate_count"] == 16
-    assert manifest["reward_values"]["shape_weight"] == [2.0, 4.0]
-    assert manifest["reward_values"]["ip_weight"] == [1.5, 3.0]
-
-
-
-
-
-
-def test_stage_threshold_parser_preserves_repeated_values() -> None:
-    assert _stage_float_value("0.60,0.60,0.60", 1) == 0.60
-    assert _stage_float_value("0.60,0.60,0.60", 2) == 0.60
-    assert _stage_float_value("0.60,0.60,0.60", 3) == 0.60
-
-def test_control_discovery_preset_is_broad_and_not_local_grid(tmp_path: Path) -> None:
-    out = tmp_path / "control_discovery"
-    code = reward_search_main([
-        "--config", str(CONFIG),
-        "--output-dir", str(out),
-        "--strategy", "successive_halving",
-        "--candidate-preset", "control_discovery",
-        "--dry-run",
-        "--stage-steps", "2,3,4",
-        "--stage-keep", "4,2,1",
-        "--stage-eval-episodes", "1,1,1",
-    ])
-    assert code == 0
-    manifest = json.loads((out / "search_manifest.json").read_text())
-    assert manifest["candidate_preset"] == "control_discovery"
-    assert manifest["candidate_count"] >= 24
-    rows = list(csv.DictReader((out / "results.csv").open()))
-    assert len({row["reward.tracking_combiner"] for row in rows}) >= 3
-    assert len({row["reward.action_penalty_weight"] for row in rows}) >= 3
-    assert len({row["reward.ip_weight"] for row in rows}) >= 6
-    assert len({row["reward.shape_bad_m"] for row in rows}) >= 6
-
-
-def test_reward_search_rejects_low_control_activity() -> None:
-    row = {
-        "status": "ok",
-        "eval.boundary_found": 1.0,
-        "eval.current_over_limit_a": 0.0,
-        "eval.shape_error_mean_m": 0.10,
-        "eval.ip_error_a": 90000.0,
-        "eval.shape_improvement_over_no_control_m": -0.001,
-        "eval.ip_improvement_over_no_control_a": 40000.0,
-        "eval.action_rms": 0.001,
-        "search.min_action_rms": 0.005,
-        "search.max_shape_error_m": 0.14,
-        "search.max_ip_error_a": 105000.0,
-    }
-    assert _promotion_reason(row) == "rejected_low_control_activity"
-    active = dict(row, **{"eval.action_rms": 0.02})
-    assert _promotion_reason(active) == "eligible"
-
-def test_reward_search_rejects_uniform_policy_weights() -> None:
-    row = {
-        "status": "ok",
-        "eval.boundary_found": 1.0,
-        "eval.current_over_limit_a": 0.0,
-        "eval.shape_error_mean_m": 0.10,
-        "eval.ip_error_a": 90000.0,
-        "eval.shape_improvement_over_no_control_m": -0.001,
-        "eval.ip_improvement_over_no_control_a": 40000.0,
-        "eval.action_rms": 0.02,
-        "tail100.policy_weight_max": 0.051,
-        "tail100.sampled_q_spread": 0.001,
-        "tail100.actor_param_delta_norm": 0.001,
-        "search.min_policy_weight_max": 0.055,
-        "search.min_sampled_q_spread": 0.000001,
-        "search.min_actor_param_delta_norm": 0.000001,
-        "search.min_action_rms": 0.005,
-        "search.max_shape_error_m": 0.14,
-        "search.max_ip_error_a": 105000.0,
-    }
-    assert _promotion_reason(row) == "rejected_uniform_policy_weights"
-    active = dict(row, **{"tail100.policy_weight_max": 0.08})
-    assert _promotion_reason(active) == "eligible"
-
 
 
 def test_export_metadata_records_update_count(tmp_path: Path) -> None:
@@ -694,182 +682,18 @@ def test_evaluate_detailed_reports_physical_metrics(tmp_path: Path) -> None:
     assert "current_over_limit_a" in metrics
     assert "current_over_limit_a_max" in metrics
     assert "current_over_limit_fraction" in metrics
+    assert "current_usage_fraction" in metrics
+    assert "current_usage_fraction_max" in metrics
+    assert "current_margin_fraction" in metrics
+    assert "current_margin_fraction_min" in metrics
+    assert "derivative_usage" in metrics
+    assert "derivative_usage_max" in metrics
+    assert "max_abs_action" in metrics
+    assert "max_abs_action_max" in metrics
+    assert "physical_cost" in metrics
     assert "boundary_found" in metrics
     assert "boundary_found_min" in metrics
     assert np.isfinite(metrics["mean_return"])
-
-
-def test_successive_halving_dry_run_writes_stage_artifacts(tmp_path: Path) -> None:
-    out = tmp_path / "staged_search"
-    code = reward_search_main([
-        "--config", str(CONFIG),
-        "--output-dir", str(out),
-        "--strategy", "successive_halving",
-        "--dry-run",
-        "--max-candidates", "2",
-        "--stage-steps", "2,3,4",
-        "--stage-keep", "2,1,1",
-        "--stage-eval-episodes", "1,1,1",
-        "--shape-good-values", "0.004,0.006",
-        "--shape-bad-values", "0.05",
-    ])
-    assert code == 0
-    manifest = (out / "search_manifest.json").read_text()
-    assert '"strategy": "successive_halving"' in manifest
-    assert '"baseline_policy": "no_control"' in manifest
-    assert (out / "stage_00_baseline" / "results.csv").exists()
-    assert (out / "baseline_results.csv").exists()
-
-
-def test_stage_promotion_artifacts_promote_first_eligible_not_first_ranked(tmp_path: Path) -> None:
-    ranked = [
-        {
-            "candidate": 0,
-            "status": "ok",
-            "promotion_reason": "rejected_low_control_activity",
-            "eval.mean_return": 10.0,
-            "eval.shape_error_mean_m": 0.05,
-            "eval.ip_error_a": 5000.0,
-            "eval.current_over_limit_a": 0.0,
-            "eval.boundary_found": 1.0,
-        },
-        {
-            "candidate": 1,
-            "status": "ok",
-            "promotion_reason": "eligible",
-            "eval.mean_return": 8.0,
-            "eval.shape_error_mean_m": 0.06,
-            "eval.ip_error_a": 6000.0,
-            "eval.current_over_limit_a": 0.0,
-            "eval.boundary_found": 1.0,
-        },
-    ]
-    _write_promotion_artifacts(out=tmp_path, stage_name="stage_01_short", ranked=ranked, keep=1)
-    promoted = list(csv.DictReader((tmp_path / "stage_01_short" / "promoted_candidates.csv").open()))
-    assert [row["candidate"] for row in promoted] == ["1"]
-    history = {row["candidate"]: row["promoted"] for row in csv.DictReader((tmp_path / "promotion_history.csv").open())}
-    assert history == {"0": "0", "1": "1"}
-
-
-def test_reward_search_ranking_uses_physical_metrics_before_return() -> None:
-    rows = [
-        {
-            "candidate": 0,
-            "status": "ok",
-            "eval.boundary_found": 1.0,
-            "eval.current_over_limit_a": 0.0,
-            "eval.shape_error_mean_m": 0.09,
-            "eval.ip_error_a": 5000.0,
-            "eval.improvement_over_no_control": 5.0,
-            "eval.delta_action_quality": 0.9,
-            "eval.action_quality": 0.9,
-            "eval.mean_return": 100.0,
-        },
-        {
-            "candidate": 1,
-            "status": "ok",
-            "eval.boundary_found": 1.0,
-            "eval.current_over_limit_a": 0.0,
-            "eval.shape_error_mean_m": 0.04,
-            "eval.ip_error_a": 7000.0,
-            "eval.improvement_over_no_control": 1.0,
-            "eval.delta_action_quality": 0.8,
-            "eval.action_quality": 0.8,
-            "eval.mean_return": 50.0,
-        },
-        {
-            "candidate": 2,
-            "status": "ok",
-            "eval.boundary_found": 0.5,
-            "eval.current_over_limit_a": 0.0,
-            "eval.shape_error_mean_m": 0.01,
-            "eval.ip_error_a": 100.0,
-            "eval.improvement_over_no_control": 100.0,
-            "eval.delta_action_quality": 1.0,
-            "eval.action_quality": 1.0,
-            "eval.mean_return": 500.0,
-        },
-    ]
-    ranked = _rank_rows(rows)
-    assert ranked[0]["candidate"] == 0
-    assert ranked[-1]["candidate"] == 2
-    assert ranked[-1]["promotion_reason"] == "rejected_boundary_not_reliable"
-
-
-def test_reward_search_rejects_candidates_worse_than_no_control() -> None:
-    rows = [
-        {
-            "candidate": 0,
-            "status": "ok",
-            "eval.boundary_found": 1.0,
-            "eval.current_over_limit_a": 0.0,
-            "eval.shape_error_mean_m": 0.18,
-            "eval.ip_error_a": 100000.0,
-            "eval.shape_improvement_over_no_control_m": -0.04,
-            "eval.ip_improvement_over_no_control_a": 60000.0,
-            "eval.improvement_over_no_control": 5.0,
-            "search.require_no_control_improvement": 1,
-            "eval.delta_action_quality": 1.0,
-            "eval.action_quality": 1.0,
-            "eval.mean_return": 60.0,
-        },
-        {
-            "candidate": 1,
-            "status": "ok",
-            "eval.boundary_found": 1.0,
-            "eval.current_over_limit_a": 0.0,
-            "eval.shape_error_mean_m": 0.10,
-            "eval.ip_error_a": 180000.0,
-            "eval.shape_improvement_over_no_control_m": 0.03,
-            "eval.ip_improvement_over_no_control_a": -20000.0,
-            "eval.improvement_over_no_control": 5.0,
-            "search.require_no_control_improvement": 1,
-            "eval.delta_action_quality": 1.0,
-            "eval.action_quality": 1.0,
-            "eval.mean_return": 60.0,
-        },
-        {
-            "candidate": 2,
-            "status": "ok",
-            "eval.boundary_found": 1.0,
-            "eval.current_over_limit_a": 0.0,
-            "eval.shape_error_mean_m": 0.10,
-            "eval.ip_error_a": 100000.0,
-            "eval.shape_improvement_over_no_control_m": 0.03,
-            "eval.ip_improvement_over_no_control_a": 60000.0,
-            "eval.improvement_over_no_control": 5.0,
-            "search.require_no_control_improvement": 1,
-            "eval.delta_action_quality": 1.0,
-            "eval.action_quality": 1.0,
-            "eval.mean_return": 60.0,
-        },
-    ]
-    ranked = _rank_rows(rows)
-    assert ranked[0]["candidate"] == 2
-    reasons = {row["candidate"]: row["promotion_reason"] for row in ranked}
-    assert reasons[0] == "rejected_shape_not_better_than_no_control"
-    assert reasons[1] == "rejected_ip_not_better_than_no_control"
-
-
-def test_reward_search_allows_bounded_shape_degradation_for_ip_gain() -> None:
-    row = {
-        "status": "ok",
-        "eval.boundary_found": 1.0,
-        "eval.current_over_limit_a": 0.0,
-        "eval.shape_error_mean_m": 0.11,
-        "eval.ip_error_a": 80000.0,
-        "eval.shape_improvement_over_no_control_m": -0.014,
-        "eval.ip_improvement_over_no_control_a": 20000.0,
-        "search.max_shape_degradation_m": 0.015,
-        "search.min_ip_improvement_a": 15000.0,
-    }
-    assert _promotion_reason(row) == "eligible"
-    too_much_shape_loss = dict(row, **{"eval.shape_improvement_over_no_control_m": -0.020})
-    assert _promotion_reason(too_much_shape_loss) == "rejected_shape_degradation_over_limit"
-    not_enough_ip_gain = dict(row, **{"eval.ip_improvement_over_no_control_a": 1000.0})
-    assert _promotion_reason(not_enough_ip_gain) == "rejected_ip_improvement_below_minimum"
-
-
 
 
 def test_mpo_e_step_keeps_uniform_weights_when_sampled_q_is_uniform() -> None:
@@ -1006,110 +830,3 @@ def test_actor_update_changes_policy_parameters_on_sequence_batch() -> None:
     assert metrics.actor_param_delta_norm > 0.0
     assert np.isfinite(metrics.sampled_q_spread)
     assert np.isfinite(metrics.policy_weight_entropy)
-
-
-
-def test_successive_halving_parallel_cpu_workers_write_results(tmp_path: Path) -> None:
-    out = tmp_path / "parallel_search"
-    code = reward_search_main([
-        "--config", str(CONFIG),
-        "--output-dir", str(out),
-        "--strategy", "successive_halving",
-        "--stage-steps", "2,3,4",
-        "--stage-keep", "1,1,1",
-        "--stage-eval-episodes", "1,1,1",
-        "--max-candidates", "2",
-        "--parallel-candidates", "2",
-        "--gpu-devices", "cpu,cpu",
-        "--num-envs", "1",
-        "--device", "cpu",
-        "--sim-compute-backend", "cpu",
-        "--batch-size", "2",
-        "--unroll-length", "2",
-        "--replay-capacity-episodes", "1",
-        "--rollout-chunk-length", "2",
-        "--updates-per-rollout-chunk", "1",
-        "--hidden-dim", "16",
-        "--critic-hidden-dim", "16",
-        "--critic-mlp-hidden-dim", "16",
-        "--action-samples", "4",
-        "--actor-update-chunk-size", "2",
-        "--eval-max-steps", "4",
-        "--shape-good-values", "0.004,0.006",
-        "--shape-bad-values", "0.05",
-    ])
-    assert code == 0
-    assert (out / "stage_01_short" / "results.csv").exists()
-    assert (out / "stage_01_short" / "candidate_0000" / "worker_result.json").exists()
-    stage1_text = (out / "stage_01_short" / "results.csv").read_text()
-    assert "worker_returncode" in stage1_text
-    assert "checkpoint_path" in stage1_text
-
-
-def test_stage_only_search_resumes_from_previous_results(tmp_path: Path) -> None:
-    out1 = tmp_path / "stage1"
-    code = reward_search_main([
-        "--config", str(CONFIG),
-        "--output-dir", str(out1),
-        "--strategy", "successive_halving",
-        "--stage-only", "stage_01_short",
-        "--stage-steps", "2,3,4",
-        "--stage-keep", "2,1,1",
-        "--stage-eval-episodes", "1,1,1",
-        "--parallel-candidates", "1",
-        "--num-envs", "1",
-        "--device", "cpu",
-        "--sim-compute-backend", "cpu",
-        "--batch-size", "2",
-        "--unroll-length", "2",
-        "--replay-capacity-episodes", "1",
-        "--rollout-chunk-length", "2",
-        "--updates-per-rollout-chunk", "1",
-        "--hidden-dim", "16",
-        "--critic-hidden-dim", "16",
-        "--critic-mlp-hidden-dim", "16",
-        "--action-samples", "4",
-        "--actor-update-chunk-size", "2",
-        "--eval-max-steps", "4",
-        "--shape-good-values", "0.004,0.006",
-        "--shape-bad-values", "0.05",
-    ])
-    assert code == 0
-    out2 = tmp_path / "stage2"
-    code = reward_search_main([
-        "--config", str(CONFIG),
-        "--output-dir", str(out2),
-        "--strategy", "successive_halving",
-        "--stage-only", "stage_02_medium",
-        "--baseline-results", str(out1 / "baseline_results.csv"),
-        "--previous-stage-results", str(out1 / "stage_01_short" / "results.csv"),
-        "--stage-input-count", "1",
-        "--stage-steps", "2,3,4",
-        "--stage-keep", "2,1,1",
-        "--stage-eval-episodes", "1,1,1",
-        "--parallel-candidates", "1",
-        "--num-envs", "1",
-        "--device", "cpu",
-        "--sim-compute-backend", "cpu",
-        "--batch-size", "2",
-        "--unroll-length", "2",
-        "--replay-capacity-episodes", "1",
-        "--rollout-chunk-length", "2",
-        "--updates-per-rollout-chunk", "1",
-        "--hidden-dim", "16",
-        "--critic-hidden-dim", "16",
-        "--critic-mlp-hidden-dim", "16",
-        "--action-samples", "4",
-        "--actor-update-chunk-size", "2",
-        "--eval-max-steps", "4",
-        "--shape-good-values", "0.004,0.006",
-        "--shape-bad-values", "0.05",
-    ])
-    assert code == 0
-    assert (out2 / "baseline_results.csv").exists()
-    stage2_results = (out2 / "stage_02_medium" / "results.csv")
-    assert stage2_results.exists()
-    text = stage2_results.read_text()
-    assert "resumed_from_checkpoint" in text
-    assert "start_step" in text
-    assert (out2 / "stage_02_medium" / "promoted_candidates.csv").exists()

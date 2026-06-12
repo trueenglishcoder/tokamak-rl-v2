@@ -12,7 +12,6 @@ cd /scratch/$USER/tokamak
 export TRAIN_OUTPUT=${TRAIN_OUTPUT:-outputs/t15_static_boundary_full_${SLURM_JOB_ID:-manual}}
 export RUN_NAME=${RUN_NAME:-t15_static_boundary_full_${SLURM_JOB_ID:-manual}}
 export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-tokamak-rl-v2-train-${SLURM_JOB_ID:-manual}}
-export REWARD_CONFIG=${REWARD_CONFIG:-}
 
 srun --container-image /scratch/$USER/tokamak/tokamak-rl-v2.sqsh \
   --container-mounts /scratch/$USER/tokamak:/workspace,/dev:/dev,/lib/x86_64-linux-gnu:/host-libs \
@@ -39,14 +38,8 @@ print("device_count", torch.cuda.device_count())
 print("devices", [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())])
 PYCUDA
 
-    REWARD_ARGS=()
-    if [ -n "${REWARD_CONFIG:-}" ]; then
-      REWARD_ARGS=(--reward-config "${REWARD_CONFIG}")
-    fi
-
     python scripts/train.py \
       --config configs/experiments/t15_static_boundary_gpu.yaml \
-      "${REWARD_ARGS[@]}" \
       --device cuda:0 \
       --sim-compute-backend gpu \
       --sim-gpu-device cuda:0 \

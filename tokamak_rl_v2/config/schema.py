@@ -76,26 +76,23 @@ class ObservationConfig:
 
 @dataclass(frozen=True, slots=True)
 class RewardConfig:
-    mode: Literal["quality", "dense_physical"] = "quality"
-    shape_good_m: float = 0.005
-    shape_bad_m: float = 0.05
-    ip_good_a: float = 500.0
-    ip_bad_a: float = 20000.0
-    shape_weight: float = 3.0
-    ip_weight: float = 2.0
-    current_weight: float = 1.0
-    derivative_weight: float = 0.25
-    current_good_a: float = 100.0
-    current_bad_a: float = 50000.0
-    boundary_missing_error_m: float = 0.0
-    derivative_good: float = 0.05
-    derivative_bad: float = 1.0
-    action_penalty_weight: float = 0.02
-    delta_action_penalty_weight: float = 0.01
-    terminal_reward: float = -5.0
-    reward_scale: float = 0.01
-    tracking_combiner: str = "smooth_min"
-    shape_aggregator: str = "smooth_worst"
+    shape_bad_m: float = 0.03
+    shape_max_bad_m: float = 0.08
+    ip_bad_a: float = 40000.0
+    boundary_missing_error_m: float = 0.10
+    shape_weight: float = 2.0
+    ip_weight: float = 1.0
+    current_weight: float = 4.0
+    derivative_weight: float = 0.1
+    action_saturation_weight: float = 0.1
+    delta_action_weight: float = 0.05
+    current_margin_start_fraction: float = 0.85
+    derivative_penalty_start_fraction: float = 0.85
+    action_penalty_start_fraction: float = 0.85
+    delta_action_penalty_start: float = 0.25
+    delta_action_bad: float = 1.0
+    terminal_reward: float = -20.0
+    reward_scale: float = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +125,8 @@ class NetworkConfig:
     hidden_dim: int = 256
     critic_hidden_dim: int = 256
     critic_mlp_hidden_dim: int = 256
+    actor_initial_std: float = 0.1
+    actor_min_std: float = 1.0e-4
 
 
 @dataclass(frozen=True, slots=True)

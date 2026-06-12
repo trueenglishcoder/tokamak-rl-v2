@@ -160,6 +160,13 @@ def _observation(raw: Mapping[str, Any]) -> ObservationConfig:
 
 def _reward(raw: Mapping[str, Any]) -> RewardConfig:
     defaults = RewardConfig()
+    fields = set(RewardConfig.__dataclass_fields__)
+    stale = sorted(set(raw) & _STALE_REWARD_KEYS)
+    if stale:
+        raise ValueError("reward contains stale keys from the removed reward: " + ", ".join(stale))
+    unknown = sorted(set(raw) - fields)
+    if unknown:
+        raise ValueError("reward contains unsupported keys: " + ", ".join(unknown))
     return RewardConfig(**{field: type(getattr(defaults, field))(raw.get(field, getattr(defaults, field))) for field in RewardConfig.__dataclass_fields__})
 
 
@@ -169,7 +176,14 @@ def _randomization(raw: Mapping[str, Any]) -> RandomizationConfig:
 
 
 def _network(raw: Mapping[str, Any]) -> NetworkConfig:
-    return NetworkConfig(hidden_dim=int(raw.get("hidden_dim", 256)), critic_hidden_dim=int(raw.get("critic_hidden_dim", 256)), critic_mlp_hidden_dim=int(raw.get("critic_mlp_hidden_dim", 256)))
+    defaults = NetworkConfig()
+    return NetworkConfig(
+        hidden_dim=int(raw.get("hidden_dim", defaults.hidden_dim)),
+        critic_hidden_dim=int(raw.get("critic_hidden_dim", defaults.critic_hidden_dim)),
+        critic_mlp_hidden_dim=int(raw.get("critic_mlp_hidden_dim", defaults.critic_mlp_hidden_dim)),
+        actor_initial_std=float(raw.get("actor_initial_std", defaults.actor_initial_std)),
+        actor_min_std=float(raw.get("actor_min_std", defaults.actor_min_std)),
+    )
 
 
 def _learner(raw: Mapping[str, Any]) -> LearnerConfig:
@@ -219,6 +233,14 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
     ip = cfg.reference.ip
     if not (math.isfinite(ip.min) and math.isfinite(ip.max) and ip.max >= ip.min):
         raise ValueError("reference.ip min/max are invalid")
+    if _range_crosses_or_touches_zero(float(ip.min), float(ip.max)):
+        raise ValueError("reference.ip range must stay strictly on one side of zero")
+    if cfg.sim.initial_ranges is not None:
+        initial_ip = cfg.sim.initial_ranges.ip
+        if _range_crosses_or_touches_zero(float(initial_ip.min), float(initial_ip.max)):
+            raise ValueError("sim.initial_ranges.ip must stay strictly on one side of zero")
+        if _sign(float(initial_ip.min)) != _sign(float(ip.min)):
+            raise ValueError("sim.initial_ranges.ip must have the same sign as reference.ip")
     if not math.isfinite(ip.rate_limit) or ip.rate_limit < 0.0:
         raise ValueError("reference.ip.rate_limit must be finite and non-negative")
     if ip.segment_min_steps <= 0 or ip.segment_max_steps < ip.segment_min_steps:
@@ -247,6 +269,10 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
         raise ValueError("randomization.action_offset_max must be >= action_offset_min")
     if cfg.network.hidden_dim <= 0 or cfg.network.critic_hidden_dim <= 0 or cfg.network.critic_mlp_hidden_dim <= 0:
         raise ValueError("network dimensions must be positive")
+    if not math.isfinite(float(cfg.network.actor_min_std)) or float(cfg.network.actor_min_std) <= 0.0:
+        raise ValueError("network.actor_min_std must be finite and positive")
+    if not math.isfinite(float(cfg.network.actor_initial_std)) or float(cfg.network.actor_initial_std) <= float(cfg.network.actor_min_std):
+        raise ValueError("network.actor_initial_std must be finite and greater than actor_min_std")
     learner = cfg.learner
     for name in ("discount", "actor_lr", "critic_lr", "kl_lr", "temperature", "mpo_epsilon", "mean_kl_epsilon", "std_kl_epsilon", "target_update_tau"):
         value = float(getattr(learner, name))
@@ -265,29 +291,50 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
             raise ValueError(f"training.{name} must be positive")
 
 
+def _range_crosses_or_touches_zero(min_value: float, max_value: float) -> bool:
+    return float(min_value) <= 0.0 <= float(max_value)
+
+
+def _sign(value: float) -> int:
+    return 1 if float(value) > 0.0 else -1
+
+
 def _validate_reward_config(reward: RewardConfig, *, prefix: str) -> None:
-    if reward.mode not in {"quality", "dense_physical"}:
-        raise ValueError(f"{prefix}.mode is unsupported")
-    if reward.shape_bad_m <= reward.shape_good_m:
-        raise ValueError(f"{prefix}.shape_bad_m must be greater than shape_good_m")
-    if reward.ip_bad_a <= reward.ip_good_a:
-        raise ValueError(f"{prefix}.ip_bad_a must be greater than ip_good_a")
-    if reward.current_bad_a <= reward.current_good_a:
-        raise ValueError(f"{prefix}.current_bad_a must be greater than current_good_a")
-    if float(reward.boundary_missing_error_m) < 0.0:
-        raise ValueError(f"{prefix}.boundary_missing_error_m must be non-negative")
-    if reward.derivative_bad <= reward.derivative_good:
-        raise ValueError(f"{prefix}.derivative_bad must be greater than derivative_good")
-    for name in ("shape_weight", "ip_weight", "reward_scale"):
+    for name in ("shape_bad_m", "shape_max_bad_m", "ip_bad_a", "reward_scale", "delta_action_bad"):
+        value = float(getattr(reward, name))
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{prefix}.{name} must be finite and positive")
+    if not math.isfinite(float(reward.boundary_missing_error_m)) or float(reward.boundary_missing_error_m) < 0.0:
+        raise ValueError(f"{prefix}.boundary_missing_error_m must be finite and non-negative")
+    for name in ("shape_weight", "ip_weight", "current_weight", "derivative_weight", "action_saturation_weight", "delta_action_weight"):
+        value = float(getattr(reward, name))
+        if not math.isfinite(value) or value < 0.0:
+            raise ValueError(f"{prefix}.{name} must be finite and non-negative")
+    for name in ("shape_weight", "ip_weight"):
         if float(getattr(reward, name)) <= 0.0:
             raise ValueError(f"{prefix}.{name} must be positive")
-    for name in ("current_weight", "derivative_weight"):
-        if float(getattr(reward, name)) < 0.0:
-            raise ValueError(f"{prefix}.{name} must be non-negative")
-    for name in ("action_penalty_weight", "delta_action_penalty_weight"):
-        if float(getattr(reward, name)) < 0.0:
-            raise ValueError(f"{prefix}.{name} must be non-negative")
-    if reward.tracking_combiner not in {"smooth_min", "weighted_mean", "geometric_mean", "product"}:
-        raise ValueError(f"{prefix}.tracking_combiner is unsupported")
-    if reward.shape_aggregator not in {"smooth_worst", "mean", "geometric_mean"}:
-        raise ValueError(f"{prefix}.shape_aggregator is unsupported")
+    for name in ("current_margin_start_fraction", "derivative_penalty_start_fraction", "action_penalty_start_fraction"):
+        value = float(getattr(reward, name))
+        if not math.isfinite(value) or value < 0.0 or value >= 1.0:
+            raise ValueError(f"{prefix}.{name} must be finite and in [0, 1)")
+    if not math.isfinite(float(reward.delta_action_penalty_start)) or float(reward.delta_action_penalty_start) < 0.0:
+        raise ValueError(f"{prefix}.delta_action_penalty_start must be finite and non-negative")
+    if float(reward.delta_action_bad) <= float(reward.delta_action_penalty_start):
+        raise ValueError(f"{prefix}.delta_action_bad must be greater than delta_action_penalty_start")
+    if not math.isfinite(float(reward.terminal_reward)):
+        raise ValueError(f"{prefix}.terminal_reward must be finite")
+
+
+_STALE_REWARD_KEYS = {
+    "mode",
+    "shape_good_m",
+    "ip_good_a",
+    "current_good_a",
+    "current_bad_a",
+    "derivative_good",
+    "derivative_bad",
+    "action_penalty_weight",
+    "delta_action_penalty_weight",
+    "_".join(("tracking", "combiner")),
+    "_".join(("shape", "aggregator")),
+}

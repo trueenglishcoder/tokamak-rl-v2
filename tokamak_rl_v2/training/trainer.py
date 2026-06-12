@@ -52,9 +52,9 @@ class Trainer:
         torch.manual_seed(int(config.training.seed))
         np.random.seed(int(config.training.seed))
         self.env = TokamakMagneticControlEnv(config, batch_size=self.num_envs, device=self.device, seed=int(config.training.seed))
-        self.actor = FeedForwardGaussianActor(self.env.obs_dim, self.env.action_dim, config.network.hidden_dim).to(self.device)
+        self.actor = FeedForwardGaussianActor(self.env.obs_dim, self.env.action_dim, config.network.hidden_dim, min_std=config.network.actor_min_std, initial_std=config.network.actor_initial_std).to(self.device)
         self.critic = RecurrentQCritic(self.env.obs_dim, self.env.action_dim, config.network.critic_hidden_dim, config.network.critic_mlp_hidden_dim).to(self.device)
-        self.target_actor = FeedForwardGaussianActor(self.env.obs_dim, self.env.action_dim, config.network.hidden_dim).to(self.device)
+        self.target_actor = FeedForwardGaussianActor(self.env.obs_dim, self.env.action_dim, config.network.hidden_dim, min_std=config.network.actor_min_std, initial_std=config.network.actor_initial_std).to(self.device)
         self.target_critic = RecurrentQCritic(self.env.obs_dim, self.env.action_dim, config.network.critic_hidden_dim, config.network.critic_mlp_hidden_dim).to(self.device)
         self.learner = MaximumAPosterioriPolicyOptimiser(actor=self.actor, critic=self.critic, target_actor=self.target_actor, target_critic=self.target_critic, config=config.learner, device=self.device)
         self.replay = FIFOSequenceReplay(capacity_episodes=int(config.learner.replay_capacity_episodes), max_episode_steps=int(config.sim.max_episode_steps), active_envs=self.num_envs, obs_dim=self.env.obs_dim, action_dim=self.env.action_dim, device=self.device)
@@ -155,7 +155,7 @@ class Trainer:
         self._last_envs_per_worker = envs_per_worker
         self._last_total_training_envs = envs_per_worker * worker_count
         if self.resume_checkpoint is not None:
-            raise ValueError("distributed actor-worker training checkpoints are not exactly resumable yet; use actor_workers=1 for resumable staged search or start a fresh distributed run")
+            raise ValueError("distributed actor-worker training checkpoints are not exactly resumable yet; use actor_workers=1 for resumable training or start a fresh distributed run")
         processes, param_queues, data_q, stop = start_actor_workers(
             config=self.config,
             actor_state_dict=self.actor.state_dict(),
@@ -337,16 +337,35 @@ class Trainer:
                 obs = out.obs
         selected_returns = np.asarray(returns[: int(episodes)], dtype=float)
         metrics: dict[str, float] = {"mean_return": float(np.nanmean(selected_returns)) if selected_returns.size else float("nan")}
+        max_metrics = {
+            "shape_error_mean_m",
+            "shape_error_max_m",
+            "ip_error_a",
+            "current_over_limit_a",
+            "current_usage_fraction",
+            "derivative_usage",
+            "max_abs_action",
+            "action_rms",
+            "delta_action_rms",
+            "physical_cost",
+            "shape_loss",
+            "ip_loss",
+            "current_margin_loss",
+            "derivative_loss",
+            "action_saturation_loss",
+            "delta_action_loss",
+        }
+        min_metrics = {"current_margin_fraction", "boundary_found"}
         for name, values in component_values.items():
             arr = np.asarray(values, dtype=float)
             if arr.size:
                 metrics[name] = float(np.nanmean(arr))
-                if name in {"current_over_limit_a", "shape_error_mean_m", "shape_error_max_m", "action_rms", "delta_action_rms"}:
+                if name in max_metrics:
                     metrics[f"{name}_max"] = float(np.nanmax(arr))
+                if name in min_metrics:
+                    metrics[f"{name}_min"] = float(np.nanmin(arr))
                 if name == "current_over_limit_a":
                     metrics["current_over_limit_fraction"] = float(np.nanmean(arr > 0.0))
-                if name == "boundary_found":
-                    metrics["boundary_found_min"] = float(np.nanmin(arr))
         return metrics
 
     def _metadata(self, *, step: int, updates: int, eval_score: float | None = None) -> dict[str, object]:

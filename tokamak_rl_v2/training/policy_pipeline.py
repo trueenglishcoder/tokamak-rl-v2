@@ -16,7 +16,7 @@ from tokamak_rl_v2.config.loader import _validate_experiment_config
 from tokamak_rl_v2.config.schema import ExperimentConfig
 from tokamak_rl_v2.env import TokamakMagneticControlEnv
 from tokamak_rl_v2.env.references import sample_initial_conditions
-from tokamak_rl_v2.training.cli import _device_list, _load_reward_override
+from tokamak_rl_v2.training.cli import _device_list
 from tokamak_rl_v2.training.trainer import Trainer
 
 
@@ -291,8 +291,6 @@ def validate_exported_controller(export_dir: Path | None, config: ExperimentConf
 
 
 def _apply_overrides(cfg: ExperimentConfig, args: argparse.Namespace) -> ExperimentConfig:
-    if args.reward_config is not None:
-        cfg = replace(cfg, reward=_load_reward_override(args.reward_config, base=cfg.reward))
     if args.sim_compute_backend is not None or args.sim_gpu_device is not None:
         cfg = replace(
             cfg,
@@ -359,7 +357,6 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--num-envs", type=int, default=None)
     ap.add_argument("--device", default=None)
     ap.add_argument("--resume-checkpoint", default=None)
-    ap.add_argument("--reward-config", default=None)
     ap.add_argument("--sim-compute-backend", choices=("cpu", "gpu"), default=None)
     ap.add_argument("--sim-gpu-device", default=None)
     ap.add_argument("--batch-size", type=int, default=None)

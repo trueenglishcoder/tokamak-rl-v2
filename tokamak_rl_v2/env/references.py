@@ -94,6 +94,7 @@ def _segmented_ip(cfg: IpReferenceConfig, start: float, steps: int, rng: np.rand
     values[0] = float(np.clip(start, cfg.min, cfg.max))
     k = 0
     target = values[0]
+    previous_ramp_direction = 0
     for seg_len in _segment_lengths(cfg, int(steps), rng):
         if rng.random() < float(cfg.hold_probability):
             next_target = target
@@ -102,11 +103,25 @@ def _segmented_ip(cfg: IpReferenceConfig, start: float, steps: int, rng: np.rand
         max_delta = float(cfg.rate_limit) * float(seg_len) * float(dt)
         next_target = float(np.clip(next_target, target - max_delta, target + max_delta))
         next_target = float(np.clip(next_target, cfg.min, cfg.max))
+        ramp_direction = _direction(next_target - target)
+        if previous_ramp_direction and ramp_direction and ramp_direction != previous_ramp_direction:
+            next_target = target
+            ramp_direction = 0
         ramp = np.linspace(target, next_target, int(seg_len) + 1, dtype=float)[1:]
         values[k + 1 : k + int(seg_len) + 1] = ramp
         target = next_target
+        previous_ramp_direction = ramp_direction
         k += int(seg_len)
     return values
+
+
+def _direction(value: float, *, atol: float = 1.0e-9) -> int:
+    value_f = float(value)
+    if value_f > float(atol):
+        return 1
+    if value_f < -float(atol):
+        return -1
+    return 0
 
 
 def _segment_lengths(cfg: IpReferenceConfig, steps: int, rng: np.random.Generator) -> np.ndarray:

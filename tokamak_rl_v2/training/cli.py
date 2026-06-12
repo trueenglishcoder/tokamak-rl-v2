@@ -1,14 +1,10 @@
 from __future__ import annotations
 
 import argparse
-import json
 from dataclasses import replace
-from pathlib import Path
-from typing import Mapping
 
 from tokamak_rl_v2.config import load_experiment_config
 from tokamak_rl_v2.config.loader import _validate_experiment_config
-from tokamak_rl_v2.config.schema import RewardConfig
 from tokamak_rl_v2.training.trainer import Trainer
 
 
@@ -20,7 +16,6 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--device", default=None)
     ap.add_argument("--output-dir", default=None)
     ap.add_argument("--resume-checkpoint", default=None)
-    ap.add_argument("--reward-config", default=None, help="JSON/YAML reward override, for example outputs/.../best_reward.yaml")
     ap.add_argument("--sim-compute-backend", choices=("cpu", "gpu"), default=None)
     ap.add_argument("--sim-gpu-device", default=None)
     ap.add_argument("--batch-size", type=int, default=None)
@@ -45,8 +40,6 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--wandb-mode", choices=("online", "offline", "disabled"), default="online")
     args = ap.parse_args(argv)
     cfg = load_experiment_config(args.config)
-    if args.reward_config is not None:
-        cfg = replace(cfg, reward=_load_reward_override(args.reward_config, base=cfg.reward))
     if args.sim_compute_backend is not None or args.sim_gpu_device is not None:
         cfg = replace(cfg, sim=replace(cfg.sim, compute_backend=args.sim_compute_backend if args.sim_compute_backend is not None else cfg.sim.compute_backend, gpu_device=args.sim_gpu_device if args.sim_gpu_device is not None else cfg.sim.gpu_device))
     if any(v is not None for v in (args.batch_size, args.unroll_length, args.replay_capacity_episodes, args.rollout_chunk_length, args.updates_per_rollout_chunk, args.action_samples, args.actor_update_chunk_size)):
@@ -101,52 +94,6 @@ def main(argv: list[str] | None = None) -> int:
         wandb_run.finish()
     print(result)
     return 0
-
-
-
-def _load_reward_override(path: str, *, base: RewardConfig) -> RewardConfig:
-    source = Path(path).resolve()
-    text = source.read_text(encoding="utf-8")
-    raw: object
-    if source.suffix.lower() == ".json":
-        raw = json.loads(text)
-    else:
-        try:
-            import yaml
-        except Exception as exc:  # pragma: no cover - only used when PyYAML is missing locally
-            raise RuntimeError(f"reward override requires JSON or PyYAML for YAML files: {source}") from exc
-        raw = yaml.safe_load(text)
-    if not isinstance(raw, Mapping):
-        raise ValueError(f"reward override must be a mapping: {source}")
-    values = {}
-    for field in RewardConfig.__dataclass_fields__:
-        default = getattr(base, field)
-        value = raw.get(field, default)
-        values[field] = str(value) if isinstance(default, str) else float(value)
-    reward = RewardConfig(**values)
-    if reward.shape_bad_m <= reward.shape_good_m:
-        raise ValueError("reward override must have shape_bad_m > shape_good_m")
-    if reward.ip_bad_a <= reward.ip_good_a:
-        raise ValueError("reward override must have ip_bad_a > ip_good_a")
-    if reward.current_bad_a <= reward.current_good_a:
-        raise ValueError("reward override must have current_bad_a > current_good_a")
-    if reward.derivative_bad <= reward.derivative_good:
-        raise ValueError("reward override must have derivative_bad > derivative_good")
-    if reward.reward_scale <= 0.0:
-        raise ValueError("reward override must have positive reward_scale")
-    if reward.current_weight < 0.0:
-        raise ValueError("reward override must have non-negative current_weight")
-    if reward.derivative_weight < 0.0:
-        raise ValueError("reward override must have non-negative derivative_weight")
-    if reward.boundary_missing_error_m < 0.0:
-        raise ValueError("reward override must have non-negative boundary_missing_error_m")
-    if reward.mode not in {"quality", "dense_physical"}:
-        raise ValueError(f"reward override has unsupported mode: {reward.mode}")
-    if reward.tracking_combiner not in {"smooth_min", "weighted_mean", "geometric_mean", "product"}:
-        raise ValueError(f"reward override has unsupported tracking_combiner: {reward.tracking_combiner}")
-    if reward.shape_aggregator not in {"smooth_worst", "mean", "geometric_mean"}:
-        raise ValueError(f"reward override has unsupported shape_aggregator: {reward.shape_aggregator}")
-    return reward
 
 def _device_list(raw: str) -> tuple[str, ...]:
     values = tuple(part.strip() for part in str(raw).split(",") if part.strip())

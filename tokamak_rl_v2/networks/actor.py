@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 import torch
 from torch import Tensor, nn
@@ -23,12 +24,15 @@ class ActorOutput:
 class FeedForwardGaussianActor(nn.Module):
     """Published feedforward stochastic policy architecture."""
 
-    def __init__(self, obs_dim: int, action_dim: int, hidden_dim: int = 256, min_std: float = 1.0e-4) -> None:
+    def __init__(self, obs_dim: int, action_dim: int, hidden_dim: int = 256, min_std: float = 1.0e-4, initial_std: float = 0.1) -> None:
         super().__init__()
         self.obs_dim = int(obs_dim)
         self.action_dim = int(action_dim)
         self.hidden_dim = int(hidden_dim)
         self.min_std = float(min_std)
+        self.initial_std = float(initial_std)
+        if self.initial_std <= self.min_std:
+            raise ValueError("initial_std must be greater than min_std")
         self.input = nn.Linear(self.obs_dim, self.hidden_dim)
         self.input_norm = nn.LayerNorm(self.hidden_dim)
         self.hidden1 = nn.Linear(self.hidden_dim, self.hidden_dim)
@@ -39,6 +43,7 @@ class FeedForwardGaussianActor(nn.Module):
         self.apply(truncated_fanin_init)
         truncated_fanin_init(self.mean_head, final_scale=1.0e-4)
         truncated_fanin_init(self.std_head, final_scale=1.0e-4)
+        nn.init.constant_(self.std_head.bias, _inverse_softplus(self.initial_std - self.min_std))
 
     def forward(self, obs: Tensor) -> ActorOutput:
         x = torch.tanh(self.input_norm(self.input(obs)))
@@ -59,3 +64,10 @@ class FeedForwardGaussianActor(nn.Module):
 
     def deterministic(self, obs: Tensor) -> Tensor:
         return self(obs).mean
+
+
+def _inverse_softplus(value: float) -> float:
+    value_f = float(value)
+    if value_f <= 0.0:
+        raise ValueError("inverse softplus value must be positive")
+    return float(math.log(math.expm1(value_f)))

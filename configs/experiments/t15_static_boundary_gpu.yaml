@@ -115,20 +115,23 @@
     "target_preview_stride": 10
   },
   "reward": {
-    "shape_good_m": 0.003,
-    "shape_bad_m": 0.08,
-    "ip_good_a": 500.0,
+    "shape_bad_m": 0.03,
+    "shape_max_bad_m": 0.08,
     "ip_bad_a": 40000.0,
-    "shape_weight": 3.0,
-    "ip_weight": 2.0,
-    "current_good_a": 100.0,
-    "current_bad_a": 50000.0,
-    "derivative_good": 0.05,
-    "derivative_bad": 1.0,
-    "action_penalty_weight": 0.02,
-    "delta_action_penalty_weight": 0.01,
-    "terminal_reward": -5.0,
-    "reward_scale": 0.1
+    "boundary_missing_error_m": 0.1,
+    "shape_weight": 2.0,
+    "ip_weight": 1.0,
+    "current_weight": 4.0,
+    "derivative_weight": 0.1,
+    "action_saturation_weight": 0.1,
+    "delta_action_weight": 0.05,
+    "current_margin_start_fraction": 0.85,
+    "derivative_penalty_start_fraction": 0.85,
+    "action_penalty_start_fraction": 0.85,
+    "delta_action_penalty_start": 0.25,
+    "delta_action_bad": 1.0,
+    "terminal_reward": -20.0,
+    "reward_scale": 1.0
   },
   "randomization": {
     "enabled": false

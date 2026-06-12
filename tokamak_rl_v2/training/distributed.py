@@ -95,7 +95,7 @@ def _actor_loop(
             raise RuntimeError(f"actor worker {worker_index} requested GPU simulator but actor device is not CUDA: {device}")
         worker_config = replace(config, sim=replace(config.sim, gpu_device=str(dev)))
     env = TokamakMagneticControlEnv(worker_config, batch_size=int(envs_per_worker), device=dev, seed=int(seed))
-    actor = FeedForwardGaussianActor(env.obs_dim, env.action_dim, worker_config.network.hidden_dim).to(dev)
+    actor = FeedForwardGaussianActor(env.obs_dim, env.action_dim, worker_config.network.hidden_dim, min_std=worker_config.network.actor_min_std, initial_std=worker_config.network.actor_initial_std).to(dev)
     actor.load_state_dict({k: torch.as_tensor(v, device=dev) for k, v in params_q.get().items()})
     obs = env.reset()
     while not stop.is_set():
