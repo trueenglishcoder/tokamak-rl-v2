@@ -51,7 +51,7 @@ PYCUDA
       --actor-devices cuda:1,cuda:2,cuda:3,cuda:4,cuda:5,cuda:6,cuda:7 \
       --batch-size 256 \
       --unroll-length 64 \
-      --replay-capacity-episodes 128 \
+      --replay-capacity-episodes 256 \
       --rollout-chunk-length 64 \
       --updates-per-rollout-chunk 24 \
       --hidden-dim 256 \
