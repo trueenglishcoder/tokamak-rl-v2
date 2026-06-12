@@ -13,7 +13,7 @@ cd /scratch/$USER/tokamak
 export POLICY_CONFIG=${POLICY_CONFIG:-configs/experiments/t15_hold_reset_boundary_ip_stage1_gpu.yaml}
 export TRAIN_OUTPUT=${TRAIN_OUTPUT:-outputs/t15_hold_reset_boundary_policy_${SLURM_JOB_ID:-manual}}
 export RUN_NAME=${RUN_NAME:-t15_hold_reset_boundary_policy_${SLURM_JOB_ID:-manual}}
-export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-tokamak-rl-v2-policy}
+export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-tokamak-rl-v2-policy-${SLURM_JOB_ID:-manual}}
 export WANDB_MODE=${WANDB_MODE:-online}
 
 srun \
