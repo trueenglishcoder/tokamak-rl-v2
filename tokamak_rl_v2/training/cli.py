@@ -134,6 +134,8 @@ def _load_reward_override(path: str, *, base: RewardConfig) -> RewardConfig:
         raise ValueError("reward override must have derivative_bad > derivative_good")
     if reward.reward_scale <= 0.0:
         raise ValueError("reward override must have positive reward_scale")
+    if reward.mode not in {"quality", "dense_physical"}:
+        raise ValueError(f"reward override has unsupported mode: {reward.mode}")
     if reward.tracking_combiner not in {"smooth_min", "weighted_mean", "geometric_mean", "product"}:
         raise ValueError(f"reward override has unsupported tracking_combiner: {reward.tracking_combiner}")
     if reward.shape_aggregator not in {"smooth_worst", "mean", "geometric_mean"}:

@@ -223,8 +223,10 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
         raise ValueError("reference.ip segment count bounds are invalid")
     if not 0.0 <= float(ip.hold_probability) <= 1.0:
         raise ValueError("reference.ip.hold_probability must be in [0, 1]")
-    if cfg.reference.boundary.kind not in {"static_initial_parameters", "rate_limited_parameters"}:
+    if cfg.reference.boundary.kind not in {"static_initial_parameters", "rate_limited_parameters", "hold_reset_boundary"}:
         raise ValueError("reference.boundary.kind is unsupported")
+    if cfg.reference.boundary.kind == "hold_reset_boundary" and int(cfg.reference.theta_count) != int(cfg.sim.angles):
+        raise ValueError("reference.theta_count must equal sim.angles for hold_reset_boundary")
     for key, value in cfg.reference.boundary.rate_limits.items():
         if not math.isfinite(float(value)) or float(value) < 0.0:
             raise ValueError(f"reference.boundary.rate_limits.{key} must be finite and non-negative")
@@ -256,6 +258,8 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
 
 
 def _validate_reward_config(reward: RewardConfig, *, prefix: str) -> None:
+    if reward.mode not in {"quality", "dense_physical"}:
+        raise ValueError(f"{prefix}.mode is unsupported")
     if reward.shape_bad_m <= reward.shape_good_m:
         raise ValueError(f"{prefix}.shape_bad_m must be greater than shape_good_m")
     if reward.ip_bad_a <= reward.ip_good_a:

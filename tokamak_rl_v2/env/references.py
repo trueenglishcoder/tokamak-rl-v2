@@ -52,20 +52,34 @@ def generate_reference_batch(
     steps: int,
     device: torch.device | str,
     seed: int,
+    initial_boundary_points: Tensor | np.ndarray | None = None,
+    initial_boundary_radii: Tensor | np.ndarray | None = None,
 ) -> ReferenceBatch:
     dev = torch.device(device)
     rng = np.random.default_rng(int(seed))
     B = int(np.asarray(initial_ip).reshape(-1).shape[0])
     ip = np.zeros((B, int(steps) + 1), dtype=np.float64)
     params = np.zeros((B, int(steps) + 1, 5), dtype=np.float64)
+    theta = torch.linspace(-torch.pi, torch.pi, int(config.theta_count) + 1, dtype=torch.float64, device=dev)[:-1]
     for b in range(B):
         ip[b] = _segmented_ip(config.ip, float(initial_ip[b]), int(steps), rng, dt=float(config.t_step))
-        params[b] = _boundary_params(config.boundary, np.asarray(initial_parameters[b], dtype=float), int(steps), rng, dt=float(config.t_step))
-    theta = torch.linspace(-torch.pi, torch.pi, int(config.theta_count) + 1, dtype=torch.float64, device=dev)[:-1]
+        if config.boundary.kind != "hold_reset_boundary":
+            params[b] = _boundary_params(config.boundary, np.asarray(initial_parameters[b], dtype=float), int(steps), rng, dt=float(config.t_step))
     params_t = torch.as_tensor(params, dtype=torch.float64, device=dev)
-    points = boundary_points_from_parameters(params_t, theta)
-    centers = params_t[..., 0:2]
-    radii = radii_from_points(points, centers)
+    if config.boundary.kind == "hold_reset_boundary":
+        if initial_boundary_points is None or initial_boundary_radii is None:
+            raise ValueError("hold_reset_boundary requires initial_boundary_points and initial_boundary_radii")
+        points0 = torch.nan_to_num(torch.as_tensor(initial_boundary_points, dtype=torch.float64, device=dev), nan=0.0, posinf=0.0, neginf=0.0).reshape(B, int(config.theta_count), 2)
+        radii0 = torch.nan_to_num(torch.as_tensor(initial_boundary_radii, dtype=torch.float64, device=dev), nan=0.0, posinf=0.0, neginf=0.0).reshape(B, int(config.theta_count))
+        points = points0[:, None, :, :].repeat(1, int(steps) + 1, 1, 1)
+        radii = radii0[:, None, :].repeat(1, int(steps) + 1, 1)
+        centers = torch.mean(points0, dim=1)
+        params_t = torch.zeros((B, int(steps) + 1, 5), dtype=torch.float64, device=dev)
+        params_t[..., 0:2] = centers[:, None, :]
+    else:
+        points = boundary_points_from_parameters(params_t, theta)
+        centers = params_t[..., 0:2]
+        radii = radii_from_points(points, centers)
     return ReferenceBatch(
         ip=torch.as_tensor(ip, dtype=torch.float64, device=dev),
         parameters=params_t,

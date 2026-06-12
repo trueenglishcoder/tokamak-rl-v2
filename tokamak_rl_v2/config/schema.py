@@ -54,7 +54,7 @@ class IpReferenceConfig:
 
 @dataclass(frozen=True, slots=True)
 class BoundaryReferenceConfig:
-    kind: Literal["static_initial_parameters", "rate_limited_parameters"] = "static_initial_parameters"
+    kind: Literal["static_initial_parameters", "rate_limited_parameters", "hold_reset_boundary"] = "static_initial_parameters"
     rate_limits: dict[str, float] = field(default_factory=dict)
 
 
@@ -76,6 +76,7 @@ class ObservationConfig:
 
 @dataclass(frozen=True, slots=True)
 class RewardConfig:
+    mode: Literal["quality", "dense_physical"] = "quality"
     shape_good_m: float = 0.005
     shape_bad_m: float = 0.05
     ip_good_a: float = 500.0

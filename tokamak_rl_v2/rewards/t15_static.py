@@ -42,6 +42,8 @@ class T15StaticBoundaryReward:
         finite_bad_shape = torch.full_like(raw_shape_error, float(c.shape_bad_m))
         shape_error = torch.nan_to_num(raw_shape_error, nan=float(c.shape_bad_m), posinf=float(c.shape_bad_m), neginf=float(c.shape_bad_m))
         shape_error = torch.where(boundary_mask, shape_error, finite_bad_shape)
+        shape_error_mean = torch.mean(shape_error, dim=-1)
+        shape_error_max = torch.max(shape_error, dim=-1).values
         shape_quality_points = transforms.softplus(shape_error, good=c.shape_good_m, bad=c.shape_bad_m)
         if c.shape_aggregator == "smooth_worst":
             r_shape = combiners.smooth_max(shape_quality_points, alpha=-1.0, dim=-1)
@@ -80,14 +82,45 @@ class T15StaticBoundaryReward:
         regularization_quality = torch.clamp(1.0 - action_penalty - delta_action_penalty, 0.0, 1.0)
         combined = tracking_quality * r_current * r_derivative * regularization_quality
         combined = torch.where(boundary_found, combined, torch.zeros_like(combined))
-        reward = combined * float(c.reward_scale)
-        terminal = torch.full_like(reward, float(c.terminal_reward) * float(c.reward_scale))
-        reward = torch.where(terminated, terminal, reward)
+        terminal = torch.full_like(combined, float(c.terminal_reward) * float(c.reward_scale))
+        if c.mode == "quality":
+            reward = combined * float(c.reward_scale)
+            reward = torch.where(terminated, terminal, reward)
+            dense_components: dict[str, Tensor] = {}
+        elif c.mode == "dense_physical":
+            shape_scale = max(float(c.shape_bad_m), 1.0e-12)
+            ip_scale = max(float(c.ip_bad_a), 1.0e-12)
+            current_scale = max(float(c.current_bad_a), 1.0e-12)
+            derivative_scale = max(float(c.derivative_bad), 1.0e-12)
+            dense_shape_loss = _huber01(shape_error_mean / shape_scale) + 0.25 * _huber01(shape_error_max / shape_scale)
+            dense_ip_loss = _huber01(ip_error / ip_scale)
+            dense_current_loss = _huber01(current_error / current_scale)
+            dense_derivative_loss = _huber01(derivative_usage / derivative_scale)
+            dense_action_loss = float(c.action_penalty_weight) * action_mag.pow(2) + float(c.delta_action_penalty_weight) * delta_mag.pow(2)
+            dense_loss = (
+                float(c.shape_weight) * dense_shape_loss
+                + float(c.ip_weight) * dense_ip_loss
+                + dense_current_loss
+                + 0.25 * dense_derivative_loss
+                + dense_action_loss
+            )
+            reward = -float(c.reward_scale) * dense_loss
+            reward = torch.where(terminated, reward + terminal, reward)
+            dense_components = {
+                "dense_loss": dense_loss,
+                "dense_shape_loss": dense_shape_loss,
+                "dense_ip_loss": dense_ip_loss,
+                "dense_current_loss": dense_current_loss,
+                "dense_derivative_loss": dense_derivative_loss,
+                "dense_action_loss": dense_action_loss,
+            }
+        else:
+            raise ValueError(f"unsupported reward mode: {c.mode}")
         return RewardBatch(
             reward=reward,
             components={
-                "shape_error_mean_m": torch.mean(shape_error, dim=-1),
-                "shape_error_max_m": torch.max(shape_error, dim=-1).values,
+                "shape_error_mean_m": shape_error_mean,
+                "shape_error_max_m": shape_error_max,
                 "shape_quality": r_shape,
                 "ip_error_a": ip_error,
                 "ip_quality": r_ip,
@@ -107,5 +140,11 @@ class T15StaticBoundaryReward:
                 "regularization_quality": regularization_quality,
                 "combined_quality": combined,
                 "boundary_found": boundary_found.to(dtype=reward.dtype),
+                **dense_components,
             },
         )
+
+
+def _huber01(x: Tensor) -> Tensor:
+    x = torch.clamp(x, min=0.0)
+    return torch.where(x <= 1.0, 0.5 * x.pow(2), x - 0.5)

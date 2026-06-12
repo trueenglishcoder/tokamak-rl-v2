@@ -23,6 +23,7 @@ from tokamak_rl_v2.training.trainer import Trainer
 
 
 REWARD_FIELDS = [
+    "mode",
     "shape_good_m",
     "shape_bad_m",
     "ip_good_a",
@@ -781,6 +782,7 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--search-seed", type=int, default=None)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--continue-on-error", action="store_true")
+    ap.add_argument("--mode-values", default=None)
     ap.add_argument("--shape-good-values", default=None)
     ap.add_argument("--shape-bad-values", default=None)
     ap.add_argument("--ip-good-values", default=None)
@@ -829,6 +831,7 @@ def _apply_overrides(cfg: ExperimentConfig, args: argparse.Namespace) -> Experim
 
 def _reward_value_grid(base: RewardConfig, args: argparse.Namespace) -> list[tuple[str, list[float]]]:
     raw_values = [
+        ("mode", args.mode_values),
         ("shape_good_m", args.shape_good_values),
         ("shape_bad_m", args.shape_bad_values),
         ("ip_good_a", args.ip_good_values),
@@ -1152,6 +1155,8 @@ def _validate_runtime_config(cfg: ExperimentConfig) -> None:
 
 
 def _validate_reward_candidate(data: dict[str, object]) -> None:
+    if str(data.get("mode", "quality")) not in {"quality", "dense_physical"}:
+        raise ValueError("unsupported reward mode")
     if float(data["shape_bad_m"]) <= float(data["shape_good_m"]):
         raise ValueError("shape_bad_m must be greater than shape_good_m")
     if float(data["ip_bad_a"]) <= float(data["ip_good_a"]):
@@ -1395,7 +1400,7 @@ def _reward_from_row(row: dict[str, object]) -> RewardConfig:
     data = {}
     for field in REWARD_FIELDS:
         default = getattr(defaults, field)
-        raw = row[f"reward.{field}"]
+        raw = row.get(f"reward.{field}", default)
         data[field] = str(raw) if isinstance(default, str) else float(raw)
     return RewardConfig(**data)
 

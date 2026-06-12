@@ -65,8 +65,7 @@ class TokamakMagneticControlEnv:
         return self.cfg.sol
 
     def reset(self) -> Tensor:
-        ip0, pfc0, sol0, params0, reference = self._sample_reset_payload(self.batch_size)
-        self.reference = reference
+        ip0, pfc0, sol0, params0, reference_seed = self._sample_reset_payload(self.batch_size)
         self.previous_action.zero_()
         self.action_offset = self._sample_action_offset(self.batch_size)
         self.step_index.zero_()
@@ -82,9 +81,12 @@ class TokamakMagneticControlEnv:
                 limiter_shape=self.cfg.limiter_shape,
                 gpu_device=self.config.sim.gpu_device,
             )
-            self._gpu_sim.reset(ip=ip0, pfc_currents=pfc0, sol_currents=sol0)
-            return self._obs_gpu()
+            result = self._gpu_sim.reset(ip=ip0, pfc_currents=pfc0, sol_currents=sol0)
+            self.reference = self._reference_for_reset_payload(ip0=ip0, params0=params0, seed=reference_seed, boundary_points=result.boundary.points, boundary_radii=result.boundary.radii)
+            return self._obs_gpu(result=result)
         self._cpu_models = [self._new_cpu_model(ip=float(ip0[b]), pfc_currents=pfc0[b], sol_currents=sol0[b]) for b in range(self.batch_size)]
+        points0, radii0, _found0 = self._cpu_boundary_samples()
+        self.reference = self._reference_for_reset_payload(ip0=ip0, params0=params0, seed=reference_seed, boundary_points=points0, boundary_radii=radii0)
         return self._obs_cpu()
 
     def reset_indices(self, done_mask: Tensor | np.ndarray | list[bool]) -> Tensor:
@@ -96,12 +98,8 @@ class TokamakMagneticControlEnv:
         indices_t = torch.nonzero(mask, as_tuple=False).reshape(-1)
         indices = [int(v) for v in indices_t.detach().cpu().tolist()]
         count = len(indices)
-        ip0, pfc0, sol0, params0, reference = self._sample_reset_payload(count)
+        ip0, pfc0, sol0, params0, reference_seed = self._sample_reset_payload(count)
         assert self.reference is not None
-        self.reference.ip[indices_t] = reference.ip
-        self.reference.parameters[indices_t] = reference.parameters
-        self.reference.points[indices_t] = reference.points
-        self.reference.radii[indices_t] = reference.radii
         self.previous_action[indices_t] = 0.0
         self.action_offset[indices_t] = self._sample_action_offset(count)
         self.step_index[indices_t] = 0
@@ -109,24 +107,52 @@ class TokamakMagneticControlEnv:
         if self.config.sim.compute_backend == "gpu":
             assert self._gpu_sim is not None
             result = self._gpu_sim.reset_indices(indices, ip=ip0, pfc_currents=pfc0, sol_currents=sol0)
+            idx_for_boundary = indices_t.to(device=result.boundary.points.device)
+            reference = self._reference_for_reset_payload(ip0=ip0, params0=params0, seed=reference_seed, boundary_points=result.boundary.points[idx_for_boundary], boundary_radii=result.boundary.radii[idx_for_boundary])
+            self._write_reference_indices(indices_t, reference)
             return self._obs_gpu(result=result)
         for local, env_index in enumerate(indices):
             self._cpu_models[env_index] = self._new_cpu_model(ip=float(ip0[local]), pfc_currents=pfc0[local], sol_currents=sol0[local])
+        points0, radii0, _found0 = self._cpu_boundary_samples(indices=indices)
+        reference = self._reference_for_reset_payload(ip0=ip0, params0=params0, seed=reference_seed, boundary_points=points0, boundary_radii=radii0)
+        self._write_reference_indices(indices_t, reference)
         return self._obs_cpu()
 
-    def _sample_reset_payload(self, count: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, ReferenceBatch]:
+    def _sample_reset_payload(self, count: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
         if self.config.sim.initial_ranges is None:
             raise ValueError("training config must provide replay-bounded initial_ranges")
         ip0, pfc0, sol0, params0 = sample_initial_conditions(self.rng, self.config.sim.initial_ranges, int(count))
-        reference = generate_reference_batch(
+        return ip0, pfc0, sol0, params0, int(self.rng.integers(0, 2**31 - 1))
+
+    def _reference_for_reset_payload(
+        self,
+        *,
+        ip0: np.ndarray,
+        params0: np.ndarray,
+        seed: int,
+        boundary_points,
+        boundary_radii,
+    ) -> ReferenceBatch:
+        kwargs: dict[str, object] = {}
+        if self.config.reference.boundary.kind == "hold_reset_boundary":
+            kwargs["initial_boundary_points"] = boundary_points
+            kwargs["initial_boundary_radii"] = boundary_radii
+        return generate_reference_batch(
             config=self.config.reference,
             initial_ip=ip0,
             initial_parameters=params0,
             steps=int(self.config.sim.max_episode_steps),
             device=self.device,
-            seed=int(self.rng.integers(0, 2**31 - 1)),
+            seed=int(seed),
+            **kwargs,
         )
-        return ip0, pfc0, sol0, params0, reference
+
+    def _write_reference_indices(self, indices_t: Tensor, reference: ReferenceBatch) -> None:
+        assert self.reference is not None
+        self.reference.ip[indices_t] = reference.ip
+        self.reference.parameters[indices_t] = reference.parameters
+        self.reference.points[indices_t] = reference.points
+        self.reference.radii[indices_t] = reference.radii
 
     def _sample_action_offset(self, count: int) -> Tensor:
         if self.config.randomization.enabled and (self.config.randomization.action_offset_min != 0.0 or self.config.randomization.action_offset_max != 0.0):
@@ -287,6 +313,27 @@ class TokamakMagneticControlEnv:
             ]
             obs.append(np.concatenate(parts))
         return torch.nan_to_num(torch.as_tensor(np.stack(obs, axis=0), dtype=torch.float32, device=self.device), nan=0.0, posinf=0.0, neginf=0.0)
+
+    def _cpu_boundary_samples(self, *, indices: list[int] | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        selected = list(range(len(self._cpu_models))) if indices is None else [int(i) for i in indices]
+        points: list[np.ndarray] = []
+        radii_values: list[np.ndarray] = []
+        found: list[bool] = []
+        angle_count = int(self.config.sim.angles)
+        for env_index in selected:
+            model = self._cpu_models[env_index]
+            try:
+                poly, _level, _status = find_plasma_boundary_with_status(model.state.psi, model.grid, (model.R0, model.Z0), n_levels=80, limiter_shape=self.cfg.limiter_shape, boundary_mode=self.cfg.boundary_mode)
+                radii = radii_from_polyline_ray_intersections(poly, (model.R0, model.Z0), self.angles)
+                pts = np.column_stack([model.R0 + radii * np.cos(self.angles), model.Z0 + radii * np.sin(self.angles)])
+                points.append(np.nan_to_num(pts, nan=0.0, posinf=0.0, neginf=0.0))
+                radii_values.append(np.nan_to_num(radii, nan=0.0, posinf=0.0, neginf=0.0))
+                found.append(True)
+            except BoundaryNotFoundError:
+                points.append(np.zeros((angle_count, 2), dtype=float))
+                radii_values.append(np.zeros((angle_count,), dtype=float))
+                found.append(False)
+        return np.stack(points, axis=0), np.stack(radii_values, axis=0), np.asarray(found, dtype=bool)
 
     def _step_cpu(self, physical: Tensor) -> None:
         arr = physical.detach().cpu().numpy()

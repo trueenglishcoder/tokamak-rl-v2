@@ -17,6 +17,7 @@ from tokamak_rl_v2.rewards import T15StaticBoundaryReward
 from tokamak_rl_v2.rewards import transforms
 from tokamak_rl_v2.export.cli import main as export_cli_main
 from tokamak_rl_v2.training.mpo import MaximumAPosterioriPolicyOptimiser
+from tokamak_rl_v2.training.policy_pipeline import evaluate_policy_gates, run_reset_sanity
 from tokamak_rl_v2.training.replay import FIFOSequenceReplay, SequenceBatch
 from tokamak_rl_v2.training.trainer import Trainer
 from tokamak_rl_v2.training.reward_search import _promotion_reason, _rank_rows, _stage_float_value, _write_promotion_artifacts, main as reward_search_main
@@ -106,6 +107,29 @@ def test_reward_components_remain_finite_when_boundary_is_missing() -> None:
     assert float(rb.components["shape_error_mean_m"].item()) == pytest.approx(0.05)
 
 
+def test_dense_physical_reward_improves_when_tracking_errors_improve() -> None:
+    reward_fn = T15StaticBoundaryReward(RewardConfig(mode="dense_physical", reward_scale=1.0, shape_bad_m=0.03, ip_bad_a=40000.0), control_rate_hz=1000.0)
+    ref = torch.zeros((2, 32, 2), dtype=torch.float32)
+    boundary = ref.clone()
+    boundary[1, :, 0] = 0.06
+    action = torch.zeros((2, 9), dtype=torch.float32)
+    rb = reward_fn(
+        ip=torch.tensor([200000.0, 260000.0]),
+        ip_ref=torch.tensor([200000.0, 200000.0]),
+        boundary_points=boundary,
+        reference_points=ref,
+        action=action,
+        previous_action=action,
+        current_over_limit_a=torch.zeros((2,), dtype=torch.float32),
+        derivative_usage=torch.zeros((2,), dtype=torch.float32),
+        boundary_found=torch.ones((2,), dtype=torch.bool),
+        terminated=torch.zeros((2,), dtype=torch.bool),
+    )
+    assert rb.reward[0] > rb.reward[1]
+    assert rb.components["dense_shape_loss"][0] < rb.components["dense_shape_loss"][1]
+    assert rb.components["dense_ip_loss"][0] < rb.components["dense_ip_loss"][1]
+
+
 def test_environment_reset_step_contract() -> None:
     cfg = load_experiment_config(CONFIG)
     cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=4))
@@ -126,6 +150,41 @@ def test_environment_reset_step_contract() -> None:
     assert result.obs.shape == (2, env.obs_dim)
     assert result.reward.shape == (2,)
     assert torch.isfinite(result.reward).all()
+
+
+def test_hold_reset_boundary_uses_observed_reset_boundary() -> None:
+    cfg = load_experiment_config(CONFIG)
+    cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=4))
+    cfg = replace(cfg, reference=replace(cfg.reference, boundary=replace(cfg.reference.boundary, kind="hold_reset_boundary")))
+    env = TokamakMagneticControlEnv(cfg, batch_size=2, device="cpu", seed=3)
+    obs = env.reset()
+    schema = env.export_schema()
+    err0, err1 = schema["feature_slices"]["boundary_radii_error"]
+    found0, found1 = schema["feature_slices"]["boundary_found"]
+    assert torch.max(torch.abs(obs[:, err0:err1])).item() == pytest.approx(0.0, abs=1.0e-6)
+    assert torch.min(obs[:, found0:found1]).item() == pytest.approx(1.0)
+
+
+def test_hold_reset_boundary_reset_is_deterministic_for_fixed_seed() -> None:
+    cfg = load_experiment_config(CONFIG)
+    cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=4))
+    cfg = replace(cfg, reference=replace(cfg.reference, boundary=replace(cfg.reference.boundary, kind="hold_reset_boundary")))
+    env_a = TokamakMagneticControlEnv(cfg, batch_size=2, device="cpu", seed=5)
+    env_b = TokamakMagneticControlEnv(cfg, batch_size=2, device="cpu", seed=5)
+    obs_a = env_a.reset()
+    obs_b = env_b.reset()
+    assert torch.allclose(obs_a, obs_b)
+    assert env_a.reference is not None and env_b.reference is not None
+    assert torch.allclose(env_a.reference.radii, env_b.reference.radii)
+
+
+def test_policy_pipeline_reset_sanity_uses_hold_boundary() -> None:
+    cfg = load_experiment_config(CONFIG)
+    cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=4))
+    cfg = replace(cfg, reference=replace(cfg.reference, boundary=replace(cfg.reference.boundary, kind="hold_reset_boundary")))
+    report = run_reset_sanity(cfg, device="cpu", num_envs=2)
+    assert report["max_abs_boundary_radii_error_m"] == pytest.approx(0.0, abs=1.0e-6)
+    assert report["boundary_found_mean"] == pytest.approx(1.0)
 
 
 def test_episode_replay_never_crosses_env_or_done_boundaries() -> None:
@@ -198,8 +257,9 @@ def test_ip_reference_segment_count_controls_generation() -> None:
 def test_reward_override_file_is_validated(tmp_path: Path) -> None:
     base = RewardConfig()
     valid = tmp_path / "reward.json"
-    valid.write_text(json.dumps({"shape_weight": 8.0, "ip_weight": 12.0, "tracking_combiner": "weighted_mean", "shape_aggregator": "mean"}), encoding="utf-8")
+    valid.write_text(json.dumps({"mode": "dense_physical", "shape_weight": 8.0, "ip_weight": 12.0, "tracking_combiner": "weighted_mean", "shape_aggregator": "mean"}), encoding="utf-8")
     reward = _load_reward_override(str(valid), base=base)
+    assert reward.mode == "dense_physical"
     assert reward.shape_weight == 8.0
     assert reward.ip_weight == 12.0
     assert reward.tracking_combiner == "weighted_mean"
@@ -211,6 +271,10 @@ def test_reward_override_file_is_validated(tmp_path: Path) -> None:
     bad_string.write_text(json.dumps({"tracking_combiner": "not_real"}), encoding="utf-8")
     with pytest.raises(ValueError, match="unsupported tracking_combiner"):
         _load_reward_override(str(bad_string), base=base)
+    bad_mode = tmp_path / "bad_reward_mode.json"
+    bad_mode.write_text(json.dumps({"mode": "not_real"}), encoding="utf-8")
+    with pytest.raises(ValueError, match="unsupported mode"):
+        _load_reward_override(str(bad_mode), base=base)
 
 
 def test_small_training_writes_export(tmp_path: Path) -> None:
@@ -281,6 +345,66 @@ def test_config_loader_rejects_invalid_values(tmp_path: Path) -> None:
     bad_learner.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(ValueError, match="action_samples"):
         load_experiment_config(bad_learner)
+
+    data = json.loads(CONFIG.read_text())
+    data["reward"]["mode"] = "not_real"
+    bad_mode = tmp_path / "bad_reward_mode.json"
+    bad_mode.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="mode"):
+        load_experiment_config(bad_mode)
+
+
+def test_policy_pipeline_gates_require_learning_signals() -> None:
+    actor_eval = {
+        "boundary_found": 1.0,
+        "current_over_limit_a": 0.0,
+        "shape_error_mean_m": 0.02,
+        "ip_error_a": 70000.0,
+        "action_rms": 0.02,
+    }
+    no_control = {"ip_error_a": 100000.0}
+    tail_losses = {"tail100.policy_weight_max": 0.06, "tail100.sampled_q_spread": 1.0e-4}
+    gates = evaluate_policy_gates(
+        actor_eval=actor_eval,
+        no_control=no_control,
+        tail_losses=tail_losses,
+        action_samples=20,
+        min_boundary_found=0.999,
+        max_current_over_limit_a=0.0,
+        max_shape_error_m=0.03,
+        min_ip_improvement_frac=0.25,
+        min_ip_improvement_a=20000.0,
+        min_action_rms=0.005,
+        max_action_rms=0.5,
+        min_policy_weight_extra=1.0e-4,
+        min_sampled_q_spread=1.0e-8,
+        require_controller_rollout=True,
+        controller_rollout={"status": "ok"},
+    )
+    assert gates["passed"] is True
+
+    stalled = evaluate_policy_gates(
+        actor_eval=dict(actor_eval, action_rms=0.0),
+        no_control=no_control,
+        tail_losses={"tail100.policy_weight_max": 0.05, "tail100.sampled_q_spread": 0.0},
+        action_samples=20,
+        min_boundary_found=0.999,
+        max_current_over_limit_a=0.0,
+        max_shape_error_m=0.03,
+        min_ip_improvement_frac=0.25,
+        min_ip_improvement_a=20000.0,
+        min_action_rms=0.005,
+        max_action_rms=0.5,
+        min_policy_weight_extra=1.0e-4,
+        min_sampled_q_spread=1.0e-8,
+        require_controller_rollout=True,
+        controller_rollout={"status": "ok"},
+    )
+    reasons = {check["name"]: check["passed"] for check in stalled["checks"]}
+    assert stalled["passed"] is False
+    assert reasons["action_rms_min"] is False
+    assert reasons["mpo_policy_weights_nonuniform"] is False
+    assert reasons["mpo_sampled_q_spread"] is False
 
 
 def test_experiment_configs_use_neutral_output_names() -> None:
