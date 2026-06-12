@@ -134,12 +134,12 @@ def main(argv: list[str] | None = None) -> int:
         "baseline_results": args.baseline_results,
         "previous_stage_results": args.previous_stage_results,
         "stage_input_count": args.stage_input_count,
-        "stage_max_shape_degradation_m": _optional_float_values(args.stage_max_shape_degradation_m),
-        "stage_min_ip_improvement_a": _optional_float_values(args.stage_min_ip_improvement_a),
-        "stage_max_shape_error_m": _optional_float_values(args.stage_max_shape_error_m),
-        "stage_max_ip_error_a": _optional_float_values(args.stage_max_ip_error_a),
-        "stage_min_action_rms": _optional_float_values(args.stage_min_action_rms),
-        "stage_max_action_rms": _optional_float_values(args.stage_max_action_rms),
+        "stage_max_shape_degradation_m": _stage_float_values(args.stage_max_shape_degradation_m),
+        "stage_min_ip_improvement_a": _stage_float_values(args.stage_min_ip_improvement_a),
+        "stage_max_shape_error_m": _stage_float_values(args.stage_max_shape_error_m),
+        "stage_max_ip_error_a": _stage_float_values(args.stage_max_ip_error_a),
+        "stage_min_action_rms": _stage_float_values(args.stage_min_action_rms),
+        "stage_max_action_rms": _stage_float_values(args.stage_max_action_rms),
     }
     (out / "search_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     if args.stage_only != "all":
@@ -957,8 +957,17 @@ def _optional_float_values(raw: str | None) -> list[float] | None:
     return _float_values(raw, 0.0)
 
 
+def _stage_float_values(raw: str | None) -> list[float] | None:
+    if raw is None or str(raw).strip() == "":
+        return None
+    values = [float(v.strip()) for v in str(raw).split(",") if v.strip()]
+    if not values:
+        raise ValueError("stage threshold list must not be empty")
+    return values
+
+
 def _stage_float_value(raw: str | None, stage_index: int) -> float | None:
-    values = _optional_float_values(raw)
+    values = _stage_float_values(raw)
     if not values:
         return None
     if len(values) != len(STAGE_NAMES):

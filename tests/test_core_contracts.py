@@ -18,7 +18,7 @@ from tokamak_rl_v2.rewards import transforms
 from tokamak_rl_v2.training.mpo import MaximumAPosterioriPolicyOptimiser
 from tokamak_rl_v2.training.replay import FIFOSequenceReplay, SequenceBatch
 from tokamak_rl_v2.training.trainer import Trainer
-from tokamak_rl_v2.training.reward_search import _promotion_reason, _rank_rows, main as reward_search_main
+from tokamak_rl_v2.training.reward_search import _promotion_reason, _rank_rows, _stage_float_value, main as reward_search_main
 from tokamak_rl_v2.training.cli import _device_list
 
 
@@ -228,6 +228,13 @@ def test_reward_search_weight_grid_generates_expected_candidates(tmp_path: Path)
 
 
 
+
+
+
+def test_stage_threshold_parser_preserves_repeated_values() -> None:
+    assert _stage_float_value("0.60,0.60,0.60", 1) == 0.60
+    assert _stage_float_value("0.60,0.60,0.60", 2) == 0.60
+    assert _stage_float_value("0.60,0.60,0.60", 3) == 0.60
 
 def test_control_discovery_preset_is_broad_and_not_local_grid(tmp_path: Path) -> None:
     out = tmp_path / "control_discovery"
