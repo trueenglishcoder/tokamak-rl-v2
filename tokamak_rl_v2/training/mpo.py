@@ -25,6 +25,8 @@ class UpdateMetrics:
     action_std_mean: float
     sampled_q_spread: float
     policy_weight_entropy: float
+    policy_weight_max: float
+    mpo_temperature: float
 
 
 class MaximumAPosterioriPolicyOptimiser:
@@ -87,6 +89,8 @@ class MaximumAPosterioriPolicyOptimiser:
             action_std_mean=float(actor_metrics[6]),
             sampled_q_spread=float(actor_metrics[7]),
             policy_weight_entropy=float(actor_metrics[8]),
+            policy_weight_max=float(actor_metrics[9]),
+            mpo_temperature=float(actor_metrics[10]),
         )
 
     def _critic_update(self, batch: SequenceBatch) -> tuple[float, float, float]:
@@ -107,7 +111,7 @@ class MaximumAPosterioriPolicyOptimiser:
         target_mean = torch.sum(target.detach() * mask) / denom
         return float(loss.detach().cpu()), float(q_mean.cpu()), float(target_mean.cpu())
 
-    def _actor_update(self, batch: SequenceBatch) -> tuple[float, float, float, float, float, float, float, float, float]:
+    def _actor_update(self, batch: SequenceBatch) -> tuple[float, float, float, float, float, float, float, float, float, float, float]:
         obs_seq = batch.obs.detach()
         mask = batch.mask.to(dtype=torch.float32)
         B, T, O = obs_seq.shape
@@ -117,9 +121,20 @@ class MaximumAPosterioriPolicyOptimiser:
             K = int(self.config.action_samples)
             raw = old.distribution.rsample((K,)).reshape(K, B, T, -1)
             sampled = torch.tanh(raw)
-            q_values = self._sampled_q_values(obs_seq, sampled, mask=mask)
-            eta = torch.clamp(self.log_temperature.exp(), min=1.0e-6)
-            weights = torch.softmax(q_values / eta, dim=0).detach()
+            q_values = self._sampled_q_values(obs_seq, sampled, mask=mask).detach()
+
+        q_centered = q_values - torch.max(q_values, dim=0, keepdim=True).values
+        eta = torch.clamp(self.log_temperature.exp(), min=1.0e-6, max=1.0e6)
+        log_mean_exp = torch.logsumexp(q_centered / eta, dim=0) - torch.log(torch.as_tensor(float(K), dtype=q_values.dtype, device=q_values.device))
+        dual = eta * (float(getattr(self.config, "mpo_epsilon", 0.1)) + log_mean_exp)
+        denom = torch.clamp(mask.sum(), min=1.0)
+        temp_loss = torch.sum(dual * mask) / denom
+        self.temperature_optim.zero_grad(set_to_none=True)
+        temp_loss.backward()
+        self.temperature_optim.step()
+
+        eta_for_weights = torch.clamp(self.log_temperature.exp().detach(), min=1.0e-6, max=1.0e6)
+        weights = torch.softmax(q_centered / eta_for_weights, dim=0).detach()
         before = [p.detach().clone() for p in self.actor.parameters()]
         new = self.actor(flat_obs)
         new_dist = new.distribution
@@ -151,10 +166,7 @@ class MaximumAPosterioriPolicyOptimiser:
             action_mean_abs = torch.sum(torch.mean(torch.abs(new_mean.detach()), dim=-1) * mask) / denom
             action_std_mean = torch.sum(torch.mean(new_std.detach(), dim=-1) * mask) / denom
 
-        temp_loss = self.log_temperature.exp() * (torch.sum(weights * torch.log(torch.clamp(weights, min=1.0e-12)) * masked) / denom + float(self.config.mean_kl_epsilon)).detach()
-        self.temperature_optim.zero_grad(set_to_none=True)
-        temp_loss.backward()
-        self.temperature_optim.step()
+        weight_max = torch.sum(torch.max(weights, dim=0).values * mask) / denom
         return (
             float(actor_loss.detach().cpu()),
             float(mean_kl.detach().cpu()),
@@ -165,6 +177,8 @@ class MaximumAPosterioriPolicyOptimiser:
             float(action_std_mean.detach().cpu()),
             float(sampled_q_spread.detach().cpu()),
             float(weight_entropy.detach().cpu()),
+            float(weight_max.detach().cpu()),
+            float(eta_for_weights.detach().cpu()),
         )
 
     def _sampled_q_values(self, obs: Tensor, sampled_actions: Tensor, *, mask: Tensor | None = None) -> Tensor:

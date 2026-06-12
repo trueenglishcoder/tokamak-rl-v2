@@ -134,6 +134,7 @@ class LearnerConfig:
     action_samples: int = 20
     actor_update_chunk_size: int = 2048
     temperature: float = 1.0
+    mpo_epsilon: float = 0.1
     mean_kl_epsilon: float = 0.01
     std_kl_epsilon: float = 1.0e-4
     target_update_tau: float = 0.005

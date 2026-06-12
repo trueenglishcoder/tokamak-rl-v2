@@ -87,7 +87,7 @@ class Trainer:
         metrics_path = self.output_dir / "metrics.json"
         rewards_path = self.output_dir / "reward_components.csv"
         with losses_path.open("w", newline="", encoding="utf-8") as loss_f, rewards_path.open("w", newline="", encoding="utf-8") as reward_f:
-            loss_writer = csv.DictWriter(loss_f, fieldnames=["step", "critic_loss", "actor_loss", "mean_kl", "std_kl", "q_mean", "target_q_mean", "actor_mle_loss", "actor_param_delta_norm", "action_mean_abs", "action_std_mean", "sampled_q_spread", "policy_weight_entropy", "env_steps_per_second"])
+            loss_writer = csv.DictWriter(loss_f, fieldnames=["step", "critic_loss", "actor_loss", "mean_kl", "std_kl", "q_mean", "target_q_mean", "actor_mle_loss", "actor_param_delta_norm", "action_mean_abs", "action_std_mean", "sampled_q_spread", "policy_weight_entropy", "policy_weight_max", "mpo_temperature", "env_steps_per_second"])
             reward_writer = None
             loss_writer.writeheader()
             obs = self.env.reset()
@@ -175,7 +175,7 @@ class Trainer:
         start = time.time()
         try:
             with losses_path.open("w", newline="", encoding="utf-8") as loss_f:
-                loss_writer = csv.DictWriter(loss_f, fieldnames=["step", "critic_loss", "actor_loss", "mean_kl", "std_kl", "q_mean", "target_q_mean", "actor_mle_loss", "actor_param_delta_norm", "action_mean_abs", "action_std_mean", "sampled_q_spread", "policy_weight_entropy", "env_steps_per_second"])
+                loss_writer = csv.DictWriter(loss_f, fieldnames=["step", "critic_loss", "actor_loss", "mean_kl", "std_kl", "q_mean", "target_q_mean", "actor_mle_loss", "actor_param_delta_norm", "action_mean_abs", "action_std_mean", "sampled_q_spread", "policy_weight_entropy", "policy_weight_max", "mpo_temperature", "env_steps_per_second"])
                 loss_writer.writeheader()
                 progress = tqdm(total=max(self.steps - self.start_step, 0), desc="distributed-train", unit="step", dynamic_ncols=True)
                 while env_steps < self.steps:

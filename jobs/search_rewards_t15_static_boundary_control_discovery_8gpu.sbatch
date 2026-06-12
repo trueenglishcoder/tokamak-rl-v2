@@ -3,7 +3,7 @@
 #SBATCH --partition=batch
 #SBATCH --gres=gpu:8
 #SBATCH --nodes=1
-#SBATCH --time=07:30:00
+#SBATCH --time=06:30:00
 #SBATCH --output=slurm_logs/tokamak-rl-v2-rs-control-%j.out
 #SBATCH --error=slurm_logs/tokamak-rl-v2-rs-control-%j.err
 
@@ -48,15 +48,18 @@ PYCUDA
       --candidate-preset control_discovery \
       --ranking-profile control_discovery \
       --output-dir ${SEARCH_ROOT} \
-      --stage-steps 5000,15000,40000 \
+      --stage-steps 30000,100000,250000 \
       --stage-keep 8,3,1 \
-      --stage-eval-episodes 8,16,32 \
-      --stage-max-shape-error-m 0.18,0.16,0.14 \
-      --stage-max-shape-degradation-m 0.06,0.05,0.04 \
-      --stage-min-ip-improvement-a 5000,20000,35000 \
-      --stage-max-ip-error-a 130000,115000,105000 \
-      --stage-min-action-rms 0.003,0.004,0.005 \
-      --stage-max-action-rms 0.60,0.60,0.60 \
+      --stage-eval-episodes 12,24,48 \
+      --stage-max-shape-error-m 0.20,0.17,0.145 \
+      --stage-max-shape-degradation-m 0.08,0.06,0.045 \
+      --stage-min-ip-improvement-a 10000,30000,50000 \
+      --stage-max-ip-error-a 150000,120000,100000 \
+      --stage-min-action-rms 0.004,0.006,0.008 \
+      --stage-max-action-rms 0.70,0.65,0.60 \
+      --stage-min-policy-weight-max 0.055,0.060,0.065 \
+      --stage-min-sampled-q-spread 0.000001,0.000003,0.000005 \
+      --stage-min-actor-param-delta-norm 0.000001,0.000003,0.000005 \
       --baseline-policy no_control \
       --parallel-candidates 8 \
       --gpu-devices 0,1,2,3,4,5,6,7 \
@@ -65,7 +68,7 @@ PYCUDA
       --unroll-length 64 \
       --replay-capacity-episodes 128 \
       --rollout-chunk-length 64 \
-      --updates-per-rollout-chunk 16 \
+      --updates-per-rollout-chunk 24 \
       --hidden-dim 256 \
       --critic-hidden-dim 256 \
       --critic-mlp-hidden-dim 256 \

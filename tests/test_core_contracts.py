@@ -277,6 +277,32 @@ def test_reward_search_rejects_low_control_activity() -> None:
     active = dict(row, **{"eval.action_rms": 0.02})
     assert _promotion_reason(active) == "eligible"
 
+def test_reward_search_rejects_uniform_policy_weights() -> None:
+    row = {
+        "status": "ok",
+        "eval.boundary_found": 1.0,
+        "eval.current_over_limit_a": 0.0,
+        "eval.shape_error_mean_m": 0.10,
+        "eval.ip_error_a": 90000.0,
+        "eval.shape_improvement_over_no_control_m": -0.001,
+        "eval.ip_improvement_over_no_control_a": 40000.0,
+        "eval.action_rms": 0.02,
+        "tail100.policy_weight_max": 0.051,
+        "tail100.sampled_q_spread": 0.001,
+        "tail100.actor_param_delta_norm": 0.001,
+        "search.min_policy_weight_max": 0.055,
+        "search.min_sampled_q_spread": 0.000001,
+        "search.min_actor_param_delta_norm": 0.000001,
+        "search.min_action_rms": 0.005,
+        "search.max_shape_error_m": 0.14,
+        "search.max_ip_error_a": 105000.0,
+    }
+    assert _promotion_reason(row) == "rejected_uniform_policy_weights"
+    active = dict(row, **{"tail100.policy_weight_max": 0.08})
+    assert _promotion_reason(active) == "eligible"
+
+
+
 def test_export_metadata_records_update_count(tmp_path: Path) -> None:
     cfg = _small_config(tmp_path)
     result = Trainer(cfg, device="cpu", output_dir=tmp_path).train()
@@ -454,6 +480,85 @@ def test_reward_search_allows_bounded_shape_degradation_for_ip_gain() -> None:
     assert _promotion_reason(too_much_shape_loss) == "rejected_shape_degradation_over_limit"
     not_enough_ip_gain = dict(row, **{"eval.ip_improvement_over_no_control_a": 1000.0})
     assert _promotion_reason(not_enough_ip_gain) == "rejected_ip_improvement_below_minimum"
+
+
+
+
+def test_mpo_e_step_temperature_decreases_when_sampled_q_is_uniform() -> None:
+    torch.manual_seed(777)
+    obs_dim = 5
+    action_dim = 2
+    actor = FeedForwardGaussianActor(obs_dim=obs_dim, action_dim=action_dim, hidden_dim=8)
+    critic = RecurrentQCritic(obs_dim=obs_dim, action_dim=action_dim, lstm_hidden_dim=8, mlp_hidden_dim=8)
+    target_actor = FeedForwardGaussianActor(obs_dim=obs_dim, action_dim=action_dim, hidden_dim=8)
+    target_critic = RecurrentQCritic(obs_dim=obs_dim, action_dim=action_dim, lstm_hidden_dim=8, mlp_hidden_dim=8)
+    learner = MaximumAPosterioriPolicyOptimiser(
+        actor=actor,
+        critic=critic,
+        target_actor=target_actor,
+        target_critic=target_critic,
+        config=LearnerConfig(batch_size=2, unroll_length=2, action_samples=6, mpo_epsilon=0.1),
+        device="cpu",
+    )
+    batch = SequenceBatch(
+        obs=torch.randn((2, 2, obs_dim)),
+        action=torch.zeros((2, 2, action_dim)),
+        reward=torch.zeros((2, 2)),
+        discount=torch.full((2, 2), 0.99),
+        next_obs=torch.randn((2, 2, obs_dim)),
+        done=torch.zeros((2, 2), dtype=torch.bool),
+        mask=torch.ones((2, 2)),
+    )
+
+    def uniform_q(obs, sampled_actions, *, mask=None):
+        return torch.zeros((sampled_actions.shape[0], obs.shape[0], obs.shape[1]), dtype=obs.dtype, device=obs.device)
+
+    learner._sampled_q_values = uniform_q  # type: ignore[method-assign]
+    initial_temperature = float(learner.log_temperature.exp().detach())
+    metrics = learner._actor_update(batch)
+    assert metrics[-1] < initial_temperature
+    assert metrics[8] == pytest.approx(float(np.log(6.0)), rel=1.0e-5)
+    assert metrics[9] == pytest.approx(1.0 / 6.0, rel=1.0e-5)
+
+
+def test_mpo_e_step_weights_become_nonuniform_for_distinct_sampled_q() -> None:
+    torch.manual_seed(778)
+    obs_dim = 5
+    action_dim = 2
+    actor = FeedForwardGaussianActor(obs_dim=obs_dim, action_dim=action_dim, hidden_dim=8)
+    critic = RecurrentQCritic(obs_dim=obs_dim, action_dim=action_dim, lstm_hidden_dim=8, mlp_hidden_dim=8)
+    target_actor = FeedForwardGaussianActor(obs_dim=obs_dim, action_dim=action_dim, hidden_dim=8)
+    target_critic = RecurrentQCritic(obs_dim=obs_dim, action_dim=action_dim, lstm_hidden_dim=8, mlp_hidden_dim=8)
+    learner = MaximumAPosterioriPolicyOptimiser(
+        actor=actor,
+        critic=critic,
+        target_actor=target_actor,
+        target_critic=target_critic,
+        config=LearnerConfig(batch_size=2, unroll_length=2, action_samples=6, mpo_epsilon=0.1),
+        device="cpu",
+    )
+    batch = SequenceBatch(
+        obs=torch.randn((2, 2, obs_dim)),
+        action=torch.zeros((2, 2, action_dim)),
+        reward=torch.zeros((2, 2)),
+        discount=torch.full((2, 2), 0.99),
+        next_obs=torch.randn((2, 2, obs_dim)),
+        done=torch.zeros((2, 2), dtype=torch.bool),
+        mask=torch.ones((2, 2)),
+    )
+
+    def ranked_q(obs, sampled_actions, *, mask=None):
+        ranks = torch.linspace(0.0, 0.05, sampled_actions.shape[0], dtype=obs.dtype, device=obs.device)
+        return ranks[:, None, None].expand(-1, obs.shape[0], obs.shape[1])
+
+    learner._sampled_q_values = ranked_q  # type: ignore[method-assign]
+    metrics = None
+    for _ in range(80):
+        metrics = learner._actor_update(batch)
+    assert metrics is not None
+    assert metrics[-1] < 0.98
+    assert metrics[9] > 1.0 / 6.0
+    assert metrics[8] < float(np.log(6.0))
 
 
 def test_sequence_sampled_q_values_match_recurrent_reference() -> None:

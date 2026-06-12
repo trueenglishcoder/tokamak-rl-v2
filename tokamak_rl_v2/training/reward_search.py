@@ -76,6 +76,9 @@ WORKER_ARG_NAMES = [
     "stage_max_ip_error_a",
     "stage_min_action_rms",
     "stage_max_action_rms",
+    "stage_min_policy_weight_max",
+    "stage_min_sampled_q_spread",
+    "stage_min_actor_param_delta_norm",
     "resume_checkpoint",
 ]
 
@@ -140,6 +143,9 @@ def main(argv: list[str] | None = None) -> int:
         "stage_max_ip_error_a": _stage_float_values(args.stage_max_ip_error_a),
         "stage_min_action_rms": _stage_float_values(args.stage_min_action_rms),
         "stage_max_action_rms": _stage_float_values(args.stage_max_action_rms),
+        "stage_min_policy_weight_max": _stage_float_values(args.stage_min_policy_weight_max),
+        "stage_min_sampled_q_spread": _stage_float_values(args.stage_min_sampled_q_spread),
+        "stage_min_actor_param_delta_norm": _stage_float_values(args.stage_min_actor_param_delta_norm),
     }
     (out / "search_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     if args.stage_only != "all":
@@ -673,6 +679,7 @@ def _train_candidate(*, base: ExperimentConfig, args: argparse.Namespace, candid
     try:
         result = Trainer(cfg, steps=int(steps), num_envs=args.num_envs, device=args.device, output_dir=candidate_dir, wandb_run=wandb_run, resume_checkpoint=candidate.resume_checkpoint).train()
         summary = _summarize_reward_components(candidate_dir / "reward_components.csv")
+        summary.update(_summarize_training_losses(candidate_dir / "losses.csv"))
         eval_metrics = _best_eval_metrics(result)
         score = float(eval_metrics.get("mean_return", result.get("best_eval", -float("inf"))))
         checkpoint_path = candidate_dir / "checkpoints" / "final.pt"
@@ -736,6 +743,9 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--stage-max-ip-error-a", default=None)
     ap.add_argument("--stage-min-action-rms", default=None)
     ap.add_argument("--stage-max-action-rms", default=None)
+    ap.add_argument("--stage-min-policy-weight-max", default=None)
+    ap.add_argument("--stage-min-sampled-q-spread", default=None)
+    ap.add_argument("--stage-min-actor-param-delta-norm", default=None)
     ap.add_argument("--resume-checkpoint", default=None)
     ap.add_argument("--baseline-policy", choices=("no_control",), default="no_control")
     ap.add_argument("--refine-top-k", type=int, default=4)
@@ -844,12 +854,13 @@ def _candidate_rewards_from_values(base: RewardConfig, values: Sequence[tuple[st
 
 
 def _control_discovery_rewards(base: RewardConfig) -> Iterable[RewardConfig]:
-    """Deterministic broad search over qualitatively different control incentives.
+    """Broad deterministic search over control-relevant reward structures.
 
-    This is deliberately not a local grid. The regimes test whether the learner can
-    acquire Ip, preserve shape while acting, tolerate smooth but nonzero control, and
-    survive stricter shape/current gates. A candidate set that cannot act cannot win
-    because the promotion gates reject low action activity.
+    This preset is intentionally not a local threshold grid. It spans distinct
+    control regimes: aggressive Ip acquisition, shape-preserving tracking,
+    high-scale Q separation, zero action regularization, smooth-control variants,
+    and hard-current-safe variants. A candidate whose actor stays effectively
+    unchanged is rejected by promotion gates instead of being allowed to win.
     """
     common = asdict(base)
     regimes: list[dict[str, object]] = []
@@ -860,34 +871,144 @@ def _control_discovery_rewards(base: RewardConfig) -> Iterable[RewardConfig]:
         _validate_reward_candidate(data)
         regimes.append(data)
 
-    # Ip acquisition: action is cheap, Ip matters strongly, shape is a guard not a cage.
-    for ip_bad in (80000.0, 140000.0, 220000.0):
-        for ip_weight in (6.0, 12.0):
-            add(shape_good_m=0.003, shape_bad_m=0.12, ip_good_a=1000.0, ip_bad_a=ip_bad, shape_weight=0.75, ip_weight=ip_weight, action_penalty_weight=0.0, delta_action_penalty_weight=0.0, derivative_good=0.25, derivative_bad=1.0, tracking_combiner="weighted_mean", shape_aggregator="mean", reward_scale=0.1)
+    # 1. Aggressive Ip acquisition. Shape is a guard, action is cheap.
+    for reward_scale in (0.1, 0.3, 1.0):
+        for ip_bad, ip_weight in ((80000.0, 8.0), (140000.0, 14.0), (240000.0, 24.0)):
+            add(
+                shape_good_m=0.004,
+                shape_bad_m=0.14,
+                ip_good_a=1000.0,
+                ip_bad_a=ip_bad,
+                shape_weight=0.5,
+                ip_weight=ip_weight,
+                action_penalty_weight=0.0,
+                delta_action_penalty_weight=0.0,
+                derivative_good=0.30,
+                derivative_bad=1.0,
+                tracking_combiner="weighted_mean",
+                shape_aggregator="mean",
+                reward_scale=reward_scale,
+            )
 
-    # Balanced: still cheap to act, but shape quality is allowed to constrain policy.
-    for shape_bad in (0.06, 0.10):
-        for ip_weight in (4.0, 8.0):
-            add(shape_good_m=0.003, shape_bad_m=shape_bad, ip_good_a=500.0, ip_bad_a=100000.0, shape_weight=2.0, ip_weight=ip_weight, action_penalty_weight=0.001, delta_action_penalty_weight=0.0005, derivative_good=0.20, derivative_bad=1.0, tracking_combiner="geometric_mean", shape_aggregator="smooth_worst", reward_scale=0.1)
+    # 2. Balanced control with nonzero shape pressure.
+    for shape_bad, ip_weight, combiner in ((0.08, 6.0, "geometric_mean"), (0.10, 10.0, "weighted_mean"), (0.06, 8.0, "smooth_min")):
+        for reward_scale in (0.1, 0.3):
+            add(
+                shape_good_m=0.003,
+                shape_bad_m=shape_bad,
+                ip_good_a=500.0,
+                ip_bad_a=100000.0,
+                shape_weight=2.0,
+                ip_weight=ip_weight,
+                action_penalty_weight=0.0005,
+                delta_action_penalty_weight=0.0005,
+                derivative_good=0.20,
+                derivative_bad=1.0,
+                tracking_combiner=combiner,
+                shape_aggregator="smooth_worst",
+                reward_scale=reward_scale,
+            )
 
-    # Shape guard with real Ip pressure: this should not win unless it also controls Ip.
-    for shape_weight in (4.0, 8.0):
-        for ip_weight in (4.0, 8.0):
-            add(shape_good_m=0.003, shape_bad_m=0.045, ip_good_a=500.0, ip_bad_a=80000.0, shape_weight=shape_weight, ip_weight=ip_weight, action_penalty_weight=0.002, delta_action_penalty_weight=0.001, derivative_good=0.15, derivative_bad=1.0, tracking_combiner="smooth_min", shape_aggregator="smooth_worst", reward_scale=0.1)
+    # 3. Shape-preserving candidates that still demand Ip improvement.
+    for shape_weight, ip_weight, shape_bad in ((4.0, 6.0, 0.055), (6.0, 8.0, 0.05), (8.0, 10.0, 0.045)):
+        add(
+            shape_good_m=0.003,
+            shape_bad_m=shape_bad,
+            ip_good_a=500.0,
+            ip_bad_a=85000.0,
+            shape_weight=shape_weight,
+            ip_weight=ip_weight,
+            action_penalty_weight=0.001,
+            delta_action_penalty_weight=0.001,
+            derivative_good=0.15,
+            derivative_bad=1.0,
+            tracking_combiner="smooth_min",
+            shape_aggregator="smooth_worst",
+            reward_scale=0.3,
+        )
 
-    # Smooth-control variants: not zero action, but penalize violent twitching.
-    for delta_weight in (0.002, 0.01):
-        for combiner in ("weighted_mean", "geometric_mean"):
-            add(shape_good_m=0.004, shape_bad_m=0.08, ip_good_a=1000.0, ip_bad_a=120000.0, shape_weight=1.5, ip_weight=8.0, action_penalty_weight=0.001, delta_action_penalty_weight=delta_weight, derivative_good=0.18, derivative_bad=0.85, tracking_combiner=combiner, shape_aggregator="mean", reward_scale=0.1)
+    # 4. Smooth but active control. These are allowed to move, but not thrash.
+    for delta_weight, derivative_bad in ((0.001, 1.0), (0.003, 0.85), (0.008, 0.70)):
+        add(
+            shape_good_m=0.004,
+            shape_bad_m=0.09,
+            ip_good_a=1000.0,
+            ip_bad_a=130000.0,
+            shape_weight=1.5,
+            ip_weight=10.0,
+            action_penalty_weight=0.0005,
+            delta_action_penalty_weight=delta_weight,
+            derivative_good=0.18,
+            derivative_bad=derivative_bad,
+            tracking_combiner="geometric_mean",
+            shape_aggregator="mean",
+            reward_scale=0.3,
+        )
 
-    # Stricter terminal/shape variants: check whether hard failure pressure helps.
-    for terminal in (-5.0, -20.0):
-        for ip_weight in (6.0, 10.0):
-            add(shape_good_m=0.003, shape_bad_m=0.07, ip_good_a=500.0, ip_bad_a=90000.0, shape_weight=3.0, ip_weight=ip_weight, action_penalty_weight=0.0005, delta_action_penalty_weight=0.0005, derivative_good=0.20, derivative_bad=1.0, terminal_reward=terminal, tracking_combiner="geometric_mean", shape_aggregator="smooth_worst", reward_scale=0.1)
+    # 5. Product-style rewards: force both Ip and shape to matter, at high scale.
+    for shape_bad, ip_bad in ((0.08, 120000.0), (0.10, 180000.0), (0.12, 240000.0)):
+        add(
+            shape_good_m=0.004,
+            shape_bad_m=shape_bad,
+            ip_good_a=1000.0,
+            ip_bad_a=ip_bad,
+            shape_weight=1.0,
+            ip_weight=12.0,
+            action_penalty_weight=0.0,
+            delta_action_penalty_weight=0.0,
+            derivative_good=0.25,
+            derivative_bad=1.0,
+            tracking_combiner="product",
+            shape_aggregator="geometric_mean",
+            reward_scale=1.0,
+        )
 
-    # A few high-authority candidates: if these fail, the issue is not action penalty.
-    for shape_bad, ip_bad, ip_weight in ((0.15, 250000.0, 16.0), (0.10, 180000.0, 16.0), (0.08, 140000.0, 20.0), (0.06, 100000.0, 14.0)):
-        add(shape_good_m=0.004, shape_bad_m=shape_bad, ip_good_a=1500.0, ip_bad_a=ip_bad, shape_weight=1.0, ip_weight=ip_weight, action_penalty_weight=0.0, delta_action_penalty_weight=0.0, derivative_good=0.35, derivative_bad=1.0, tracking_combiner="weighted_mean", shape_aggregator="mean", reward_scale=0.1)
+    # 6. Current-safe variants. These should only survive if strong action stays safe.
+    for current_bad, ip_weight in ((50000.0, 10.0), (100000.0, 14.0)):
+        add(
+            shape_good_m=0.004,
+            shape_bad_m=0.10,
+            ip_good_a=1000.0,
+            ip_bad_a=150000.0,
+            shape_weight=1.0,
+            ip_weight=ip_weight,
+            current_good_a=100.0,
+            current_bad_a=current_bad,
+            action_penalty_weight=0.0,
+            delta_action_penalty_weight=0.0005,
+            derivative_good=0.25,
+            derivative_bad=0.9,
+            tracking_combiner="weighted_mean",
+            shape_aggregator="mean",
+            reward_scale=0.5,
+        )
+
+    # 7. Edge cases to fill the 8-GPU wave: very high Ip pressure, very strict
+    # shape, and high reward scale. These prevent the search from only comparing
+    # polite variants of the same objective.
+    for shape_bad, ip_bad, shape_weight, ip_weight, reward_scale, combiner, aggregator in (
+        (0.18, 300000.0, 0.25, 32.0, 1.0, "weighted_mean", "mean"),
+        (0.16, 260000.0, 0.5, 28.0, 2.0, "weighted_mean", "mean"),
+        (0.12, 200000.0, 1.0, 24.0, 2.0, "geometric_mean", "mean"),
+        (0.055, 70000.0, 10.0, 10.0, 0.5, "smooth_min", "smooth_worst"),
+        (0.04, 60000.0, 16.0, 8.0, 0.5, "smooth_min", "smooth_worst"),
+        (0.10, 160000.0, 2.0, 18.0, 3.0, "product", "geometric_mean"),
+    ):
+        add(
+            shape_good_m=0.003,
+            shape_bad_m=shape_bad,
+            ip_good_a=500.0,
+            ip_bad_a=ip_bad,
+            shape_weight=shape_weight,
+            ip_weight=ip_weight,
+            action_penalty_weight=0.0,
+            delta_action_penalty_weight=0.0,
+            derivative_good=0.35,
+            derivative_bad=1.0,
+            tracking_combiner=combiner,
+            shape_aggregator=aggregator,
+            reward_scale=reward_scale,
+        )
 
     seen: set[tuple[object, ...]] = set()
     for data in regimes:
@@ -897,7 +1018,6 @@ def _control_discovery_rewards(base: RewardConfig) -> Iterable[RewardConfig]:
             continue
         seen.add(key)
         yield reward
-
 
 def _gpu_devices(args: argparse.Namespace) -> list[str]:
     raw = args.gpu_devices
@@ -977,7 +1097,7 @@ def _stage_float_value(raw: str | None, stage_index: int) -> float | None:
 
 def _promotion_policy_for_stage(args: argparse.Namespace, stage_index: int) -> dict[str, float | None]:
     if int(stage_index) < 1:
-        return {"max_shape_degradation_m": None, "min_ip_improvement_a": None, "max_shape_error_m": None, "max_ip_error_a": None, "min_action_rms": None, "max_action_rms": None}
+        return {"max_shape_degradation_m": None, "min_ip_improvement_a": None, "max_shape_error_m": None, "max_ip_error_a": None, "min_action_rms": None, "max_action_rms": None, "min_policy_weight_max": None, "min_sampled_q_spread": None, "min_actor_param_delta_norm": None}
     return {
         "max_shape_degradation_m": _stage_float_value(args.stage_max_shape_degradation_m, stage_index),
         "min_ip_improvement_a": _stage_float_value(args.stage_min_ip_improvement_a, stage_index),
@@ -985,6 +1105,9 @@ def _promotion_policy_for_stage(args: argparse.Namespace, stage_index: int) -> d
         "max_ip_error_a": _stage_float_value(args.stage_max_ip_error_a, stage_index),
         "min_action_rms": _stage_float_value(args.stage_min_action_rms, stage_index),
         "max_action_rms": _stage_float_value(args.stage_max_action_rms, stage_index),
+        "min_policy_weight_max": _stage_float_value(args.stage_min_policy_weight_max, stage_index),
+        "min_sampled_q_spread": _stage_float_value(args.stage_min_sampled_q_spread, stage_index),
+        "min_actor_param_delta_norm": _stage_float_value(args.stage_min_actor_param_delta_norm, stage_index),
     }
 
 
@@ -1031,6 +1154,8 @@ def _ranking_key(row: dict[str, object]) -> tuple[float, ...]:
     shape_improvement = _row_float(row, "eval.shape_improvement_over_no_control_m", default=-float("inf"))
     ip_improvement = _row_float(row, "eval.ip_improvement_over_no_control_a", default=-float("inf"))
     action_rms = _row_float(row, "eval.action_rms", default=0.0)
+    policy_weight_max = _row_float(row, "tail100.policy_weight_max", default=0.0)
+    sampled_q_spread = _row_float(row, "tail100.sampled_q_spread", default=0.0)
     delta_rms = _row_float(row, "eval.delta_action_rms", default=float("inf"))
     mean_return = _row_float(row, "eval.mean_return", default=-float("inf"))
     # Control-discovery ranking: after hard eligibility gates, prefer policies that
@@ -1044,6 +1169,8 @@ def _ranking_key(row: dict[str, object]) -> tuple[float, ...]:
         -improvement,
         -shape_improvement,
         -action_rms if math.isfinite(action_rms) else float("inf"),
+        -policy_weight_max if math.isfinite(policy_weight_max) else float("inf"),
+        -sampled_q_spread if math.isfinite(sampled_q_spread) else float("inf"),
         delta_rms if math.isfinite(delta_rms) else float("inf"),
         -mean_return,
     )
@@ -1071,7 +1198,19 @@ def _promotion_reason(row: dict[str, object]) -> str:
     max_ip_error = _row_float(row, "search.max_ip_error_a", default=float("nan"))
     min_action_rms = _row_float(row, "search.min_action_rms", default=float("nan"))
     max_action_rms = _row_float(row, "search.max_action_rms", default=float("nan"))
+    min_policy_weight_max = _row_float(row, "search.min_policy_weight_max", default=float("nan"))
+    min_sampled_q_spread = _row_float(row, "search.min_sampled_q_spread", default=float("nan"))
+    min_actor_param_delta_norm = _row_float(row, "search.min_actor_param_delta_norm", default=float("nan"))
     action_rms = _row_float(row, "eval.action_rms", default=float("nan"))
+    policy_weight_max = _row_float(row, "tail100.policy_weight_max", default=float("nan"))
+    sampled_q_spread = _row_float(row, "tail100.sampled_q_spread", default=float("nan"))
+    actor_param_delta_norm = _row_float(row, "tail100.actor_param_delta_norm", default=float("nan"))
+    if math.isfinite(min_policy_weight_max) and (not math.isfinite(policy_weight_max) or policy_weight_max < float(min_policy_weight_max)):
+        return "rejected_uniform_policy_weights"
+    if math.isfinite(min_sampled_q_spread) and (not math.isfinite(sampled_q_spread) or sampled_q_spread < float(min_sampled_q_spread)):
+        return "rejected_no_q_action_separation"
+    if math.isfinite(min_actor_param_delta_norm) and (not math.isfinite(actor_param_delta_norm) or actor_param_delta_norm < float(min_actor_param_delta_norm)):
+        return "rejected_no_actor_parameter_motion"
     if math.isfinite(max_shape_error) and shape > float(max_shape_error):
         return "rejected_shape_error_above_limit"
     if math.isfinite(max_ip_error) and ip > float(max_ip_error):
@@ -1279,6 +1418,30 @@ def _summarize_reward_components(path: Path, *, tail_rows: int = 100) -> dict[st
             out[f"tail100.{key}"] = float(np.nanmean(vals))
     return out
 
+
+def _summarize_training_losses(path: Path, *, tail_rows: int = 100) -> dict[str, float]:
+    if not path.exists():
+        return {}
+    with path.open(newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    if not rows:
+        return {}
+    subset = rows[-min(int(tail_rows), len(rows)):]
+    out: dict[str, float] = {}
+    for key in rows[0]:
+        if key == "step":
+            continue
+        values = []
+        for row in subset:
+            try:
+                value = float(row[key])
+            except Exception:
+                continue
+            if math.isfinite(value):
+                values.append(value)
+        if values:
+            out[f"tail100.{key}"] = float(np.nanmean(np.asarray(values, dtype=float)))
+    return out
 
 def _write_results(path: Path, rows: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
