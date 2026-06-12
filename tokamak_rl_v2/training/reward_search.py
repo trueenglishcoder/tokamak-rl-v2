@@ -113,7 +113,10 @@ def main(argv: list[str] | None = None) -> int:
         order = rng.permutation(len(rewards))
         rewards = [rewards[int(i)] for i in order]
     if args.max_candidates is not None:
+        if int(args.max_candidates) <= 0:
+            raise ValueError("--max-candidates must be positive")
         rewards = rewards[: int(args.max_candidates)]
+    _validate_direct_cli_counts(args)
     candidates = [RewardCandidate(index=i, reward=reward, source=args.candidate_preset) for i, reward in enumerate(rewards)]
     manifest = {
         "strategy": args.strategy,
@@ -309,7 +312,7 @@ def _run_one_requested_stage(*, base: ExperimentConfig, args: argparse.Namespace
     if keep == 0:
         raise RuntimeError(f"no eligible reward candidates after {stage_name}; inspect {stage_dir / 'results.csv'}")
     if stage_idx == len(STAGE_NAMES):
-        finalists = ranked[: min(int(stage_keep[-1]), len(ranked))]
+        finalists = [row for row in ranked if row.get("status") == "ok" and row.get("promotion_reason") == "eligible"][: min(int(stage_keep[-1]), len(ranked))]
         _write_results(out / "finalists.csv", finalists)
         if finalists:
             best_reward = _reward_from_row(finalists[0])
@@ -354,7 +357,8 @@ def _stage_input_candidates(*, args: argparse.Namespace, all_candidates: Sequenc
 
 
 def _write_promotion_artifacts(*, out: Path, stage_name: str, ranked: Sequence[dict[str, object]], keep: int) -> None:
-    promoted_ids = {int(row["candidate"]) for row in ranked[: int(keep)] if row.get("status") == "ok" and row.get("promotion_reason") == "eligible"}
+    eligible = [row for row in ranked if row.get("status") == "ok" and row.get("promotion_reason") == "eligible"]
+    promoted_ids = {int(row["candidate"]) for row in eligible[: int(keep)]}
     rows: list[dict[str, object]] = []
     for rank, row in enumerate(ranked, start=1):
         rows.append({
@@ -801,15 +805,25 @@ def _parser() -> argparse.ArgumentParser:
     return ap
 
 
+
+def _validate_direct_cli_counts(args: argparse.Namespace) -> None:
+    for name in ("steps", "num_envs", "batch_size", "unroll_length", "replay_capacity_episodes", "rollout_chunk_length", "updates_per_rollout_chunk", "actor_update_chunk_size", "checkpoint_interval_steps", "eval_interval_steps", "eval_episodes", "eval_max_steps", "actor_workers", "parallel_candidates"):
+        value = getattr(args, name, None)
+        if value is not None and int(value) <= 0:
+            raise ValueError(f"--{name.replace('_', '-')} must be positive")
+    if args.action_samples is not None and int(args.action_samples) <= 1:
+        raise ValueError("--action-samples must be greater than 1")
+
 def _apply_overrides(cfg: ExperimentConfig, args: argparse.Namespace) -> ExperimentConfig:
     if args.sim_compute_backend is not None or args.sim_gpu_device is not None:
-        cfg = replace(cfg, sim=replace(cfg.sim, compute_backend=args.sim_compute_backend or cfg.sim.compute_backend, gpu_device=args.sim_gpu_device or cfg.sim.gpu_device))
+        cfg = replace(cfg, sim=replace(cfg.sim, compute_backend=args.sim_compute_backend if args.sim_compute_backend is not None else cfg.sim.compute_backend, gpu_device=args.sim_gpu_device if args.sim_gpu_device is not None else cfg.sim.gpu_device))
     if any(v is not None for v in (args.batch_size, args.unroll_length, args.replay_capacity_episodes, args.rollout_chunk_length, args.updates_per_rollout_chunk, args.action_samples, args.actor_update_chunk_size)):
-        cfg = replace(cfg, learner=replace(cfg.learner, batch_size=args.batch_size or cfg.learner.batch_size, unroll_length=args.unroll_length or cfg.learner.unroll_length, replay_capacity_episodes=args.replay_capacity_episodes or cfg.learner.replay_capacity_episodes, rollout_chunk_length=args.rollout_chunk_length or cfg.learner.rollout_chunk_length, updates_per_rollout_chunk=args.updates_per_rollout_chunk or cfg.learner.updates_per_rollout_chunk, action_samples=args.action_samples or cfg.learner.action_samples, actor_update_chunk_size=args.actor_update_chunk_size or cfg.learner.actor_update_chunk_size))
+        cfg = replace(cfg, learner=replace(cfg.learner, batch_size=args.batch_size if args.batch_size is not None else cfg.learner.batch_size, unroll_length=args.unroll_length if args.unroll_length is not None else cfg.learner.unroll_length, replay_capacity_episodes=args.replay_capacity_episodes if args.replay_capacity_episodes is not None else cfg.learner.replay_capacity_episodes, rollout_chunk_length=args.rollout_chunk_length if args.rollout_chunk_length is not None else cfg.learner.rollout_chunk_length, updates_per_rollout_chunk=args.updates_per_rollout_chunk if args.updates_per_rollout_chunk is not None else cfg.learner.updates_per_rollout_chunk, action_samples=args.action_samples if args.action_samples is not None else cfg.learner.action_samples, actor_update_chunk_size=args.actor_update_chunk_size if args.actor_update_chunk_size is not None else cfg.learner.actor_update_chunk_size))
     if any(v is not None for v in (args.hidden_dim, args.critic_hidden_dim, args.critic_mlp_hidden_dim)):
-        cfg = replace(cfg, network=replace(cfg.network, hidden_dim=args.hidden_dim or cfg.network.hidden_dim, critic_hidden_dim=args.critic_hidden_dim or cfg.network.critic_hidden_dim, critic_mlp_hidden_dim=args.critic_mlp_hidden_dim or cfg.network.critic_mlp_hidden_dim))
+        cfg = replace(cfg, network=replace(cfg.network, hidden_dim=args.hidden_dim if args.hidden_dim is not None else cfg.network.hidden_dim, critic_hidden_dim=args.critic_hidden_dim if args.critic_hidden_dim is not None else cfg.network.critic_hidden_dim, critic_mlp_hidden_dim=args.critic_mlp_hidden_dim if args.critic_mlp_hidden_dim is not None else cfg.network.critic_mlp_hidden_dim))
     if any(v is not None for v in (args.checkpoint_interval_steps, args.eval_interval_steps, args.eval_episodes, args.eval_max_steps, args.actor_workers)):
-        cfg = replace(cfg, training=replace(cfg.training, checkpoint_interval_steps=args.checkpoint_interval_steps or cfg.training.checkpoint_interval_steps, eval_interval_steps=args.eval_interval_steps or cfg.training.eval_interval_steps, eval_episodes=args.eval_episodes or cfg.training.eval_episodes, eval_max_steps=args.eval_max_steps or cfg.training.eval_max_steps, actor_workers=args.actor_workers or cfg.training.actor_workers))
+        cfg = replace(cfg, training=replace(cfg.training, checkpoint_interval_steps=args.checkpoint_interval_steps if args.checkpoint_interval_steps is not None else cfg.training.checkpoint_interval_steps, eval_interval_steps=args.eval_interval_steps if args.eval_interval_steps is not None else cfg.training.eval_interval_steps, eval_episodes=args.eval_episodes if args.eval_episodes is not None else cfg.training.eval_episodes, eval_max_steps=args.eval_max_steps if args.eval_max_steps is not None else cfg.training.eval_max_steps, actor_workers=args.actor_workers if args.actor_workers is not None else cfg.training.actor_workers))
+    _validate_runtime_config(cfg)
     return cfg
 
 
@@ -945,7 +959,7 @@ def _control_discovery_rewards(base: RewardConfig) -> Iterable[RewardConfig]:
             reward_scale=0.3,
         )
 
-    # 5. Product-style rewards: force both Ip and shape to matter, at high scale.
+    # 5. Product-combiner rewards: force both Ip and shape to matter, at high scale.
     for shape_bad, ip_bad in ((0.08, 120000.0), (0.10, 180000.0), (0.12, 240000.0)):
         add(
             shape_good_m=0.004,
@@ -1109,6 +1123,32 @@ def _promotion_policy_for_stage(args: argparse.Namespace, stage_index: int) -> d
         "min_sampled_q_spread": _stage_float_value(args.stage_min_sampled_q_spread, stage_index),
         "min_actor_param_delta_norm": _stage_float_value(args.stage_min_actor_param_delta_norm, stage_index),
     }
+
+
+def _validate_runtime_config(cfg: ExperimentConfig) -> None:
+    if int(cfg.training.num_envs) <= 0:
+        raise ValueError("training.num_envs must be positive")
+    if int(cfg.training.steps) <= 0:
+        raise ValueError("training.steps must be positive")
+    if int(cfg.training.eval_episodes) <= 0 or int(cfg.training.eval_max_steps) <= 0:
+        raise ValueError("training evaluation settings must be positive")
+    if int(cfg.training.checkpoint_interval_steps) <= 0 or int(cfg.training.eval_interval_steps) <= 0:
+        raise ValueError("training intervals must be positive")
+    if int(cfg.training.actor_workers) <= 0:
+        raise ValueError("training.actor_workers must be positive")
+    if int(cfg.learner.batch_size) <= 0 or int(cfg.learner.unroll_length) <= 0:
+        raise ValueError("learner batch_size and unroll_length must be positive")
+    if int(cfg.learner.replay_capacity_episodes) <= 0:
+        raise ValueError("learner.replay_capacity_episodes must be positive")
+    if int(cfg.learner.rollout_chunk_length) <= 0 or int(cfg.learner.updates_per_rollout_chunk) <= 0:
+        raise ValueError("learner rollout/update counts must be positive")
+    if int(cfg.learner.action_samples) <= 1:
+        raise ValueError("learner.action_samples must be greater than 1")
+    if int(cfg.learner.actor_update_chunk_size) <= 0:
+        raise ValueError("learner.actor_update_chunk_size must be positive")
+    if int(cfg.network.hidden_dim) <= 0 or int(cfg.network.critic_hidden_dim) <= 0 or int(cfg.network.critic_mlp_hidden_dim) <= 0:
+        raise ValueError("network dimensions must be positive")
+    _validate_reward_candidate(asdict(cfg.reward))
 
 
 def _validate_reward_candidate(data: dict[str, object]) -> None:
@@ -1410,12 +1450,17 @@ def _summarize_reward_components(path: Path, *, tail_rows: int = 100) -> dict[st
             continue
         vals = []
         for row in subset:
+            value = row.get(key, "")
+            if value in (None, ""):
+                continue
             try:
-                vals.append(float(row[key]))
-            except Exception:
-                pass
+                parsed = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(parsed):
+                vals.append(parsed)
         if vals:
-            out[f"tail100.{key}"] = float(np.nanmean(vals))
+            out[f"tail100.{key}"] = float(np.nanmean(np.asarray(vals, dtype=float)))
     return out
 
 
@@ -1433,9 +1478,12 @@ def _summarize_training_losses(path: Path, *, tail_rows: int = 100) -> dict[str,
             continue
         values = []
         for row in subset:
+            value = row.get(key, "")
+            if value in (None, ""):
+                continue
             try:
-                value = float(row[key])
-            except Exception:
+                value = float(value)
+            except (TypeError, ValueError):
                 continue
             if math.isfinite(value):
                 values.append(value)

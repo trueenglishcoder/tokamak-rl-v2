@@ -36,7 +36,7 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         raise ValueError(f"experiment config must be a mapping: {source}")
     base = source.parent
     sim = _sim(_mapping(raw.get("sim"), "sim"), base)
-    return ExperimentConfig(
+    cfg = ExperimentConfig(
         name=str(raw.get("name", source.stem)),
         sim=sim,
         reference=_reference(_mapping(raw.get("reference"), "reference")),
@@ -47,6 +47,8 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         learner=_learner(_mapping(raw.get("learner", {}), "learner")),
         training=_training(_mapping(raw.get("training", {}), "training"), base),
     )
+    _validate_experiment_config(cfg)
+    return cfg
 
 
 def _mapping(raw: object, name: str) -> Mapping[str, Any]:
@@ -193,3 +195,82 @@ def _training(raw: Mapping[str, Any], base: Path) -> TrainingConfig:
 def _resolve(base: Path, value: object) -> Path:
     p = Path(str(value))
     return p if p.is_absolute() else (base / p).resolve()
+
+def _validate_experiment_config(cfg: ExperimentConfig) -> None:
+    if cfg.sim.compute_backend not in {"cpu", "gpu"}:
+        raise ValueError("sim.compute_backend must be cpu or gpu")
+    if int(cfg.sim.angles) <= 0:
+        raise ValueError("sim.angles must be positive")
+    if int(cfg.sim.max_episode_steps) <= 0:
+        raise ValueError("sim.max_episode_steps must be positive")
+    if cfg.sim.initial_ranges is not None:
+        expected = {"R0", "Z0", "A0", "kappa", "delta"}
+        missing = sorted(expected - set(cfg.sim.initial_ranges.boundary_parameters))
+        if missing:
+            raise ValueError("sim.initial_ranges.boundary_parameters missing: " + ", ".join(missing))
+    if float(cfg.reference.duration_s) <= 0.0 or float(cfg.reference.t_step) <= 0.0:
+        raise ValueError("reference duration_s and t_step must be positive")
+    if int(cfg.reference.theta_count) <= 0:
+        raise ValueError("reference.theta_count must be positive")
+    ip = cfg.reference.ip
+    if not (math.isfinite(ip.min) and math.isfinite(ip.max) and ip.max >= ip.min):
+        raise ValueError("reference.ip min/max are invalid")
+    if not math.isfinite(ip.rate_limit) or ip.rate_limit < 0.0:
+        raise ValueError("reference.ip.rate_limit must be finite and non-negative")
+    if ip.segment_min_steps <= 0 or ip.segment_max_steps < ip.segment_min_steps:
+        raise ValueError("reference.ip segment step bounds are invalid")
+    if ip.segment_count_min <= 0 or ip.segment_count_max < ip.segment_count_min:
+        raise ValueError("reference.ip segment count bounds are invalid")
+    if not 0.0 <= float(ip.hold_probability) <= 1.0:
+        raise ValueError("reference.ip.hold_probability must be in [0, 1]")
+    if cfg.reference.boundary.kind not in {"static_initial_parameters", "rate_limited_parameters"}:
+        raise ValueError("reference.boundary.kind is unsupported")
+    for key, value in cfg.reference.boundary.rate_limits.items():
+        if not math.isfinite(float(value)) or float(value) < 0.0:
+            raise ValueError(f"reference.boundary.rate_limits.{key} must be finite and non-negative")
+    if cfg.observation.target_preview_steps < 0 or cfg.observation.target_preview_stride <= 0:
+        raise ValueError("observation preview settings are invalid")
+    _validate_reward_config(cfg.reward, prefix="reward")
+    if cfg.randomization.ip_measurement_noise_a < 0.0 or cfg.randomization.current_measurement_noise_a < 0.0:
+        raise ValueError("randomization noise values must be non-negative")
+    if cfg.randomization.action_offset_max < cfg.randomization.action_offset_min:
+        raise ValueError("randomization.action_offset_max must be >= action_offset_min")
+    if cfg.network.hidden_dim <= 0 or cfg.network.critic_hidden_dim <= 0 or cfg.network.critic_mlp_hidden_dim <= 0:
+        raise ValueError("network dimensions must be positive")
+    learner = cfg.learner
+    for name in ("discount", "actor_lr", "critic_lr", "kl_lr", "temperature", "mpo_epsilon", "mean_kl_epsilon", "std_kl_epsilon", "target_update_tau"):
+        value = float(getattr(learner, name))
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"learner.{name} must be finite and positive")
+    if learner.discount >= 1.0:
+        raise ValueError("learner.discount must be < 1")
+    for name in ("unroll_length", "batch_size", "replay_capacity_episodes", "action_samples", "actor_update_chunk_size", "rollout_chunk_length", "updates_per_rollout_chunk"):
+        if int(getattr(learner, name)) <= 0:
+            raise ValueError(f"learner.{name} must be positive")
+    if int(learner.action_samples) <= 1:
+        raise ValueError("learner.action_samples must be greater than 1")
+    training = cfg.training
+    for name in ("steps", "num_envs", "checkpoint_interval_steps", "eval_interval_steps", "eval_episodes", "eval_max_steps", "actor_workers"):
+        if int(getattr(training, name)) <= 0:
+            raise ValueError(f"training.{name} must be positive")
+
+
+def _validate_reward_config(reward: RewardConfig, *, prefix: str) -> None:
+    if reward.shape_bad_m <= reward.shape_good_m:
+        raise ValueError(f"{prefix}.shape_bad_m must be greater than shape_good_m")
+    if reward.ip_bad_a <= reward.ip_good_a:
+        raise ValueError(f"{prefix}.ip_bad_a must be greater than ip_good_a")
+    if reward.current_bad_a <= reward.current_good_a:
+        raise ValueError(f"{prefix}.current_bad_a must be greater than current_good_a")
+    if reward.derivative_bad <= reward.derivative_good:
+        raise ValueError(f"{prefix}.derivative_bad must be greater than derivative_good")
+    for name in ("shape_weight", "ip_weight", "reward_scale"):
+        if float(getattr(reward, name)) <= 0.0:
+            raise ValueError(f"{prefix}.{name} must be positive")
+    for name in ("action_penalty_weight", "delta_action_penalty_weight"):
+        if float(getattr(reward, name)) < 0.0:
+            raise ValueError(f"{prefix}.{name} must be non-negative")
+    if reward.tracking_combiner not in {"smooth_min", "weighted_mean", "geometric_mean", "product"}:
+        raise ValueError(f"{prefix}.tracking_combiner is unsupported")
+    if reward.shape_aggregator not in {"smooth_worst", "mean", "geometric_mean"}:
+        raise ValueError(f"{prefix}.shape_aggregator is unsupported")

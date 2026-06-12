@@ -5,6 +5,7 @@ import json
 import queue
 import time
 import random
+import sys
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -70,8 +71,8 @@ class Trainer:
             self.wandb_run.define_metric("global_step")
             for prefix in ("train/*", "reward/*", "eval/*"):
                 self.wandb_run.define_metric(prefix, step_metric="global_step")
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"warning: failed to configure W&B metrics: {exc}", file=sys.stderr)
 
     def _wandb_log(self, values: dict[str, object], *, step: int) -> None:
         if self.wandb_run is None:
@@ -87,7 +88,7 @@ class Trainer:
         metrics_path = self.output_dir / "metrics.json"
         rewards_path = self.output_dir / "reward_components.csv"
         with losses_path.open("w", newline="", encoding="utf-8") as loss_f, rewards_path.open("w", newline="", encoding="utf-8") as reward_f:
-            loss_writer = csv.DictWriter(loss_f, fieldnames=["step", "critic_loss", "actor_loss", "mean_kl", "std_kl", "q_mean", "target_q_mean", "actor_mle_loss", "actor_param_delta_norm", "action_mean_abs", "action_std_mean", "sampled_q_spread", "policy_weight_entropy", "policy_weight_max", "mpo_temperature", "env_steps_per_second"])
+            loss_writer = csv.DictWriter(loss_f, fieldnames=["step", "critic_loss", "actor_loss", "mean_kl", "std_kl", "q_mean", "target_q_mean", "actor_mle_loss", "actor_param_delta_norm", "action_mean_abs", "action_std_mean", "sampled_q_spread", "policy_weight_entropy", "policy_weight_max", "mpo_temperature", "mean_kl_penalty", "std_kl_penalty", "env_steps_per_second"])
             reward_writer = None
             loss_writer.writeheader()
             obs = self.env.reset()
@@ -154,7 +155,7 @@ class Trainer:
         self._last_envs_per_worker = envs_per_worker
         self._last_total_training_envs = envs_per_worker * worker_count
         if self.resume_checkpoint is not None:
-            self._load_checkpoint(self.resume_checkpoint, restore_env=False)
+            raise ValueError("distributed actor-worker training checkpoints are not exactly resumable yet; use actor_workers=1 for resumable staged search or start a fresh distributed run")
         processes, param_queues, data_q, stop = start_actor_workers(
             config=self.config,
             actor_state_dict=self.actor.state_dict(),
@@ -175,7 +176,7 @@ class Trainer:
         start = time.time()
         try:
             with losses_path.open("w", newline="", encoding="utf-8") as loss_f:
-                loss_writer = csv.DictWriter(loss_f, fieldnames=["step", "critic_loss", "actor_loss", "mean_kl", "std_kl", "q_mean", "target_q_mean", "actor_mle_loss", "actor_param_delta_norm", "action_mean_abs", "action_std_mean", "sampled_q_spread", "policy_weight_entropy", "policy_weight_max", "mpo_temperature", "env_steps_per_second"])
+                loss_writer = csv.DictWriter(loss_f, fieldnames=["step", "critic_loss", "actor_loss", "mean_kl", "std_kl", "q_mean", "target_q_mean", "actor_mle_loss", "actor_param_delta_norm", "action_mean_abs", "action_std_mean", "sampled_q_spread", "policy_weight_entropy", "policy_weight_max", "mpo_temperature", "mean_kl_penalty", "std_kl_penalty", "env_steps_per_second"])
                 loss_writer.writeheader()
                 progress = tqdm(total=max(self.steps - self.start_step, 0), desc="distributed-train", unit="step", dynamic_ncols=True)
                 while env_steps < self.steps:
@@ -343,12 +344,14 @@ class Trainer:
         return metrics
 
     def _metadata(self, *, step: int, updates: int, eval_score: float | None = None) -> dict[str, object]:
-        out: dict[str, object] = {"experiment": self.config.name, "step": int(step), "updates": int(updates), "eval_score": eval_score, "device": str(self.device), "learner_device": str(self.device), "algorithm": "Maximum a Posteriori Policy Optimisation", "plant": "tokamak-sim", "sim_compute_backend": self.config.sim.compute_backend}
+        exact_resume_supported = not bool(self._last_actor_devices)
+        out: dict[str, object] = {"experiment": self.config.name, "step": int(step), "updates": int(updates), "eval_score": eval_score, "device": str(self.device), "learner_device": str(self.device), "algorithm": "Maximum a Posteriori Policy Optimisation", "plant": "tokamak-sim", "sim_compute_backend": self.config.sim.compute_backend, "exact_resume_supported": exact_resume_supported}
         if self._last_actor_devices:
             out["actor_devices"] = list(self._last_actor_devices)
             out["actor_workers"] = len(self._last_actor_devices)
             out["envs_per_worker"] = self._last_envs_per_worker
             out["total_training_envs"] = self._last_total_training_envs
+            out["resume_limitation"] = "actor-worker environment states are not checkpointed"
         return out
 
     def _save_checkpoint(self, name: str, *, step: int, updates: int) -> Path:
@@ -365,7 +368,10 @@ class Trainer:
         try:
             env_state = self.env.state_dict()
         except RuntimeError:
-            env_state = None
+            if int(self.config.training.actor_workers) > 1:
+                env_state = None
+            else:
+                raise
         torch.save({
             "checkpoint_version": 2,
             "actor_state_dict": self.actor.state_dict(),
@@ -415,11 +421,12 @@ class Trainer:
         if isinstance(rng, dict):
             if "torch" in rng:
                 torch.set_rng_state(rng["torch"].detach().cpu())
-            if "torch_cuda" in rng and torch.cuda.is_available():
-                try:
-                    torch.cuda.set_rng_state_all(rng["torch_cuda"])
-                except Exception:
-                    pass
+            if self.device.type == "cuda":
+                if "torch_cuda" not in rng:
+                    raise ValueError(f"checkpoint does not contain CUDA RNG state and cannot be exactly resumed on {self.device}: {checkpoint_path}")
+                torch.cuda.set_rng_state_all(rng["torch_cuda"])
+            elif "torch_cuda" in rng and torch.cuda.is_available():
+                torch.cuda.set_rng_state_all(rng["torch_cuda"])
             if "numpy" in rng:
                 np.random.set_state(rng["numpy"])
             if "python" in rng:

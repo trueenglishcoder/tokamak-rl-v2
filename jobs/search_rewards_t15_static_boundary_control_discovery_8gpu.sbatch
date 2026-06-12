@@ -78,7 +78,6 @@ PYCUDA
       --device cuda \
       --sim-compute-backend gpu \
       --sim-gpu-device cuda:0 \
-      --continue-on-error \
       --wandb \
       --wandb-project ${WANDB_PROJECT_NAME} \
       --wandb-name ${RUN_NAME} \

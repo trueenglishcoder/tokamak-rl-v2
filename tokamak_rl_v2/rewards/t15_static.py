@@ -37,7 +37,11 @@ class T15StaticBoundaryReward:
         terminated: Tensor,
     ) -> RewardBatch:
         c = self.config
-        shape_error = torch.linalg.norm(boundary_points - reference_points, dim=-1)
+        boundary_mask = boundary_found.reshape(-1, 1)
+        raw_shape_error = torch.linalg.norm(boundary_points - reference_points, dim=-1)
+        finite_bad_shape = torch.full_like(raw_shape_error, float(c.shape_bad_m))
+        shape_error = torch.nan_to_num(raw_shape_error, nan=float(c.shape_bad_m), posinf=float(c.shape_bad_m), neginf=float(c.shape_bad_m))
+        shape_error = torch.where(boundary_mask, shape_error, finite_bad_shape)
         shape_quality_points = transforms.softplus(shape_error, good=c.shape_good_m, bad=c.shape_bad_m)
         if c.shape_aggregator == "smooth_worst":
             r_shape = combiners.smooth_max(shape_quality_points, alpha=-1.0, dim=-1)

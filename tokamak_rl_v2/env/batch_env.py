@@ -149,13 +149,15 @@ class TokamakMagneticControlEnv:
         if self.config.sim.compute_backend == "gpu":
             assert self._gpu_sim is not None
             result = self._gpu_sim.step(physical.to(dtype=torch.float64, device=self._gpu_sim.device))
+            self.step_index += 1
             obs = self._obs_gpu(result=result)
             reward, terminated, info = self._reward_gpu(result, clipped)
         else:
-            obs = self._step_cpu(physical)
+            self._step_cpu(physical)
+            self.step_index += 1
+            obs = self._obs_cpu()
             reward, terminated, info = self._reward_cpu(clipped)
-        self.previous_action = commanded.detach().clone()
-        self.step_index += 1
+        self.previous_action = clipped.detach().clone()
         truncated = self.step_index >= int(self.config.sim.max_episode_steps)
         self.done = terminated | truncated
         return BatchStep(obs=obs, reward=reward, terminated=terminated, truncated=truncated, info=info)
@@ -286,11 +288,10 @@ class TokamakMagneticControlEnv:
             obs.append(np.concatenate(parts))
         return torch.nan_to_num(torch.as_tensor(np.stack(obs, axis=0), dtype=torch.float32, device=self.device), nan=0.0, posinf=0.0, neginf=0.0)
 
-    def _step_cpu(self, physical: Tensor) -> Tensor:
+    def _step_cpu(self, physical: Tensor) -> None:
         arr = physical.detach().cpu().numpy()
         for b, model in enumerate(self._cpu_models):
             model.step(pfc_current_derivs=arr[b, : self.cfg.pfc.n_coils], sol_current_derivs=arr[b, self.cfg.pfc.n_coils :])
-        return self._obs_cpu()
 
     def _reward_gpu(self, result, action: Tensor) -> tuple[Tensor, Tensor, dict[str, object]]:
         ip_ref, ref_points, _ref_radii = self._reference_at()

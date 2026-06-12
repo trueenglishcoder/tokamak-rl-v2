@@ -1,95 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=tokamak-rl-v2-rs8-s2
-#SBATCH --partition=batch
-#SBATCH --gres=gpu:8
-#SBATCH --nodes=1
-#SBATCH --time=03:00:00
-#SBATCH --output=slurm_logs/tokamak-rl-v2-rs8-stage2-%j.out
-#SBATCH --error=slurm_logs/tokamak-rl-v2-rs8-stage2-%j.err
-
 set -euo pipefail
+cat >&2 <<'MSG'
+This job is obsolete and intentionally disabled.
 
-cd /scratch/$USER/tokamak
+Use one of the maintained jobs instead:
+  sbatch jobs/search_rewards_t15_static_boundary_control_discovery_8gpu.sbatch
+  sbatch jobs/train_t15_static_boundary.sbatch
 
-export SEARCH_ROOT=${SEARCH_ROOT:-outputs/reward_search_t15_static_boundary_8gpu}
-export PREVIOUS_STAGE_RESULTS=${PREVIOUS_STAGE_RESULTS:-${SEARCH_ROOT}/stage_01_short/results.csv}
-export BASELINE_RESULTS=${BASELINE_RESULTS:-${SEARCH_ROOT}/baseline_results.csv}
-export RUN_NAME=${RUN_NAME:-reward_search_t15_static_boundary_8gpu_stage2_${SLURM_JOB_ID:-manual}}
-export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-tokamak-rl-v2-reward-8gpu-stage2-${SLURM_JOB_ID:-manual}}
-
-# The workload below is tuned to finish in roughly 2 hours. The Slurm time
-# limit is intentionally larger so useful partial work is not killed at 2h.
-
-srun \
-  --container-image /scratch/$USER/tokamak/tokamak-rl-v2.sqsh \
-  --container-mounts /scratch/$USER/tokamak:/workspace,/dev:/dev,/lib/x86_64-linux-gnu:/host-libs \
-  bash -lc '
-    set -euo pipefail
-
-    mkdir -p /tmp/nvidia-lib
-    ln -sf /host-libs/libcuda.so.1 /tmp/nvidia-lib/libcuda.so.1
-    ln -sf /tmp/nvidia-lib/libcuda.so.1 /tmp/nvidia-lib/libcuda.so
-    ln -sf /host-libs/libnvidia-ml.so.1 /tmp/nvidia-lib/libnvidia-ml.so.1
-    ln -sf /tmp/nvidia-lib/libnvidia-ml.so.1 /tmp/nvidia-lib/libnvidia-ml.so
-
-    export LD_LIBRARY_PATH=/tmp/nvidia-lib:${LD_LIBRARY_PATH:-}
-    export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
-    export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-    export PYTHONPATH=/workspace/tokamak-sim:/workspace/tokamak-rl-v2:${PYTHONPATH:-}
-
-    cd /workspace/tokamak-rl-v2
-
-    python - <<PYCUDA
-import torch
-print("cuda_available", torch.cuda.is_available())
-print("device_count", torch.cuda.device_count())
-print("devices", [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())])
-PYCUDA
-
-    python scripts/search_rewards.py \
-      --config configs/experiments/t15_static_boundary_gpu.yaml \
-      --strategy successive_halving \
-      --stage-only stage_02_medium \
-      --output-dir ${SEARCH_ROOT} \
-      --baseline-results ${BASELINE_RESULTS} \
-      --previous-stage-results ${PREVIOUS_STAGE_RESULTS} \
-      --stage-input-count 6 \
-      --stage-steps 8000,16000,24000 \
-      --stage-keep 6,2,1 \
-      --stage-eval-episodes 4,8,16 \
-      --stage-max-shape-degradation-m 0.025,0.020,0.015 \
-      --stage-min-ip-improvement-a 2000,8000,15000 \
-      --baseline-policy no_control \
-      --parallel-candidates 8 \
-      --gpu-devices 0,1,2,3,4,5,6,7 \
-      --num-envs 64 \
-      --batch-size 256 \
-      --unroll-length 64 \
-      --replay-capacity-episodes 64 \
-      --rollout-chunk-length 64 \
-      --updates-per-rollout-chunk 16 \
-      --hidden-dim 256 \
-      --critic-hidden-dim 256 \
-      --critic-mlp-hidden-dim 256 \
-      --action-samples 20 \
-      --actor-update-chunk-size 2048 \
-      --eval-max-steps 500 \
-      --device cuda \
-      --sim-compute-backend gpu \
-      --sim-gpu-device cuda:0 \
-      --shape-good-values 0.003 \
-      --shape-bad-values 0.04,0.08 \
-      --ip-good-values 500 \
-      --ip-bad-values 25000,40000 \
-      --shape-weight-values 2.0,4.0 \
-      --ip-weight-values 1.5,3.0 \
-      --current-good-values 100 \
-      --current-bad-values 50000 \
-      --terminal-reward-values -5 \
-      --reward-scale-values 0.1 \
-      --wandb \
-      --wandb-project ${WANDB_PROJECT_NAME} \
-      --wandb-name ${RUN_NAME} \
-      --wandb-group ${RUN_NAME} \
-      --wandb-mode online
-  '
+Disabled file: jobs/search_rewards_t15_static_boundary_8gpu_stage2.sbatch
+MSG
+exit 2

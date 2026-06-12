@@ -160,7 +160,7 @@
     "num_envs": 64,
     "device": "auto",
     "seed": 1,
-    "output_dir": "../../outputs/t15_static_boundary_candidate16_full_cpu",
+    "output_dir": "../../outputs/t15_static_boundary_cpu",
     "checkpoint_interval_steps": 50000,
     "eval_interval_steps": 50000,
     "eval_episodes": 32,

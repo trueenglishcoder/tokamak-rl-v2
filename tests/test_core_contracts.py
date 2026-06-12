@@ -15,11 +15,13 @@ from tokamak_rl_v2.env import TokamakMagneticControlEnv
 from tokamak_rl_v2.networks import FeedForwardGaussianActor, RecurrentQCritic
 from tokamak_rl_v2.rewards import T15StaticBoundaryReward
 from tokamak_rl_v2.rewards import transforms
+from tokamak_rl_v2.export.cli import main as export_cli_main
 from tokamak_rl_v2.training.mpo import MaximumAPosterioriPolicyOptimiser
 from tokamak_rl_v2.training.replay import FIFOSequenceReplay, SequenceBatch
 from tokamak_rl_v2.training.trainer import Trainer
-from tokamak_rl_v2.training.reward_search import _promotion_reason, _rank_rows, _stage_float_value, main as reward_search_main
-from tokamak_rl_v2.training.cli import _device_list
+from tokamak_rl_v2.training.reward_search import _promotion_reason, _rank_rows, _stage_float_value, _write_promotion_artifacts, main as reward_search_main
+from tokamak_rl_v2.env.references import _segment_lengths, generate_reference_batch
+from tokamak_rl_v2.training.cli import _device_list, _load_reward_override
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -82,6 +84,28 @@ def test_tracking_reward_cannot_be_replaced_by_low_action() -> None:
     assert active.reward[0] < zero.reward[0]
 
 
+def test_reward_components_remain_finite_when_boundary_is_missing() -> None:
+    reward_fn = T15StaticBoundaryReward(RewardConfig(reward_scale=1.0), control_rate_hz=1000.0)
+    boundary = torch.full((1, 32, 2), float("nan"), dtype=torch.float32)
+    ref = torch.zeros((1, 32, 2), dtype=torch.float32)
+    rb = reward_fn(
+        ip=torch.tensor([200000.0]),
+        ip_ref=torch.tensor([200000.0]),
+        boundary_points=boundary,
+        reference_points=ref,
+        action=torch.zeros((1, 9), dtype=torch.float32),
+        previous_action=torch.zeros((1, 9), dtype=torch.float32),
+        current_over_limit_a=torch.zeros((1,), dtype=torch.float32),
+        derivative_usage=torch.zeros((1,), dtype=torch.float32),
+        boundary_found=torch.zeros((1,), dtype=torch.bool),
+        terminated=torch.ones((1,), dtype=torch.bool),
+    )
+    assert torch.isfinite(rb.reward).all()
+    for value in rb.components.values():
+        assert torch.isfinite(value).all()
+    assert float(rb.components["shape_error_mean_m"].item()) == pytest.approx(0.05)
+
+
 def test_environment_reset_step_contract() -> None:
     cfg = load_experiment_config(CONFIG)
     cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=4))
@@ -136,6 +160,59 @@ def test_environment_reset_indices_only_resets_done_slot() -> None:
     assert torch.allclose(env.previous_action[0], torch.zeros_like(env.previous_action[0]))
 
 
+def test_environment_step_uses_post_step_reference_index() -> None:
+    cfg = load_experiment_config(CONFIG)
+    cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=8))
+    env = TokamakMagneticControlEnv(cfg, batch_size=1, device="cpu", seed=11)
+    obs0 = env.reset()
+    ip_ref_slice = env.export_schema()["feature_slices"]["ip_ref"]
+    ref0 = float(obs0[0, ip_ref_slice[0]].item())
+    result = env.step(torch.zeros((1, env.action_dim)))
+    ref1_obs = float(result.obs[0, ip_ref_slice[0]].item())
+    ref1_expected = float(env.reference.ip[0, 1].item() / 5.0e5)
+    assert int(env.step_index[0].item()) == 1
+    assert ref1_obs == pytest.approx(ref1_expected, abs=1.0e-7)
+    if float(env.reference.ip[0, 0].item()) != float(env.reference.ip[0, 1].item()):
+        assert ref1_obs != pytest.approx(ref0, abs=1.0e-9)
+
+
+def test_ip_reference_segment_count_controls_generation() -> None:
+    cfg = load_experiment_config(CONFIG)
+    lengths = _segment_lengths(cfg.reference.ip, int(cfg.sim.max_episode_steps), np.random.default_rng(123))
+    assert int(np.sum(lengths)) == int(cfg.sim.max_episode_steps)
+    assert int(cfg.reference.ip.segment_count_min) <= len(lengths) <= int(cfg.reference.ip.segment_count_max)
+    assert int(np.min(lengths)) >= int(cfg.reference.ip.segment_min_steps)
+    assert int(np.max(lengths)) <= int(cfg.reference.ip.segment_max_steps)
+    batch = generate_reference_batch(
+        config=cfg.reference,
+        initial_ip=np.asarray([250000.0, 300000.0]),
+        initial_parameters=np.asarray([[1.4, 0.0, 0.55, 1.2, 0.2], [1.42, -0.01, 0.58, 1.25, 0.18]]),
+        steps=int(cfg.sim.max_episode_steps),
+        device="cpu",
+        seed=456,
+    )
+    assert batch.ip.shape == (2, int(cfg.sim.max_episode_steps) + 1)
+    assert torch.allclose(batch.ip[:, 0], torch.tensor([250000.0, 300000.0], dtype=torch.float64))
+
+
+def test_reward_override_file_is_validated(tmp_path: Path) -> None:
+    base = RewardConfig()
+    valid = tmp_path / "reward.json"
+    valid.write_text(json.dumps({"shape_weight": 8.0, "ip_weight": 12.0, "tracking_combiner": "weighted_mean", "shape_aggregator": "mean"}), encoding="utf-8")
+    reward = _load_reward_override(str(valid), base=base)
+    assert reward.shape_weight == 8.0
+    assert reward.ip_weight == 12.0
+    assert reward.tracking_combiner == "weighted_mean"
+    bad = tmp_path / "bad_reward.json"
+    bad.write_text(json.dumps({"shape_bad_m": 0.001, "shape_good_m": 0.01}), encoding="utf-8")
+    with pytest.raises(ValueError, match="shape_bad_m > shape_good_m"):
+        _load_reward_override(str(bad), base=base)
+    bad_string = tmp_path / "bad_reward_string.json"
+    bad_string.write_text(json.dumps({"tracking_combiner": "not_real"}), encoding="utf-8")
+    with pytest.raises(ValueError, match="unsupported tracking_combiner"):
+        _load_reward_override(str(bad_string), base=base)
+
+
 def test_small_training_writes_export(tmp_path: Path) -> None:
     cfg = _small_config(tmp_path)
     trainer = Trainer(cfg, device="cpu", output_dir=tmp_path)
@@ -188,6 +265,29 @@ def test_config_loader_reads_explicit_training_devices(tmp_path: Path) -> None:
     assert cfg.training.device == "cuda:0"
     assert cfg.training.actor_workers == 2
     assert cfg.training.actor_devices == ("cuda:1", "cuda:2")
+
+
+def test_config_loader_rejects_invalid_values(tmp_path: Path) -> None:
+    data = json.loads(CONFIG.read_text())
+    data["reward"]["tracking_combiner"] = "not_real"
+    bad_reward = tmp_path / "bad_reward.json"
+    bad_reward.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="tracking_combiner"):
+        load_experiment_config(bad_reward)
+
+    data = json.loads(CONFIG.read_text())
+    data["learner"]["action_samples"] = 1
+    bad_learner = tmp_path / "bad_learner.json"
+    bad_learner.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="action_samples"):
+        load_experiment_config(bad_learner)
+
+
+def test_experiment_configs_use_neutral_output_names() -> None:
+    for path in (ROOT / "configs/experiments").glob("*.yaml"):
+        data = json.loads(path.read_text())
+        output_dir = str(data.get("training", {}).get("output_dir", ""))
+        assert "candidate" not in output_dir
 
 
 def test_reward_search_dry_run_writes_candidates(tmp_path: Path) -> None:
@@ -328,6 +428,74 @@ def test_training_checkpoint_resume_restores_replay_and_counters(tmp_path: Path)
     assert state["replay_state"]["size"] > 0
 
 
+def test_checkpoint_save_does_not_hide_single_env_state_errors(tmp_path: Path) -> None:
+    cfg = _small_config(tmp_path)
+    trainer = Trainer(cfg, device="cpu", output_dir=tmp_path)
+    trainer.env.reset()
+
+    def broken_state_dict():
+        raise RuntimeError("broken environment serialization")
+
+    trainer.env.state_dict = broken_state_dict  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="broken environment serialization"):
+        trainer._save_checkpoint("bad.pt", step=0, updates=0)
+
+
+def test_export_cli_rejects_malformed_checkpoint(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "malformed.pt"
+    torch.save(["not", "a", "checkpoint"], checkpoint)
+    with pytest.raises(ValueError, match="training-state dictionary"):
+        export_cli_main(["--checkpoint", str(checkpoint), "--out", str(tmp_path / "export")])
+
+
+def test_export_cli_rejects_obsolete_checkpoint(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "obsolete.pt"
+    torch.save(
+        {
+            "checkpoint_version": 1,
+            "schema": {"observation_kind": "diagnostic_v0", "obs_dim": 4, "action_dim": 2},
+        },
+        checkpoint,
+    )
+    with pytest.raises(ValueError, match="obsolete"):
+        export_cli_main(["--checkpoint", str(checkpoint), "--out", str(tmp_path / "export")])
+
+
+def test_export_cli_writes_policy_bundle_from_valid_checkpoint(tmp_path: Path) -> None:
+    train_dir = tmp_path / "train"
+    cfg = _small_config(train_dir)
+    Trainer(cfg, device="cpu", output_dir=train_dir).train()
+    export_dir = tmp_path / "manual_export"
+    assert export_cli_main(["--checkpoint", str(train_dir / "checkpoints" / "final.pt"), "--out", str(export_dir)]) == 0
+    assert (export_dir / "actor.pt").exists()
+    assert (export_dir / "policy_weights.npz").exists()
+    schema = json.loads((export_dir / "controller_schema.json").read_text())
+    assert schema["observation_kind"] == "joint_state_v1"
+
+
+def test_distributed_resume_fails_clearly_because_worker_envs_are_not_checkpointed(tmp_path: Path) -> None:
+    first_dir = tmp_path / "first"
+    cfg = _small_config(first_dir)
+    cfg = replace(cfg, training=replace(cfg.training, steps=4, output_dir=first_dir, checkpoint_interval_steps=4, eval_interval_steps=1000))
+    Trainer(cfg, device="cpu", output_dir=first_dir).train()
+    checkpoint = first_dir / "checkpoints" / "final.pt"
+    dist_dir = tmp_path / "dist"
+    dist_cfg = replace(
+        cfg,
+        training=replace(
+            cfg.training,
+            steps=8,
+            output_dir=dist_dir,
+            actor_workers=2,
+            actor_devices=("cpu", "cpu"),
+            eval_interval_steps=1000,
+        ),
+    )
+    trainer = Trainer(dist_cfg, device="cpu", output_dir=dist_dir, resume_checkpoint=checkpoint)
+    with pytest.raises(ValueError, match="not exactly resumable"):
+        trainer.train()
+
+
 def test_evaluate_detailed_reports_physical_metrics(tmp_path: Path) -> None:
     cfg = _small_config(tmp_path)
     trainer = Trainer(cfg, device="cpu", output_dir=tmp_path)
@@ -361,6 +529,36 @@ def test_successive_halving_dry_run_writes_stage_artifacts(tmp_path: Path) -> No
     assert '"baseline_policy": "no_control"' in manifest
     assert (out / "stage_00_baseline" / "results.csv").exists()
     assert (out / "baseline_results.csv").exists()
+
+
+def test_stage_promotion_artifacts_promote_first_eligible_not_first_ranked(tmp_path: Path) -> None:
+    ranked = [
+        {
+            "candidate": 0,
+            "status": "ok",
+            "promotion_reason": "rejected_low_control_activity",
+            "eval.mean_return": 10.0,
+            "eval.shape_error_mean_m": 0.05,
+            "eval.ip_error_a": 5000.0,
+            "eval.current_over_limit_a": 0.0,
+            "eval.boundary_found": 1.0,
+        },
+        {
+            "candidate": 1,
+            "status": "ok",
+            "promotion_reason": "eligible",
+            "eval.mean_return": 8.0,
+            "eval.shape_error_mean_m": 0.06,
+            "eval.ip_error_a": 6000.0,
+            "eval.current_over_limit_a": 0.0,
+            "eval.boundary_found": 1.0,
+        },
+    ]
+    _write_promotion_artifacts(out=tmp_path, stage_name="stage_01_short", ranked=ranked, keep=1)
+    promoted = list(csv.DictReader((tmp_path / "stage_01_short" / "promoted_candidates.csv").open()))
+    assert [row["candidate"] for row in promoted] == ["1"]
+    history = {row["candidate"]: row["promoted"] for row in csv.DictReader((tmp_path / "promotion_history.csv").open())}
+    assert history == {"0": "0", "1": "1"}
 
 
 def test_reward_search_ranking_uses_physical_metrics_before_return() -> None:
@@ -484,7 +682,7 @@ def test_reward_search_allows_bounded_shape_degradation_for_ip_gain() -> None:
 
 
 
-def test_mpo_e_step_temperature_decreases_when_sampled_q_is_uniform() -> None:
+def test_mpo_e_step_keeps_uniform_weights_when_sampled_q_is_uniform() -> None:
     torch.manual_seed(777)
     obs_dim = 5
     action_dim = 2
@@ -514,14 +712,13 @@ def test_mpo_e_step_temperature_decreases_when_sampled_q_is_uniform() -> None:
         return torch.zeros((sampled_actions.shape[0], obs.shape[0], obs.shape[1]), dtype=obs.dtype, device=obs.device)
 
     learner._sampled_q_values = uniform_q  # type: ignore[method-assign]
-    initial_temperature = float(learner.log_temperature.exp().detach())
     metrics = learner._actor_update(batch)
-    assert metrics[-1] < initial_temperature
     assert metrics[8] == pytest.approx(float(np.log(6.0)), rel=1.0e-5)
     assert metrics[9] == pytest.approx(1.0 / 6.0, rel=1.0e-5)
+    assert np.isfinite(metrics[10])
 
 
-def test_mpo_e_step_weights_become_nonuniform_for_distinct_sampled_q() -> None:
+def test_mpo_e_step_solves_batch_dual_for_distinct_sampled_q() -> None:
     torch.manual_seed(778)
     obs_dim = 5
     action_dim = 2
@@ -552,13 +749,15 @@ def test_mpo_e_step_weights_become_nonuniform_for_distinct_sampled_q() -> None:
         return ranks[:, None, None].expand(-1, obs.shape[0], obs.shape[1])
 
     learner._sampled_q_values = ranked_q  # type: ignore[method-assign]
-    metrics = None
-    for _ in range(80):
-        metrics = learner._actor_update(batch)
-    assert metrics is not None
-    assert metrics[-1] < 0.98
+    metrics = learner._actor_update(batch)
+    entropy = metrics[8]
+    kl_to_uniform = float(np.log(6.0)) - entropy
+    assert kl_to_uniform == pytest.approx(0.1, rel=5.0e-2, abs=5.0e-3)
     assert metrics[9] > 1.0 / 6.0
-    assert metrics[8] < float(np.log(6.0))
+    assert metrics[10] < 1.0
+    assert metrics[11] > 0.0
+    assert metrics[12] > 0.0
+
 
 
 def test_sequence_sampled_q_values_match_recurrent_reference() -> None:

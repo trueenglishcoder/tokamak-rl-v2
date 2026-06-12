@@ -60,7 +60,7 @@ def generate_reference_batch(
     params = np.zeros((B, int(steps) + 1, 5), dtype=np.float64)
     for b in range(B):
         ip[b] = _segmented_ip(config.ip, float(initial_ip[b]), int(steps), rng, dt=float(config.t_step))
-        params[b] = _boundary_params(config.boundary, np.asarray(initial_parameters[b], dtype=float), int(steps), rng)
+        params[b] = _boundary_params(config.boundary, np.asarray(initial_parameters[b], dtype=float), int(steps), rng, dt=float(config.t_step))
     theta = torch.linspace(-torch.pi, torch.pi, int(config.theta_count) + 1, dtype=torch.float64, device=dev)[:-1]
     params_t = torch.as_tensor(params, dtype=torch.float64, device=dev)
     points = boundary_points_from_parameters(params_t, theta)
@@ -80,9 +80,7 @@ def _segmented_ip(cfg: IpReferenceConfig, start: float, steps: int, rng: np.rand
     values[0] = float(np.clip(start, cfg.min, cfg.max))
     k = 0
     target = values[0]
-    while k < steps:
-        seg_len = int(rng.integers(cfg.segment_min_steps, cfg.segment_max_steps + 1))
-        seg_len = max(1, min(seg_len, steps - k))
+    for seg_len in _segment_lengths(cfg, int(steps), rng):
         if rng.random() < float(cfg.hold_probability):
             next_target = target
         else:
@@ -90,14 +88,53 @@ def _segmented_ip(cfg: IpReferenceConfig, start: float, steps: int, rng: np.rand
         max_delta = float(cfg.rate_limit) * float(seg_len) * float(dt)
         next_target = float(np.clip(next_target, target - max_delta, target + max_delta))
         next_target = float(np.clip(next_target, cfg.min, cfg.max))
-        ramp = np.linspace(target, next_target, seg_len + 1, dtype=float)[1:]
-        values[k + 1 : k + seg_len + 1] = ramp
+        ramp = np.linspace(target, next_target, int(seg_len) + 1, dtype=float)[1:]
+        values[k + 1 : k + int(seg_len) + 1] = ramp
         target = next_target
-        k += seg_len
+        k += int(seg_len)
     return values
 
 
-def _boundary_params(cfg: BoundaryReferenceConfig, start: np.ndarray, steps: int, rng: np.random.Generator) -> np.ndarray:
+def _segment_lengths(cfg: IpReferenceConfig, steps: int, rng: np.random.Generator) -> np.ndarray:
+    if steps <= 0:
+        return np.zeros((0,), dtype=int)
+    min_len = max(1, int(cfg.segment_min_steps))
+    max_len = max(min_len, int(cfg.segment_max_steps))
+    min_count = max(1, int(cfg.segment_count_min))
+    max_count = max(min_count, int(cfg.segment_count_max))
+    if steps < min_len:
+        # Very short smoke-test episodes cannot satisfy production segment
+        # length/count constraints. Keep them continuous instead of failing
+        # before the trainer can exercise reset/replay/checkpoint logic.
+        return np.asarray([int(steps)], dtype=int)
+    feasible_min = max(min_count, int(np.ceil(float(steps) / float(max_len))))
+    feasible_max = min(max_count, int(np.floor(float(steps) / float(min_len))))
+    if feasible_min > feasible_max:
+        if steps <= max_len:
+            return np.asarray([int(steps)], dtype=int)
+        raise ValueError(
+            "Ip reference segment constraints cannot cover episode length: "
+            f"steps={steps}, segment_min_steps={min_len}, segment_max_steps={max_len}, "
+            f"segment_count_min={min_count}, segment_count_max={max_count}"
+        )
+    count = int(rng.integers(feasible_min, feasible_max + 1))
+    lengths = np.full((count,), min_len, dtype=int)
+    remaining = int(steps - int(np.sum(lengths)))
+    capacities = np.full((count,), max_len - min_len, dtype=int)
+    while remaining > 0:
+        available = np.flatnonzero(capacities > 0)
+        if available.size == 0:
+            raise ValueError("Ip reference segment allocation exhausted unexpectedly")
+        idx = int(rng.choice(available))
+        add = int(rng.integers(1, min(int(capacities[idx]), remaining) + 1))
+        lengths[idx] += add
+        capacities[idx] -= add
+        remaining -= add
+    rng.shuffle(lengths)
+    return lengths
+
+
+def _boundary_params(cfg: BoundaryReferenceConfig, start: np.ndarray, steps: int, rng: np.random.Generator, *, dt: float) -> np.ndarray:
     out = np.repeat(start.reshape(1, 5), steps + 1, axis=0)
     if cfg.kind == "static_initial_parameters":
         return out
@@ -105,7 +142,6 @@ def _boundary_params(cfg: BoundaryReferenceConfig, start: np.ndarray, steps: int
         raise ValueError(f"unknown boundary reference kind: {cfg.kind}")
     # Rate-limited generation around the initial handover parameters. Bounds are
     # expected to be enforced before this by the sampled initial ranges.
-    dt = 1.0e-3
     for k in range(1, steps + 1):
         prev = out[k - 1].copy()
         for i, name in enumerate(PARAMETER_ORDER):
