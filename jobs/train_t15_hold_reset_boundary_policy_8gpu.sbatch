@@ -46,6 +46,7 @@ PYCUDA
     python scripts/train_policy_pipeline.py \
       --config ${POLICY_CONFIG} \
       --output-dir ${TRAIN_OUTPUT} \
+      ${TRAIN_STEPS:+--steps ${TRAIN_STEPS}} \
       --device cuda:0 \
       --sim-compute-backend gpu \
       --sim-gpu-device cuda:0 \

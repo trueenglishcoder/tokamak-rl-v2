@@ -341,6 +341,12 @@ class Trainer:
             arr = np.asarray(values, dtype=float)
             if arr.size:
                 metrics[name] = float(np.nanmean(arr))
+                if name in {"current_over_limit_a", "shape_error_mean_m", "shape_error_max_m", "action_rms", "delta_action_rms"}:
+                    metrics[f"{name}_max"] = float(np.nanmax(arr))
+                if name == "current_over_limit_a":
+                    metrics["current_over_limit_fraction"] = float(np.nanmean(arr > 0.0))
+                if name == "boundary_found":
+                    metrics["boundary_found_min"] = float(np.nanmin(arr))
         return metrics
 
     def _metadata(self, *, step: int, updates: int, eval_score: float | None = None) -> dict[str, object]:

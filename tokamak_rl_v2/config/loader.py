@@ -126,6 +126,10 @@ def _sim(raw: Mapping[str, Any], base: Path) -> SimConfig:
         max_episode_steps=int(raw.get("max_episode_steps", 1000)),
         initial_ranges=_ranges(_mapping(raw.get("initial_ranges", {}), "initial_ranges")),
         current_safety_limits=_current_safety_limits(_mapping(raw.get("current_safety_limits", {}), "current_safety_limits")),
+        action_scale=float(raw.get("action_scale", 1.0)),
+        terminate_on_boundary_loss=bool(raw.get("terminate_on_boundary_loss", True)),
+        terminate_on_current_limit=bool(raw.get("terminate_on_current_limit", False)),
+        current_termination_over_limit_a=float(raw.get("current_termination_over_limit_a", 0.0)),
     )
 
 
@@ -232,6 +236,10 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
             raise ValueError(f"reference.boundary.rate_limits.{key} must be finite and non-negative")
     if cfg.observation.target_preview_steps < 0 or cfg.observation.target_preview_stride <= 0:
         raise ValueError("observation preview settings are invalid")
+    if not math.isfinite(float(cfg.sim.action_scale)) or float(cfg.sim.action_scale) <= 0.0 or float(cfg.sim.action_scale) > 1.0:
+        raise ValueError("sim.action_scale must be finite and in (0, 1]")
+    if not math.isfinite(float(cfg.sim.current_termination_over_limit_a)) or float(cfg.sim.current_termination_over_limit_a) < 0.0:
+        raise ValueError("sim.current_termination_over_limit_a must be finite and non-negative")
     _validate_reward_config(cfg.reward, prefix="reward")
     if cfg.randomization.ip_measurement_noise_a < 0.0 or cfg.randomization.current_measurement_noise_a < 0.0:
         raise ValueError("randomization noise values must be non-negative")
@@ -266,6 +274,8 @@ def _validate_reward_config(reward: RewardConfig, *, prefix: str) -> None:
         raise ValueError(f"{prefix}.ip_bad_a must be greater than ip_good_a")
     if reward.current_bad_a <= reward.current_good_a:
         raise ValueError(f"{prefix}.current_bad_a must be greater than current_good_a")
+    if float(reward.boundary_missing_error_m) < 0.0:
+        raise ValueError(f"{prefix}.boundary_missing_error_m must be non-negative")
     if reward.derivative_bad <= reward.derivative_good:
         raise ValueError(f"{prefix}.derivative_bad must be greater than derivative_good")
     for name in ("shape_weight", "ip_weight", "reward_scale"):

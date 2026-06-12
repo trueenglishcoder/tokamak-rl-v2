@@ -39,7 +39,8 @@ class T15StaticBoundaryReward:
         c = self.config
         boundary_mask = boundary_found.reshape(-1, 1)
         raw_shape_error = torch.linalg.norm(boundary_points - reference_points, dim=-1)
-        finite_bad_shape = torch.full_like(raw_shape_error, float(c.shape_bad_m))
+        missing_shape_error = float(c.boundary_missing_error_m) if float(c.boundary_missing_error_m) > 0.0 else float(c.shape_bad_m)
+        finite_bad_shape = torch.full_like(raw_shape_error, missing_shape_error)
         shape_error = torch.nan_to_num(raw_shape_error, nan=float(c.shape_bad_m), posinf=float(c.shape_bad_m), neginf=float(c.shape_bad_m))
         shape_error = torch.where(boundary_mask, shape_error, finite_bad_shape)
         shape_error_mean = torch.mean(shape_error, dim=-1)
@@ -113,6 +114,10 @@ class T15StaticBoundaryReward:
                 "dense_current_loss": dense_current_loss,
                 "dense_derivative_loss": dense_derivative_loss,
                 "dense_action_loss": dense_action_loss,
+                "dense_weighted_shape_loss": float(c.shape_weight) * dense_shape_loss,
+                "dense_weighted_ip_loss": float(c.ip_weight) * dense_ip_loss,
+                "dense_weighted_current_loss": float(c.current_weight) * dense_current_loss,
+                "dense_weighted_derivative_loss": float(c.derivative_weight) * dense_derivative_loss,
             }
         else:
             raise ValueError(f"unsupported reward mode: {c.mode}")

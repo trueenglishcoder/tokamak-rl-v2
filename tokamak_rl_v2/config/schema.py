@@ -87,6 +87,7 @@ class RewardConfig:
     derivative_weight: float = 0.25
     current_good_a: float = 100.0
     current_bad_a: float = 50000.0
+    boundary_missing_error_m: float = 0.0
     derivative_good: float = 0.05
     derivative_bad: float = 1.0
     action_penalty_weight: float = 0.02
@@ -116,6 +117,10 @@ class SimConfig:
     max_episode_steps: int = 1000
     initial_ranges: InitialRanges | None = None
     current_safety_limits: CurrentSafetyLimits | None = None
+    action_scale: float = 1.0
+    terminate_on_boundary_loss: bool = True
+    terminate_on_current_limit: bool = False
+    current_termination_over_limit_a: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)

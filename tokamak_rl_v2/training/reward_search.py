@@ -34,6 +34,7 @@ REWARD_FIELDS = [
     "derivative_weight",
     "current_good_a",
     "current_bad_a",
+    "boundary_missing_error_m",
     "derivative_good",
     "derivative_bad",
     "action_penalty_weight",
@@ -795,6 +796,7 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--derivative-weight-values", default=None)
     ap.add_argument("--current-good-values", default=None)
     ap.add_argument("--current-bad-values", default=None)
+    ap.add_argument("--boundary-missing-error-values", default=None)
     ap.add_argument("--derivative-good-values", default=None)
     ap.add_argument("--derivative-bad-values", default=None)
     ap.add_argument("--action-penalty-weight-values", default=None)
@@ -846,6 +848,7 @@ def _reward_value_grid(base: RewardConfig, args: argparse.Namespace) -> list[tup
         ("derivative_weight", args.derivative_weight_values),
         ("current_good_a", args.current_good_values),
         ("current_bad_a", args.current_bad_values),
+        ("boundary_missing_error_m", args.boundary_missing_error_values),
         ("derivative_good", args.derivative_good_values),
         ("derivative_bad", args.derivative_bad_values),
         ("action_penalty_weight", args.action_penalty_weight_values),
@@ -1169,6 +1172,8 @@ def _validate_reward_candidate(data: dict[str, object]) -> None:
         raise ValueError("ip_bad_a must be greater than ip_good_a")
     if float(data["current_bad_a"]) <= float(data["current_good_a"]):
         raise ValueError("current_bad_a must be greater than current_good_a")
+    if float(data["boundary_missing_error_m"]) < 0.0:
+        raise ValueError("boundary_missing_error_m must be non-negative")
     if float(data["derivative_bad"]) <= float(data["derivative_good"]):
         raise ValueError("derivative_bad must be greater than derivative_good")
     if float(data["shape_weight"]) <= 0.0:
@@ -1366,6 +1371,12 @@ def _evaluate_no_control(*, config: ExperimentConfig, args: argparse.Namespace, 
         arr = np.asarray(values, dtype=float)
         if arr.size:
             metrics[name] = float(np.nanmean(arr))
+            if name in {"current_over_limit_a", "shape_error_mean_m", "shape_error_max_m", "action_rms", "delta_action_rms"}:
+                metrics[f"{name}_max"] = float(np.nanmax(arr))
+            if name == "current_over_limit_a":
+                metrics["current_over_limit_fraction"] = float(np.nanmean(arr > 0.0))
+            if name == "boundary_found":
+                metrics["boundary_found_min"] = float(np.nanmin(arr))
     return metrics
 
 def _resolve_torch_device(value: str) -> torch.device:

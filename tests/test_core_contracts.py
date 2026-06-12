@@ -107,6 +107,24 @@ def test_reward_components_remain_finite_when_boundary_is_missing() -> None:
     assert float(rb.components["shape_error_mean_m"].item()) == pytest.approx(0.05)
 
 
+def test_dense_reward_can_make_missing_boundary_expensive() -> None:
+    reward_fn = T15StaticBoundaryReward(RewardConfig(mode="dense_physical", reward_scale=1.0, shape_bad_m=0.025, boundary_missing_error_m=0.1), control_rate_hz=1000.0)
+    rb = reward_fn(
+        ip=torch.tensor([200000.0]),
+        ip_ref=torch.tensor([200000.0]),
+        boundary_points=torch.full((1, 32, 2), float("nan"), dtype=torch.float32),
+        reference_points=torch.zeros((1, 32, 2), dtype=torch.float32),
+        action=torch.zeros((1, 9), dtype=torch.float32),
+        previous_action=torch.zeros((1, 9), dtype=torch.float32),
+        current_over_limit_a=torch.zeros((1,), dtype=torch.float32),
+        derivative_usage=torch.zeros((1,), dtype=torch.float32),
+        boundary_found=torch.zeros((1,), dtype=torch.bool),
+        terminated=torch.zeros((1,), dtype=torch.bool),
+    )
+    assert float(rb.components["shape_error_mean_m"].item()) == pytest.approx(0.1)
+    assert float(rb.components["dense_weighted_shape_loss"].item()) > 10.0
+
+
 def test_dense_physical_reward_improves_when_tracking_errors_improve() -> None:
     reward_fn = T15StaticBoundaryReward(RewardConfig(mode="dense_physical", reward_scale=1.0, shape_bad_m=0.03, ip_bad_a=40000.0), control_rate_hz=1000.0)
     ref = torch.zeros((2, 32, 2), dtype=torch.float32)
@@ -150,6 +168,17 @@ def test_environment_reset_step_contract() -> None:
     assert result.obs.shape == (2, env.obs_dim)
     assert result.reward.shape == (2,)
     assert torch.isfinite(result.reward).all()
+
+
+def test_action_scale_caps_physical_derivative_usage() -> None:
+    cfg = load_experiment_config(CONFIG)
+    cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=4, action_scale=0.25))
+    env = TokamakMagneticControlEnv(cfg, batch_size=2, device="cpu", seed=2)
+    env.reset()
+    result = env.step(torch.ones((2, env.action_dim), dtype=torch.float32))
+    comps = result.info["reward_components"]
+    assert float(np.nanmax(comps["derivative_usage"])) <= 0.25001
+    assert np.allclose(np.asarray(env.normalization()["derivative_scale"]), env.raw_derivative_limits.detach().cpu().numpy() * 0.25)
 
 
 def test_hold_reset_boundary_uses_observed_reset_boundary() -> None:
@@ -353,6 +382,20 @@ def test_config_loader_rejects_invalid_values(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="mode"):
         load_experiment_config(bad_mode)
 
+    data = json.loads(CONFIG.read_text())
+    data["sim"]["action_scale"] = 0.0
+    bad_action_scale = tmp_path / "bad_action_scale.json"
+    bad_action_scale.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="action_scale"):
+        load_experiment_config(bad_action_scale)
+
+    data = json.loads(CONFIG.read_text())
+    data["reward"]["boundary_missing_error_m"] = -1.0
+    bad_missing_boundary = tmp_path / "bad_missing_boundary.json"
+    bad_missing_boundary.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="boundary_missing_error"):
+        load_experiment_config(bad_missing_boundary)
+
 
 def test_policy_pipeline_gates_require_learning_signals() -> None:
     actor_eval = {
@@ -405,6 +448,26 @@ def test_policy_pipeline_gates_require_learning_signals() -> None:
     assert reasons["action_rms_min"] is False
     assert reasons["mpo_policy_weights_nonuniform"] is False
     assert reasons["mpo_sampled_q_spread"] is False
+
+    current_spike = evaluate_policy_gates(
+        actor_eval=dict(actor_eval, current_over_limit_a=0.0, current_over_limit_a_max=1.0, current_over_limit_fraction=0.01),
+        no_control=no_control,
+        tail_losses=tail_losses,
+        action_samples=20,
+        min_boundary_found=0.999,
+        max_current_over_limit_a=0.0,
+        max_shape_error_m=0.03,
+        min_ip_improvement_frac=0.25,
+        min_ip_improvement_a=20000.0,
+        min_action_rms=0.005,
+        max_action_rms=0.5,
+        min_policy_weight_extra=1.0e-4,
+        min_sampled_q_spread=1.0e-8,
+        require_controller_rollout=True,
+        controller_rollout={"status": "ok"},
+    )
+    spike_reasons = {check["name"]: check["passed"] for check in current_spike["checks"]}
+    assert spike_reasons["current_limit"] is False
 
 
 def test_experiment_configs_use_neutral_output_names() -> None:
@@ -629,7 +692,10 @@ def test_evaluate_detailed_reports_physical_metrics(tmp_path: Path) -> None:
     assert "shape_error_max_m" in metrics
     assert "ip_error_a" in metrics
     assert "current_over_limit_a" in metrics
+    assert "current_over_limit_a_max" in metrics
+    assert "current_over_limit_fraction" in metrics
     assert "boundary_found" in metrics
+    assert "boundary_found_min" in metrics
     assert np.isfinite(metrics["mean_return"])
 
 

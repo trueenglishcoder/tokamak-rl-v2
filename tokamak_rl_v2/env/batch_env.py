@@ -47,7 +47,8 @@ class TokamakMagneticControlEnv:
         self.obs_dim = self._obs_dim()
         self.reward_fn = T15StaticBoundaryReward(config.reward, control_rate_hz=1.0 / float(self.cfg.physics.t_step))
         self.current_limits = torch.as_tensor(_current_limit_vector(config, self.cfg), dtype=torch.float32, device=self.device)
-        self.derivative_limits = torch.as_tensor(np.concatenate([_limit_vec(self.cfg.physics.pfc_deriv_limit, self.cfg.pfc.n_coils), _limit_vec(self.cfg.physics.sol_deriv_limit, self.cfg.sol.n_coils)]), dtype=torch.float32, device=self.device)
+        self.raw_derivative_limits = torch.as_tensor(np.concatenate([_limit_vec(self.cfg.physics.pfc_deriv_limit, self.cfg.pfc.n_coils), _limit_vec(self.cfg.physics.sol_deriv_limit, self.cfg.sol.n_coils)]), dtype=torch.float32, device=self.device)
+        self.derivative_limits = self.raw_derivative_limits * float(config.sim.action_scale)
         self.previous_action = torch.zeros((self.batch_size, self.action_dim), dtype=torch.float32, device=self.device)
         self.action_offset = torch.zeros((self.batch_size, self.action_dim), dtype=torch.float32, device=self.device)
         self.reference: ReferenceBatch | None = None
@@ -345,11 +346,15 @@ class TokamakMagneticControlEnv:
         current = torch.cat([result.state.pfc_currents, result.state.sol_currents], dim=1).to(torch.float32)
         deriv = torch.cat([result.state.pfc_current_derivs, result.state.sol_current_derivs], dim=1).to(torch.float32)
         current_over_limit = torch.max(torch.clamp(torch.abs(current) - self.current_limits[None, :], min=0.0), dim=1).values
-        derivative_usage = torch.max(torch.abs(deriv) / torch.where(torch.isfinite(self.derivative_limits) & (self.derivative_limits > 0.0), self.derivative_limits, torch.ones_like(self.derivative_limits))[None, :], dim=1).values
+        derivative_usage = torch.max(torch.abs(deriv) / torch.where(torch.isfinite(self.raw_derivative_limits) & (self.raw_derivative_limits > 0.0), self.raw_derivative_limits, torch.ones_like(self.raw_derivative_limits))[None, :], dim=1).values
         boundary_points = result.boundary.points[:, : int(self.config.sim.angles)].to(torch.float32)
         ref = ref_points[:, : int(self.config.sim.angles)].to(torch.float32)
         found = result.boundary.found.to(torch.bool)
-        terminated = ~found
+        boundary_terminated = ~found if self.config.sim.terminate_on_boundary_loss else torch.zeros_like(found, dtype=torch.bool)
+        current_terminated = torch.zeros_like(found, dtype=torch.bool)
+        if self.config.sim.terminate_on_current_limit:
+            current_terminated = current_over_limit > float(self.config.sim.current_termination_over_limit_a)
+        terminated = boundary_terminated | current_terminated
         rb = self.reward_fn(ip=result.state.Ip.to(torch.float32), ip_ref=ip_ref, boundary_points=boundary_points, reference_points=ref, action=action, previous_action=self.previous_action, current_over_limit_a=current_over_limit, derivative_usage=derivative_usage, boundary_found=found, terminated=terminated)
         return rb.reward, terminated, {"reward_components": {k: v.detach().cpu().numpy() for k, v in rb.components.items()}}
 
@@ -376,9 +381,13 @@ class TokamakMagneticControlEnv:
         current_t = torch.as_tensor(np.stack(currents), dtype=torch.float32, device=self.device)
         deriv_t = torch.as_tensor(np.stack(derivs), dtype=torch.float32, device=self.device)
         current_over_limit = torch.max(torch.clamp(torch.abs(current_t) - self.current_limits[None, :], min=0.0), dim=1).values
-        derivative_usage = torch.max(torch.abs(deriv_t) / torch.where(torch.isfinite(self.derivative_limits) & (self.derivative_limits > 0.0), self.derivative_limits, torch.ones_like(self.derivative_limits))[None, :], dim=1).values
+        derivative_usage = torch.max(torch.abs(deriv_t) / torch.where(torch.isfinite(self.raw_derivative_limits) & (self.raw_derivative_limits > 0.0), self.raw_derivative_limits, torch.ones_like(self.raw_derivative_limits))[None, :], dim=1).values
         found_t = torch.as_tensor(found, dtype=torch.bool, device=self.device)
-        terminated = ~found_t
+        boundary_terminated = ~found_t if self.config.sim.terminate_on_boundary_loss else torch.zeros_like(found_t, dtype=torch.bool)
+        current_terminated = torch.zeros_like(found_t, dtype=torch.bool)
+        if self.config.sim.terminate_on_current_limit:
+            current_terminated = current_over_limit > float(self.config.sim.current_termination_over_limit_a)
+        terminated = boundary_terminated | current_terminated
         rb = self.reward_fn(ip=torch.as_tensor(ips, dtype=torch.float32, device=self.device), ip_ref=ip_ref, boundary_points=torch.nan_to_num(torch.as_tensor(np.stack(boundary_points), dtype=torch.float32, device=self.device)), reference_points=ref_points[:, : int(self.config.sim.angles)].to(torch.float32), action=action, previous_action=self.previous_action, current_over_limit_a=current_over_limit, derivative_usage=derivative_usage, boundary_found=found_t, terminated=terminated)
         return rb.reward, terminated, {"reward_components": {k: v.detach().cpu().numpy() for k, v in rb.components.items()}}
 
@@ -397,6 +406,7 @@ class TokamakMagneticControlEnv:
             "feature_slices": {name: [int(start), int(end)] for name, (start, end) in self._feature_slices().items()},
             "target_preview_steps": int(self.config.observation.target_preview_steps),
             "target_preview_stride": int(self.config.observation.target_preview_stride),
+            "action_scale": float(self.config.sim.action_scale),
         }
 
     def normalization(self) -> dict[str, object]:

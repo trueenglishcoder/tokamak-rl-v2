@@ -143,8 +143,9 @@ def evaluate_policy_gates(
     boundary_found = _metric(actor_eval, "boundary_found")
     add("boundary_found", _finite(boundary_found) and boundary_found >= min_boundary_found, value=boundary_found, threshold=f">= {min_boundary_found:g}")
 
-    current_over = _metric(actor_eval, "current_over_limit_a")
-    add("current_limit", _finite(current_over) and current_over <= max_current_over_limit_a, value=current_over, threshold=f"<= {max_current_over_limit_a:g}")
+    current_over_mean = _metric(actor_eval, "current_over_limit_a")
+    current_over_max = _metric(actor_eval, "current_over_limit_a_max", default=current_over_mean)
+    add("current_limit", _finite(current_over_max) and current_over_max <= max_current_over_limit_a, value={"max_a": current_over_max, "mean_a": current_over_mean, "fraction": _metric(actor_eval, "current_over_limit_fraction")}, threshold=f"max <= {max_current_over_limit_a:g} A")
 
     shape_error = _metric(actor_eval, "shape_error_mean_m")
     add("shape_error_mean", _finite(shape_error) and shape_error <= max_shape_error_m, value=shape_error, threshold=f"<= {max_shape_error_m:g} m")
