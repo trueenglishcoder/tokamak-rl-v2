@@ -83,6 +83,8 @@ class RewardConfig:
     ip_bad_a: float = 20000.0
     shape_weight: float = 3.0
     ip_weight: float = 2.0
+    current_weight: float = 1.0
+    derivative_weight: float = 0.25
     current_good_a: float = 100.0
     current_bad_a: float = 50000.0
     derivative_good: float = 0.05

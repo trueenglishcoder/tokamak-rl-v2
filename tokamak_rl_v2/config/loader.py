@@ -271,6 +271,9 @@ def _validate_reward_config(reward: RewardConfig, *, prefix: str) -> None:
     for name in ("shape_weight", "ip_weight", "reward_scale"):
         if float(getattr(reward, name)) <= 0.0:
             raise ValueError(f"{prefix}.{name} must be positive")
+    for name in ("current_weight", "derivative_weight"):
+        if float(getattr(reward, name)) < 0.0:
+            raise ValueError(f"{prefix}.{name} must be non-negative")
     for name in ("action_penalty_weight", "delta_action_penalty_weight"):
         if float(getattr(reward, name)) < 0.0:
             raise ValueError(f"{prefix}.{name} must be non-negative")

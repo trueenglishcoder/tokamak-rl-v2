@@ -30,6 +30,8 @@ REWARD_FIELDS = [
     "ip_bad_a",
     "shape_weight",
     "ip_weight",
+    "current_weight",
+    "derivative_weight",
     "current_good_a",
     "current_bad_a",
     "derivative_good",
@@ -789,6 +791,8 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--ip-bad-values", default=None)
     ap.add_argument("--shape-weight-values", default=None)
     ap.add_argument("--ip-weight-values", default=None)
+    ap.add_argument("--current-weight-values", default=None)
+    ap.add_argument("--derivative-weight-values", default=None)
     ap.add_argument("--current-good-values", default=None)
     ap.add_argument("--current-bad-values", default=None)
     ap.add_argument("--derivative-good-values", default=None)
@@ -838,6 +842,8 @@ def _reward_value_grid(base: RewardConfig, args: argparse.Namespace) -> list[tup
         ("ip_bad_a", args.ip_bad_values),
         ("shape_weight", args.shape_weight_values),
         ("ip_weight", args.ip_weight_values),
+        ("current_weight", args.current_weight_values),
+        ("derivative_weight", args.derivative_weight_values),
         ("current_good_a", args.current_good_values),
         ("current_bad_a", args.current_bad_values),
         ("derivative_good", args.derivative_good_values),
@@ -1169,6 +1175,10 @@ def _validate_reward_candidate(data: dict[str, object]) -> None:
         raise ValueError("shape_weight must be positive")
     if float(data["ip_weight"]) <= 0.0:
         raise ValueError("ip_weight must be positive")
+    if float(data["current_weight"]) < 0.0:
+        raise ValueError("current_weight must be non-negative")
+    if float(data["derivative_weight"]) < 0.0:
+        raise ValueError("derivative_weight must be non-negative")
     if float(data["action_penalty_weight"]) < 0.0:
         raise ValueError("action_penalty_weight must be non-negative")
     if float(data["delta_action_penalty_weight"]) < 0.0:

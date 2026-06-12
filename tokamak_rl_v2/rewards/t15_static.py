@@ -100,8 +100,8 @@ class T15StaticBoundaryReward:
             dense_loss = (
                 float(c.shape_weight) * dense_shape_loss
                 + float(c.ip_weight) * dense_ip_loss
-                + dense_current_loss
-                + 0.25 * dense_derivative_loss
+                + float(c.current_weight) * dense_current_loss
+                + float(c.derivative_weight) * dense_derivative_loss
                 + dense_action_loss
             )
             reward = -float(c.reward_scale) * dense_loss
