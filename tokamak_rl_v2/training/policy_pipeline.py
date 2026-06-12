@@ -26,64 +26,75 @@ def main(argv: list[str] | None = None) -> int:
     _validate_experiment_config(cfg)
     output_dir = Path(args.output_dir or cfg.training.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    wandb_run = _start_wandb(args, cfg, output_dir=output_dir)
+    try:
+        reset_report = run_reset_sanity(cfg, device=args.device, num_envs=args.num_envs)
+        _wandb_log(wandb_run, "pipeline/reset", reset_report, step=0)
+        reset_gate = reset_report["max_abs_boundary_radii_error_m"] <= float(args.reset_error_tolerance_m) and reset_report["boundary_found_mean"] >= float(args.min_boundary_found)
+        if not reset_gate:
+            report = {
+                "status": "failed_reset_sanity",
+                "reset_sanity": reset_report,
+                "gates": [{"name": "reset_sanity", "passed": False}],
+            }
+            _write_json(output_dir / "policy_validation.json", report)
+            _wandb_log(wandb_run, "pipeline", {"passed": 0.0, "failed_reset_sanity": 1.0}, step=0)
+            return 2 if not args.allow_failed_gates else 0
 
-    reset_report = run_reset_sanity(cfg, device=args.device, num_envs=args.num_envs)
-    reset_gate = reset_report["max_abs_boundary_radii_error_m"] <= float(args.reset_error_tolerance_m) and reset_report["boundary_found_mean"] >= float(args.min_boundary_found)
-    if not reset_gate:
+        trainer = Trainer(cfg, steps=args.steps, num_envs=args.num_envs, device=args.device, output_dir=output_dir, wandb_run=wandb_run, resume_checkpoint=args.resume_checkpoint)
+        baseline = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=int(cfg.training.eval_max_steps), policy="no_control")
+        _wandb_log(wandb_run, "pipeline/no_control", baseline, step=0)
+        train_result = trainer.train()
+
+        selected_checkpoint = _selected_checkpoint(output_dir)
+        if selected_checkpoint is not None and selected_checkpoint.name == "best.pt":
+            _load_actor_weights(trainer, selected_checkpoint)
+        actor_eval = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=int(cfg.training.eval_max_steps), policy="actor")
+        _wandb_log(wandb_run, "pipeline/actor_eval", actor_eval, step=int(train_result.get("steps", cfg.training.steps)))
+        losses = summarize_training_losses(output_dir / "losses.csv")
+        selected_export = _selected_export_dir(output_dir)
+        rollout_report = validate_exported_controller(selected_export, cfg, steps=int(args.controller_rollout_steps)) if selected_export is not None else {"status": "missing_export"}
+
+        gate_report = evaluate_policy_gates(
+            actor_eval=actor_eval,
+            no_control=baseline,
+            tail_losses=losses,
+            action_samples=int(cfg.learner.action_samples),
+            min_boundary_found=float(args.min_boundary_found),
+            max_current_over_limit_a=float(args.max_current_over_limit_a),
+            max_shape_error_m=float(args.max_shape_error_m),
+            min_ip_improvement_frac=float(args.min_ip_improvement_frac),
+            min_ip_improvement_a=float(args.min_ip_improvement_a),
+            min_action_rms=float(args.min_action_rms),
+            max_action_rms=float(args.max_action_rms),
+            min_policy_weight_extra=float(args.min_policy_weight_extra),
+            min_sampled_q_spread=float(args.min_sampled_q_spread),
+            require_controller_rollout=not bool(args.skip_controller_rollout_gate),
+            controller_rollout=rollout_report,
+        )
         report = {
-            "status": "failed_reset_sanity",
+            "status": "passed" if gate_report["passed"] else "failed_gates",
+            "config": str(Path(args.config).resolve()),
+            "output_dir": str(output_dir),
+            "checkpoint": None if selected_checkpoint is None else str(selected_checkpoint),
+            "export_dir": None if selected_export is None else str(selected_export),
             "reset_sanity": reset_report,
-            "gates": [{"name": "reset_sanity", "passed": False}],
+            "no_control": baseline,
+            "train_result": train_result,
+            "actor_eval": actor_eval,
+            "tail_losses": losses,
+            "controller_rollout": rollout_report,
+            "gates": gate_report["checks"],
         }
         _write_json(output_dir / "policy_validation.json", report)
-        return 2 if not args.allow_failed_gates else 0
-
-    trainer = Trainer(cfg, steps=args.steps, num_envs=args.num_envs, device=args.device, output_dir=output_dir, resume_checkpoint=args.resume_checkpoint)
-    baseline = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=int(cfg.training.eval_max_steps), policy="no_control")
-    train_result = trainer.train()
-
-    selected_checkpoint = _selected_checkpoint(output_dir)
-    if selected_checkpoint is not None and selected_checkpoint.name == "best.pt":
-        _load_actor_weights(trainer, selected_checkpoint)
-    actor_eval = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=int(cfg.training.eval_max_steps), policy="actor")
-    losses = summarize_training_losses(output_dir / "losses.csv")
-    selected_export = _selected_export_dir(output_dir)
-    rollout_report = validate_exported_controller(selected_export, cfg, steps=int(args.controller_rollout_steps)) if selected_export is not None else {"status": "missing_export"}
-
-    gate_report = evaluate_policy_gates(
-        actor_eval=actor_eval,
-        no_control=baseline,
-        tail_losses=losses,
-        action_samples=int(cfg.learner.action_samples),
-        min_boundary_found=float(args.min_boundary_found),
-        max_current_over_limit_a=float(args.max_current_over_limit_a),
-        max_shape_error_m=float(args.max_shape_error_m),
-        min_ip_improvement_frac=float(args.min_ip_improvement_frac),
-        min_ip_improvement_a=float(args.min_ip_improvement_a),
-        min_action_rms=float(args.min_action_rms),
-        max_action_rms=float(args.max_action_rms),
-        min_policy_weight_extra=float(args.min_policy_weight_extra),
-        min_sampled_q_spread=float(args.min_sampled_q_spread),
-        require_controller_rollout=not bool(args.skip_controller_rollout_gate),
-        controller_rollout=rollout_report,
-    )
-    report = {
-        "status": "passed" if gate_report["passed"] else "failed_gates",
-        "config": str(Path(args.config).resolve()),
-        "output_dir": str(output_dir),
-        "checkpoint": None if selected_checkpoint is None else str(selected_checkpoint),
-        "export_dir": None if selected_export is None else str(selected_export),
-        "reset_sanity": reset_report,
-        "no_control": baseline,
-        "train_result": train_result,
-        "actor_eval": actor_eval,
-        "tail_losses": losses,
-        "controller_rollout": rollout_report,
-        "gates": gate_report["checks"],
-    }
-    _write_json(output_dir / "policy_validation.json", report)
-    _write_json(output_dir / "closed_loop_rollout_report.json", rollout_report)
-    return 0 if gate_report["passed"] or args.allow_failed_gates else 2
+        _write_json(output_dir / "closed_loop_rollout_report.json", rollout_report)
+        _wandb_log(wandb_run, "pipeline/tail_losses", losses, step=int(train_result.get("steps", cfg.training.steps)))
+        _wandb_log(wandb_run, "pipeline/controller_rollout", rollout_report, step=int(train_result.get("steps", cfg.training.steps)))
+        _wandb_log(wandb_run, "pipeline/gates", _gate_metrics(gate_report["checks"]), step=int(train_result.get("steps", cfg.training.steps)))
+        return 0 if gate_report["passed"] or args.allow_failed_gates else 2
+    finally:
+        if wandb_run is not None:
+            wandb_run.finish()
 
 
 def run_reset_sanity(config: ExperimentConfig, *, device: str | None = None, num_envs: int | None = None) -> dict[str, float]:
@@ -379,6 +390,11 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--controller-rollout-steps", type=int, default=8)
     ap.add_argument("--skip-controller-rollout-gate", action="store_true")
     ap.add_argument("--allow-failed-gates", action="store_true")
+    ap.add_argument("--wandb", action="store_true")
+    ap.add_argument("--wandb-project", default="tokamak-rl-v2-policy")
+    ap.add_argument("--wandb-name", default=None)
+    ap.add_argument("--wandb-group", default=None)
+    ap.add_argument("--wandb-mode", choices=("online", "offline", "disabled"), default="online")
     return ap
 
 
@@ -458,6 +474,57 @@ def _jsonable(value: object) -> object:
 def _write_json(path: Path, data: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(_jsonable(dict(data)), indent=2), encoding="utf-8")
+
+
+def _start_wandb(args: argparse.Namespace, cfg: ExperimentConfig, *, output_dir: Path):
+    if not bool(args.wandb) or args.wandb_mode == "disabled":
+        return None
+    import wandb
+
+    return wandb.init(
+        project=args.wandb_project,
+        name=args.wandb_name or cfg.name,
+        group=args.wandb_group,
+        mode=args.wandb_mode,
+        config={
+            "experiment": cfg.name,
+            "policy_pipeline": "hold_reset_boundary",
+            "output_dir": str(output_dir),
+        },
+    )
+
+
+def _wandb_log(wandb_run, prefix: str, metrics: Mapping[str, object], *, step: int) -> None:
+    if wandb_run is None:
+        return
+    payload: dict[str, float] = {}
+    for key, value in metrics.items():
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(numeric):
+            payload[f"{prefix}/{key}"] = numeric
+    if payload:
+        wandb_run.log({"global_step": int(step), **payload}, step=int(step))
+
+
+def _gate_metrics(checks: object) -> dict[str, float]:
+    out: dict[str, float] = {}
+    if not isinstance(checks, list):
+        return out
+    passed = 0
+    for check in checks:
+        if not isinstance(check, Mapping):
+            continue
+        name = str(check.get("name", "unknown"))
+        ok = 1.0 if bool(check.get("passed", False)) else 0.0
+        out[f"{name}_passed"] = ok
+        passed += int(ok)
+    if checks:
+        out["passed_fraction"] = float(passed) / float(len(checks))
+        out["passed"] = 1.0 if passed == len(checks) else 0.0
+    return out
 
 
 if __name__ == "__main__":
