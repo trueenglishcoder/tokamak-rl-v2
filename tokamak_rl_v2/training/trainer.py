@@ -69,6 +69,8 @@ class Trainer:
             return
         try:
             self.wandb_run.define_metric("global_step")
+            self.wandb_run.define_metric("env_step")
+            self.wandb_run.define_metric("decision_step")
             for prefix in ("train/*", "reward/*", "eval/*"):
                 self.wandb_run.define_metric(prefix, step_metric="global_step")
         except Exception as exc:
@@ -77,8 +79,15 @@ class Trainer:
     def _wandb_log(self, values: dict[str, object], *, step: int) -> None:
         if self.wandb_run is None:
             return
-        payload = {"global_step": int(step), **values}
-        self.wandb_run.log(payload, step=int(step))
+        raw_step = int(step)
+        if int(self.config.training.actor_workers) > 1:
+            env_step = raw_step
+            decision_step = raw_step
+        else:
+            decision_step = raw_step
+            env_step = raw_step * self.num_envs
+        payload = {"global_step": int(env_step), "env_step": int(env_step), "decision_step": int(decision_step), **values}
+        self.wandb_run.log(payload, step=int(env_step))
 
     def train(self) -> dict[str, Any]:
         if int(self.config.training.actor_workers) > 1:
@@ -129,7 +138,8 @@ class Trainer:
                     self._save_checkpoint("latest.pt", step=step, updates=updates)
                 if step % int(self.config.training.eval_interval_steps) == 0:
                     eval_metrics = self.evaluate_detailed(max_steps=int(self.config.training.eval_max_steps), episodes=int(self.config.training.eval_episodes))
-                    score = float(eval_metrics["mean_return"])
+                    score = self._selection_score(eval_metrics)
+                    eval_metrics["selection_score"] = score
                     self._wandb_log({f"eval/{k}": v for k, v in eval_metrics.items()}, step=step)
                     if score > self.best_eval:
                         self.best_eval = score
@@ -139,7 +149,18 @@ class Trainer:
                 progress.update(1)
                 progress.set_postfix(replay=self.replay.size, updates=updates, reward=f"{float(batch_step.reward.mean().detach().cpu()):.4f}", refresh=False)
             progress.close()
-        final = {"start_step": self.start_step, "steps": self.steps, "updates": updates, "best_eval": self.best_eval, "best_eval_details": self.best_eval_details, "device": str(self.device), "output_dir": str(self.output_dir)}
+        final = {
+            "start_step": self.start_step,
+            "steps": self.steps,
+            "decision_steps": self.steps,
+            "env_steps": self.steps * self.num_envs,
+            "updates": updates,
+            "best_eval": self.best_eval,
+            "best_eval_details": self.best_eval_details,
+            "device": str(self.device),
+            "output_dir": str(self.output_dir),
+            "total_training_envs": self.num_envs,
+        }
         self._save_checkpoint("final.pt", step=self.steps, updates=updates)
         self._export("exports/final_actor", step=self.steps, updates=updates, eval_score=self.best_eval)
         metrics_path.write_text(json.dumps(final, indent=2), encoding="utf-8")
@@ -220,7 +241,8 @@ class Trainer:
                         last_checkpoint_step = env_steps
                     if env_steps - last_eval_step >= max(int(self.config.training.eval_interval_steps), 1):
                         eval_metrics = self.evaluate_detailed(max_steps=int(self.config.training.eval_max_steps), episodes=int(self.config.training.eval_episodes))
-                        score = float(eval_metrics["mean_return"])
+                        score = self._selection_score(eval_metrics)
+                        eval_metrics["selection_score"] = score
                         self._wandb_log({f"eval/{k}": v for k, v in eval_metrics.items()}, step=env_steps)
                         if score > self.best_eval:
                             self.best_eval = score
@@ -238,6 +260,7 @@ class Trainer:
         final = {
             "start_step": self.start_step,
             "steps": env_steps,
+            "env_steps": env_steps,
             "updates": updates,
             "best_eval": self.best_eval,
             "best_eval_details": self.best_eval_details,
@@ -368,9 +391,27 @@ class Trainer:
                     metrics["current_over_limit_fraction"] = float(np.nanmean(arr > 0.0))
         return metrics
 
+    @staticmethod
+    def _selection_score(metrics: dict[str, float]) -> float:
+        score = float(metrics.get("mean_return", -float("inf")))
+        current_over = float(metrics.get("current_over_limit_a_max", metrics.get("current_over_limit_a", 0.0)))
+        boundary_found = float(metrics.get("boundary_found", 1.0))
+        if np.isfinite(current_over) and current_over > 0.0:
+            score -= 1.0e6 + min(current_over, 1.0e6)
+        if np.isfinite(boundary_found) and boundary_found < 0.999:
+            score -= 1.0e6 * (0.999 - boundary_found)
+        return float(score)
+
     def _metadata(self, *, step: int, updates: int, eval_score: float | None = None) -> dict[str, object]:
         exact_resume_supported = not bool(self._last_actor_devices)
-        out: dict[str, object] = {"experiment": self.config.name, "step": int(step), "updates": int(updates), "eval_score": eval_score, "device": str(self.device), "learner_device": str(self.device), "algorithm": "Maximum a Posteriori Policy Optimisation", "plant": "tokamak-sim", "sim_compute_backend": self.config.sim.compute_backend, "exact_resume_supported": exact_resume_supported}
+        raw_step = int(step)
+        if self._last_actor_devices:
+            env_step = raw_step
+            decision_step = raw_step
+        else:
+            decision_step = raw_step
+            env_step = raw_step * self.num_envs
+        out: dict[str, object] = {"experiment": self.config.name, "step": raw_step, "decision_step": decision_step, "env_step": env_step, "updates": int(updates), "eval_score": eval_score, "device": str(self.device), "learner_device": str(self.device), "algorithm": "Maximum a Posteriori Policy Optimisation", "plant": "tokamak-sim", "sim_compute_backend": self.config.sim.compute_backend, "exact_resume_supported": exact_resume_supported}
         if self._last_actor_devices:
             out["actor_devices"] = list(self._last_actor_devices)
             out["actor_workers"] = len(self._last_actor_devices)

@@ -22,6 +22,10 @@ export WANDB__SERVICE_WAIT=${WANDB__SERVICE_WAIT:-30}
 export NUM_ENVS=${NUM_ENVS:-32}
 export TRAIN_ENV_STEPS=${TRAIN_ENV_STEPS:-${TRAIN_STEPS:-500000}}
 export TRAIN_DECISION_STEPS=$(( (TRAIN_ENV_STEPS + NUM_ENVS - 1) / NUM_ENVS ))
+export EVAL_ENV_STEPS=${EVAL_ENV_STEPS:-250000}
+export EVAL_DECISION_STEPS=$(( (EVAL_ENV_STEPS + NUM_ENVS - 1) / NUM_ENVS ))
+export CHECKPOINT_ENV_STEPS=${CHECKPOINT_ENV_STEPS:-250000}
+export CHECKPOINT_DECISION_STEPS=$(( (CHECKPOINT_ENV_STEPS + NUM_ENVS - 1) / NUM_ENVS ))
 export REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-128}
 
 srun \
@@ -54,6 +58,10 @@ PYCUDA
     echo "train_env_steps=${TRAIN_ENV_STEPS}"
     echo "num_envs=${NUM_ENVS}"
     echo "train_decision_steps=${TRAIN_DECISION_STEPS}"
+    echo "eval_env_steps=${EVAL_ENV_STEPS}"
+    echo "eval_decision_steps=${EVAL_DECISION_STEPS}"
+    echo "checkpoint_env_steps=${CHECKPOINT_ENV_STEPS}"
+    echo "checkpoint_decision_steps=${CHECKPOINT_DECISION_STEPS}"
 
     python3 scripts/train_policy_pipeline.py \
       --config ${POLICY_CONFIG} \
@@ -74,8 +82,8 @@ PYCUDA
       --critic-mlp-hidden-dim 256 \
       --action-samples 20 \
       --actor-update-chunk-size 2048 \
-      --checkpoint-interval-steps ${TRAIN_DECISION_STEPS} \
-      --eval-interval-steps ${TRAIN_DECISION_STEPS} \
+      --checkpoint-interval-steps ${CHECKPOINT_DECISION_STEPS} \
+      --eval-interval-steps ${EVAL_DECISION_STEPS} \
       --wandb \
       --wandb-project ${WANDB_PROJECT_NAME} \
       --wandb-name ${RUN_NAME} \

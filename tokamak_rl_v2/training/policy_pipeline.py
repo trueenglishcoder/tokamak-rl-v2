@@ -50,7 +50,8 @@ def main(argv: list[str] | None = None) -> int:
         if selected_checkpoint is not None and selected_checkpoint.name == "best.pt":
             _load_actor_weights(trainer, selected_checkpoint)
         actor_eval = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=int(cfg.training.eval_max_steps), policy="actor")
-        _wandb_log(wandb_run, "pipeline/actor_eval", actor_eval, step=int(train_result.get("steps", cfg.training.steps)))
+        train_env_step = _train_env_step(train_result, cfg)
+        _wandb_log(wandb_run, "pipeline/actor_eval", actor_eval, step=train_env_step)
         losses = summarize_training_losses(output_dir / "losses.csv")
         selected_export = _selected_export_dir(output_dir)
         rollout_report = validate_exported_controller(selected_export, cfg, steps=int(args.controller_rollout_steps)) if selected_export is not None else {"status": "missing_export"}
@@ -88,9 +89,9 @@ def main(argv: list[str] | None = None) -> int:
         }
         _write_json(output_dir / "policy_validation.json", report)
         _write_json(output_dir / "closed_loop_rollout_report.json", rollout_report)
-        _wandb_log(wandb_run, "pipeline/tail_losses", losses, step=int(train_result.get("steps", cfg.training.steps)))
-        _wandb_log(wandb_run, "pipeline/controller_rollout", rollout_report, step=int(train_result.get("steps", cfg.training.steps)))
-        _wandb_log(wandb_run, "pipeline/gates", _gate_metrics(gate_report["checks"]), step=int(train_result.get("steps", cfg.training.steps)))
+        _wandb_log(wandb_run, "pipeline/tail_losses", losses, step=train_env_step)
+        _wandb_log(wandb_run, "pipeline/controller_rollout", rollout_report, step=train_env_step)
+        _wandb_log(wandb_run, "pipeline/gates", _gate_metrics(gate_report["checks"]), step=train_env_step)
         return 0 if gate_report["passed"] or args.allow_failed_gates else 2
     finally:
         if wandb_run is not None:
@@ -505,6 +506,16 @@ def _wandb_log(wandb_run, prefix: str, metrics: Mapping[str, object], *, step: i
             payload[f"{prefix}/{key}"] = numeric
     if payload:
         wandb_run.log({"global_step": int(step), **payload}, step=int(step))
+
+
+def _train_env_step(train_result: Mapping[str, object], cfg: ExperimentConfig) -> int:
+    raw = train_result.get("env_steps", None)
+    if raw is not None:
+        return int(raw)
+    steps = int(train_result.get("steps", cfg.training.steps))
+    if int(cfg.training.actor_workers) > 1:
+        return steps
+    return steps * int(cfg.training.num_envs)
 
 
 def _gate_metrics(checks: object) -> dict[str, float]:
