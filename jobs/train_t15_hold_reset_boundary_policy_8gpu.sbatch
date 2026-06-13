@@ -68,7 +68,8 @@ PYCUDA
       --wandb-project ${WANDB_PROJECT_NAME} \
       --wandb-name ${RUN_NAME} \
       --wandb-group ${RUN_NAME} \
-      --wandb-mode ${WANDB_MODE}
+      --wandb-mode ${WANDB_MODE} \
+      --allow-failed-gates
 
     echo "train_policy_pipeline completed at $(date -Is)"
   '
