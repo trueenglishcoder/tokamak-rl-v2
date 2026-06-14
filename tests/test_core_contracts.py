@@ -194,6 +194,32 @@ def test_physical_reward_weights_late_episode_errors_more() -> None:
     assert rb.reward[1] < rb.reward[0]
 
 
+def test_physical_reward_penalizes_current_projection_reliance() -> None:
+    reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0, projection_weight=8.0, projection_bad=0.05), control_rate_hz=1000.0)
+    ref = torch.zeros((2, 32, 2), dtype=torch.float32)
+    action = torch.full((2, 9), 0.25, dtype=torch.float32)
+    projection_delta = torch.zeros((2, 9), dtype=torch.float32)
+    projection_delta[1] = 0.15
+    rb = reward_fn(
+        ip=torch.full((2,), 200000.0),
+        ip_ref=torch.full((2,), 200000.0),
+        boundary_points=ref,
+        reference_points=ref,
+        action=action,
+        previous_action=action,
+        current_over_limit_a=torch.zeros((2,), dtype=torch.float32),
+        current_usage_fraction=torch.full((2,), 0.5, dtype=torch.float32),
+        current_margin_fraction=torch.full((2,), 0.5, dtype=torch.float32),
+        derivative_usage=torch.zeros((2,), dtype=torch.float32),
+        boundary_found=torch.ones((2,), dtype=torch.bool),
+        terminated=torch.zeros((2,), dtype=torch.bool),
+        action_projection_delta=projection_delta,
+    )
+    assert float(rb.components["action_projection_loss"][0].item()) == pytest.approx(0.0)
+    assert rb.components["action_projection_loss"][1] > 0.0
+    assert rb.reward[0] > rb.reward[1]
+
+
 def test_physical_reward_current_margin_warns_before_limit() -> None:
     reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0), control_rate_hz=1000.0)
     ref = torch.zeros((3, 32, 2), dtype=torch.float32)
@@ -396,6 +422,28 @@ def test_ip_reference_segment_count_controls_generation() -> None:
     assert torch.allclose(batch.ip[:, 0], torch.tensor([250000.0, 300000.0], dtype=torch.float64))
 
 
+def test_hold_reset_ip_reference_uses_actual_reset_ip() -> None:
+    cfg = load_experiment_config(CONFIG)
+    hold_ip = replace(
+        cfg.reference.ip,
+        kind="hold_reset",
+        min=100000.0,
+        max=160000.0,
+        hold_probability=1.0,
+    )
+    reference = replace(cfg.reference, ip=hold_ip)
+    batch = generate_reference_batch(
+        config=reference,
+        initial_ip=np.asarray([124800.0, 125100.0]),
+        initial_parameters=np.asarray([[1.4, 0.0, 0.55, 1.2, 0.2], [1.42, -0.01, 0.58, 1.25, 0.18]]),
+        steps=20,
+        device="cpu",
+        seed=123,
+    )
+    assert torch.allclose(batch.ip[0], torch.full((21,), 124800.0, dtype=torch.float64))
+    assert torch.allclose(batch.ip[1], torch.full((21,), 125100.0, dtype=torch.float64))
+
+
 def test_ip_reference_inserts_hold_between_opposite_ramps() -> None:
     cfg = IpReferenceConfig(
         min=100000.0,
@@ -567,6 +615,27 @@ def test_config_loader_rejects_invalid_values(tmp_path: Path) -> None:
     bad_late_weight.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(ValueError, match="late_error_weight"):
         load_experiment_config(bad_late_weight)
+
+    data = json.loads(CONFIG.read_text())
+    data["reward"]["projection_bad"] = 0.0
+    bad_projection_bad = tmp_path / "bad_projection_bad.json"
+    bad_projection_bad.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="projection_bad"):
+        load_experiment_config(bad_projection_bad)
+
+    data = json.loads(CONFIG.read_text())
+    data["reward"]["projection_weight"] = -1.0
+    bad_projection_weight = tmp_path / "bad_projection_weight.json"
+    bad_projection_weight.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="projection_weight"):
+        load_experiment_config(bad_projection_weight)
+
+    data = json.loads(CONFIG.read_text())
+    data["reference"]["ip"]["kind"] = "teleport"
+    bad_ip_kind = tmp_path / "bad_ip_kind.json"
+    bad_ip_kind.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="reference.ip.kind"):
+        load_experiment_config(bad_ip_kind)
 
     data = json.loads(CONFIG.read_text())
     data["sim"]["current_projection_margin_fraction"] = 1.0

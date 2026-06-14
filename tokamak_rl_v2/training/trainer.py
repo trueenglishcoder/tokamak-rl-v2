@@ -395,6 +395,7 @@ class Trainer:
             "derivative_loss",
             "action_saturation_loss",
             "delta_action_loss",
+            "action_projection_loss",
             "action_projection_delta_rms",
             "action_projection_delta_max",
         }

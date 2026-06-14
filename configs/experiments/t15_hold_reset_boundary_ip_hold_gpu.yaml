@@ -1,12 +1,12 @@
 {
-  "name": "t15_hold_reset_boundary_ip_stage1",
+  "name": "t15_hold_reset_boundary_ip_hold",
   "sim": {
     "config_path": "../../../tokamak-sim/configs/T15MD_new_data.toml",
     "initial_currents_path": null,
     "compute_backend": "gpu",
     "gpu_device": "cuda:0",
     "angles": 32,
-    "max_episode_steps": 500,
+    "max_episode_steps": 1000,
     "initial_ranges": {
       "ip": {
         "min": 124750.45168962443,
@@ -95,19 +95,20 @@
     "terminate_on_boundary_loss": false
   },
   "reference": {
-    "duration_s": 0.5,
+    "duration_s": 1.0,
     "t_step": 0.001,
     "theta_count": 32,
     "seed": 11,
     "ip": {
+      "kind": "hold_reset",
       "min": 100000.0,
       "max": 160000.0,
       "rate_limit": 2000000.0,
-      "segment_min_steps": 50,
-      "segment_max_steps": 200,
-      "segment_count_min": 2,
-      "segment_count_max": 5,
-      "hold_probability": 0.45
+      "segment_min_steps": 100,
+      "segment_max_steps": 500,
+      "segment_count_min": 1,
+      "segment_count_max": 4,
+      "hold_probability": 1.0
     },
     "boundary": {
       "kind": "hold_reset_boundary"
@@ -122,9 +123,9 @@
     "shape_max_bad_m": 0.08,
     "ip_bad_a": 20000.0,
     "boundary_missing_error_m": 0.1,
-    "shape_weight": 2.0,
+    "shape_weight": 3.0,
     "ip_weight": 2.0,
-    "current_weight": 8.0,
+    "current_weight": 10.0,
     "derivative_weight": 0.1,
     "action_saturation_weight": 0.1,
     "delta_action_weight": 0.05,
@@ -167,15 +168,15 @@
     "updates_per_rollout_chunk": 16
   },
   "training": {
-    "steps": 500000,
+    "steps": 1000000,
     "num_envs": 64,
     "device": "auto",
     "seed": 1,
-    "output_dir": "../../outputs/t15_hold_reset_boundary_ip_stage1_gpu",
+    "output_dir": "../../outputs/t15_hold_reset_boundary_ip_hold_gpu",
     "checkpoint_interval_steps": 25000,
     "eval_interval_steps": 25000,
     "eval_episodes": 32,
-    "eval_max_steps": 500,
+    "eval_max_steps": 1000,
     "actor_workers": 1
   }
 }

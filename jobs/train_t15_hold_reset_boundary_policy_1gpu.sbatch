@@ -10,17 +10,17 @@ set -euo pipefail
 
 cd /scratch/$USER/tokamak
 
-export POLICY_CONFIG=${POLICY_CONFIG:-configs/experiments/t15_hold_reset_boundary_ip_stage1_gpu.yaml}
-export TRAIN_OUTPUT=${TRAIN_OUTPUT:-outputs/t15_stability_policy_1gpu_${SLURM_JOB_ID:-manual}}
-export RUN_NAME=${RUN_NAME:-t15_stability_policy_1gpu_${SLURM_JOB_ID:-manual}}
-export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-tokamak-rl-v2-stability-1gpu-${SLURM_JOB_ID:-manual}}
+export POLICY_CONFIG=${POLICY_CONFIG:-configs/experiments/t15_hold_reset_boundary_ip_hold_gpu.yaml}
+export TRAIN_OUTPUT=${TRAIN_OUTPUT:-outputs/t15_hold_stability_policy_1gpu_${SLURM_JOB_ID:-manual}}
+export RUN_NAME=${RUN_NAME:-t15_hold_stability_policy_1gpu_${SLURM_JOB_ID:-manual}}
+export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-tokamak-rl-v2-hold-stability-1gpu-${SLURM_JOB_ID:-manual}}
 export WANDB_MODE=${WANDB_MODE:-online}
 export WANDB__SERVICE_WAIT=${WANDB__SERVICE_WAIT:-30}
 
 # Distributed runs count steps as environment transitions. Single-process runs count
 # batched decision steps, so convert here to keep TRAIN_ENV_STEPS comparable.
 export NUM_ENVS=${NUM_ENVS:-32}
-export TRAIN_ENV_STEPS=${TRAIN_ENV_STEPS:-${TRAIN_STEPS:-2000000}}
+export TRAIN_ENV_STEPS=${TRAIN_ENV_STEPS:-${TRAIN_STEPS:-1000000}}
 export TRAIN_DECISION_STEPS=$(( (TRAIN_ENV_STEPS + NUM_ENVS - 1) / NUM_ENVS ))
 export EVAL_ENV_STEPS=${EVAL_ENV_STEPS:-250000}
 export EVAL_DECISION_STEPS=$(( (EVAL_ENV_STEPS + NUM_ENVS - 1) / NUM_ENVS ))

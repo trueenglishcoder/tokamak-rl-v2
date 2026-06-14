@@ -180,18 +180,12 @@ class TokamakMagneticControlEnv:
             result = self._gpu_sim.step(physical.to(dtype=torch.float64, device=self._gpu_sim.device))
             self.step_index += 1
             obs = self._obs_gpu(result=result)
-            reward, terminated, info = self._reward_gpu(result, clipped)
+            reward, terminated, info = self._reward_gpu(result, clipped, projection_delta)
         else:
             self._step_cpu(physical)
             self.step_index += 1
             obs = self._obs_cpu()
-            reward, terminated, info = self._reward_cpu(clipped)
-        comps = info.get("reward_components", {}) if isinstance(info, dict) else {}
-        if isinstance(comps, dict):
-            delta_rms = torch.sqrt(torch.mean(projection_delta.pow(2), dim=-1)).detach().cpu().numpy()
-            delta_max = torch.max(torch.abs(projection_delta), dim=1).values.detach().cpu().numpy()
-            comps["action_projection_delta_rms"] = delta_rms
-            comps["action_projection_delta_max"] = delta_max
+            reward, terminated, info = self._reward_cpu(clipped, projection_delta)
         self.previous_action = clipped.detach().clone()
         truncated = self.step_index >= int(self.config.sim.max_episode_steps)
         self.done = terminated | truncated
@@ -391,7 +385,7 @@ class TokamakMagneticControlEnv:
         for b, model in enumerate(self._cpu_models):
             model.step(pfc_current_derivs=arr[b, : self.cfg.pfc.n_coils], sol_current_derivs=arr[b, self.cfg.pfc.n_coils :])
 
-    def _reward_gpu(self, result, action: Tensor) -> tuple[Tensor, Tensor, dict[str, object]]:
+    def _reward_gpu(self, result, action: Tensor, projection_delta: Tensor) -> tuple[Tensor, Tensor, dict[str, object]]:
         ip_ref, ref_points, _ref_radii = self._reference_at()
         current = torch.cat([result.state.pfc_currents, result.state.sol_currents], dim=1).to(torch.float32)
         deriv = torch.cat([result.state.pfc_current_derivs, result.state.sol_current_derivs], dim=1).to(torch.float32)
@@ -411,10 +405,10 @@ class TokamakMagneticControlEnv:
             current_terminated = current_over_limit > float(self.config.sim.current_termination_over_limit_a)
         terminated = boundary_terminated | current_terminated
         episode_progress = self.step_index.to(torch.float32) / max(float(self.config.sim.max_episode_steps), 1.0)
-        rb = self.reward_fn(ip=result.state.Ip.to(torch.float32), ip_ref=ip_ref, boundary_points=boundary_points, reference_points=ref, action=action, previous_action=self.previous_action, current_over_limit_a=current_over_limit, current_usage_fraction=current_usage_fraction, current_margin_fraction=current_margin_fraction, derivative_usage=derivative_usage, boundary_found=found, terminated=terminated, episode_progress=episode_progress)
+        rb = self.reward_fn(ip=result.state.Ip.to(torch.float32), ip_ref=ip_ref, boundary_points=boundary_points, reference_points=ref, action=action, previous_action=self.previous_action, current_over_limit_a=current_over_limit, current_usage_fraction=current_usage_fraction, current_margin_fraction=current_margin_fraction, derivative_usage=derivative_usage, boundary_found=found, terminated=terminated, episode_progress=episode_progress, action_projection_delta=projection_delta)
         return rb.reward, terminated, {"reward_components": {k: v.detach().cpu().numpy() for k, v in rb.components.items()}}
 
-    def _reward_cpu(self, action: Tensor) -> tuple[Tensor, Tensor, dict[str, object]]:
+    def _reward_cpu(self, action: Tensor, projection_delta: Tensor) -> tuple[Tensor, Tensor, dict[str, object]]:
         ip_ref, ref_points, _ref_radii = self._reference_at()
         boundary_points = []
         found = []
@@ -450,7 +444,7 @@ class TokamakMagneticControlEnv:
             current_terminated = current_over_limit > float(self.config.sim.current_termination_over_limit_a)
         terminated = boundary_terminated | current_terminated
         episode_progress = self.step_index.to(torch.float32) / max(float(self.config.sim.max_episode_steps), 1.0)
-        rb = self.reward_fn(ip=torch.as_tensor(ips, dtype=torch.float32, device=self.device), ip_ref=ip_ref, boundary_points=torch.nan_to_num(torch.as_tensor(np.stack(boundary_points), dtype=torch.float32, device=self.device)), reference_points=ref_points[:, : int(self.config.sim.angles)].to(torch.float32), action=action, previous_action=self.previous_action, current_over_limit_a=current_over_limit, current_usage_fraction=current_usage_fraction, current_margin_fraction=current_margin_fraction, derivative_usage=derivative_usage, boundary_found=found_t, terminated=terminated, episode_progress=episode_progress)
+        rb = self.reward_fn(ip=torch.as_tensor(ips, dtype=torch.float32, device=self.device), ip_ref=ip_ref, boundary_points=torch.nan_to_num(torch.as_tensor(np.stack(boundary_points), dtype=torch.float32, device=self.device)), reference_points=ref_points[:, : int(self.config.sim.angles)].to(torch.float32), action=action, previous_action=self.previous_action, current_over_limit_a=current_over_limit, current_usage_fraction=current_usage_fraction, current_margin_fraction=current_margin_fraction, derivative_usage=derivative_usage, boundary_found=found_t, terminated=terminated, episode_progress=episode_progress, action_projection_delta=projection_delta)
         return rb.reward, terminated, {"reward_components": {k: v.detach().cpu().numpy() for k, v in rb.components.items()}}
 
     def export_schema(self) -> dict[str, object]:

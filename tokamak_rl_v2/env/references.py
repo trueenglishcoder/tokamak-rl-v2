@@ -62,7 +62,10 @@ def generate_reference_batch(
     params = np.zeros((B, int(steps) + 1, 5), dtype=np.float64)
     theta = torch.linspace(-torch.pi, torch.pi, int(config.theta_count) + 1, dtype=torch.float64, device=dev)[:-1]
     for b in range(B):
-        ip[b] = _segmented_ip(config.ip, float(initial_ip[b]), int(steps), rng, dt=float(config.t_step))
+        if config.ip.kind == "hold_reset":
+            ip[b] = float(initial_ip[b])
+        else:
+            ip[b] = _segmented_ip(config.ip, float(initial_ip[b]), int(steps), rng, dt=float(config.t_step))
         if config.boundary.kind != "hold_reset_boundary":
             params[b] = _boundary_params(config.boundary, np.asarray(initial_parameters[b], dtype=float), int(steps), rng, dt=float(config.t_step))
     params_t = torch.as_tensor(params, dtype=torch.float64, device=dev)

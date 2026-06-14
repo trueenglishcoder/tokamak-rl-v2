@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import math
+import signal
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
@@ -27,6 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     output_dir = Path(args.output_dir or cfg.training.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     wandb_run = _start_wandb(args, cfg, output_dir=output_dir)
+    previous_signal_handlers = _install_shutdown_signal_handlers()
     try:
         reset_report = run_reset_sanity(cfg, device=args.device, num_envs=args.num_envs)
         _wandb_log(wandb_run, "pipeline/reset", reset_report, step=0)
@@ -93,7 +95,19 @@ def main(argv: list[str] | None = None) -> int:
         _wandb_log(wandb_run, "pipeline/controller_rollout", rollout_report, step=train_env_step)
         _wandb_log(wandb_run, "pipeline/gates", _gate_metrics(gate_report["checks"]), step=train_env_step)
         return 0 if gate_report["passed"] or args.allow_failed_gates else 2
+    except KeyboardInterrupt as exc:
+        _write_json(
+            output_dir / "policy_validation.json",
+            {
+                "status": "interrupted",
+                "reason": str(exc) or "training interrupted",
+                "output_dir": str(output_dir),
+            },
+        )
+        _wandb_log(wandb_run, "pipeline", {"interrupted": 1.0}, step=0)
+        return 130
     finally:
+        _restore_signal_handlers(previous_signal_handlers)
         if wandb_run is not None:
             wandb_run.finish()
 
@@ -116,6 +130,24 @@ def run_reset_sanity(config: ExperimentConfig, *, device: str | None = None, num
         "boundary_found_mean": float(np.nanmean(found)) if found.size else float("nan"),
         "boundary_found_min": float(np.nanmin(found)) if found.size else float("nan"),
     }
+
+
+def _install_shutdown_signal_handlers() -> dict[signal.Signals, signal.Handlers]:
+    previous: dict[signal.Signals, signal.Handlers] = {}
+
+    def request_shutdown(signum, _frame) -> None:
+        name = signal.Signals(signum).name
+        raise KeyboardInterrupt(f"received {name}")
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        previous[sig] = signal.getsignal(sig)
+        signal.signal(sig, request_shutdown)
+    return previous
+
+
+def _restore_signal_handlers(previous: Mapping[signal.Signals, signal.Handlers]) -> None:
+    for sig, handler in previous.items():
+        signal.signal(sig, handler)
 
 
 def evaluate_policy_gates(

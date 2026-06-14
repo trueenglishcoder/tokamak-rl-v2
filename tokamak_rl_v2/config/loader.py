@@ -148,6 +148,7 @@ def _reference(raw: Mapping[str, Any]) -> ReferenceConfig:
             segment_min_steps=int(ip_raw.get("segment_min_steps", 50)), segment_max_steps=int(ip_raw.get("segment_max_steps", 300)),
             segment_count_min=int(ip_raw.get("segment_count_min", 3)), segment_count_max=int(ip_raw.get("segment_count_max", 8)),
             hold_probability=float(ip_raw.get("hold_probability", 0.35)),
+            kind=str(ip_raw.get("kind", "segmented")).lower(),
         ),
         boundary=BoundaryReferenceConfig(kind=str(b_raw.get("kind", "static_initial_parameters")), rate_limits={str(k): float(v) for k, v in _mapping(b_raw.get("rate_limits", {}), "rate_limits").items()}),
     )
@@ -235,6 +236,8 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
     ip = cfg.reference.ip
     if not (math.isfinite(ip.min) and math.isfinite(ip.max) and ip.max >= ip.min):
         raise ValueError("reference.ip min/max are invalid")
+    if ip.kind not in {"segmented", "hold_reset"}:
+        raise ValueError("reference.ip.kind is unsupported")
     if _range_crosses_or_touches_zero(float(ip.min), float(ip.max)):
         raise ValueError("reference.ip range must stay strictly on one side of zero")
     if cfg.sim.initial_ranges is not None:
@@ -306,7 +309,7 @@ def _sign(value: float) -> int:
 
 
 def _validate_reward_config(reward: RewardConfig, *, prefix: str) -> None:
-    for name in ("shape_bad_m", "shape_max_bad_m", "ip_bad_a", "reward_scale", "delta_action_bad", "late_error_power"):
+    for name in ("shape_bad_m", "shape_max_bad_m", "ip_bad_a", "reward_scale", "delta_action_bad", "projection_bad", "late_error_power"):
         value = float(getattr(reward, name))
         if not math.isfinite(value) or value <= 0.0:
             raise ValueError(f"{prefix}.{name} must be finite and positive")
@@ -314,7 +317,7 @@ def _validate_reward_config(reward: RewardConfig, *, prefix: str) -> None:
         raise ValueError(f"{prefix}.late_error_weight must be finite and non-negative")
     if not math.isfinite(float(reward.boundary_missing_error_m)) or float(reward.boundary_missing_error_m) < 0.0:
         raise ValueError(f"{prefix}.boundary_missing_error_m must be finite and non-negative")
-    for name in ("shape_weight", "ip_weight", "current_weight", "derivative_weight", "action_saturation_weight", "delta_action_weight"):
+    for name in ("shape_weight", "ip_weight", "current_weight", "derivative_weight", "action_saturation_weight", "delta_action_weight", "projection_weight"):
         value = float(getattr(reward, name))
         if not math.isfinite(value) or value < 0.0:
             raise ValueError(f"{prefix}.{name} must be finite and non-negative")

@@ -50,6 +50,7 @@ class IpReferenceConfig:
     segment_count_min: int
     segment_count_max: int
     hold_probability: float
+    kind: Literal["segmented", "hold_reset"] = "segmented"
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,11 +87,13 @@ class RewardConfig:
     derivative_weight: float = 0.1
     action_saturation_weight: float = 0.1
     delta_action_weight: float = 0.05
+    projection_weight: float = 0.0
     current_margin_start_fraction: float = 0.75
     derivative_penalty_start_fraction: float = 0.85
     action_penalty_start_fraction: float = 0.85
     delta_action_penalty_start: float = 0.25
     delta_action_bad: float = 1.0
+    projection_bad: float = 0.05
     terminal_reward: float = -20.0
     reward_scale: float = 1.0
     late_error_weight: float = 0.0
