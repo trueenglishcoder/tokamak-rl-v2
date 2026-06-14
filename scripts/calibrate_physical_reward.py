@@ -72,9 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     config_dir.mkdir(parents=True, exist_ok=True)
     run_root.mkdir(parents=True, exist_ok=True)
 
-    candidates = _load_candidates(args)
-    if args.max_candidates is not None:
-        candidates = candidates[: max(0, int(args.max_candidates))]
+    candidates = _indexed_candidates(args)
     if not candidates:
         raise SystemExit("no reward candidates selected")
 
@@ -85,11 +83,24 @@ def main(argv: list[str] | None = None) -> int:
     print(f"num_envs={args.num_envs}", flush=True)
     print(f"decision_steps={_decision_steps(args.train_env_steps, args.num_envs)}", flush=True)
 
+    if args.summary_only:
+        rows = [_summarize_candidate(candidate=candidate, output_dir=_candidate_output_dir(run_root, index)) for index, candidate in candidates]
+        ranked = _rank_rows(rows)
+        _write_summary(output_root, ranked)
+        best = ranked[0] if ranked else {}
+        (output_root / "best_candidate.json").write_text(json.dumps(_jsonable(best), indent=2), encoding="utf-8")
+        print("\n=== best candidate ===", flush=True)
+        _print_one_line(best)
+        print(f"summary_csv={output_root / 'calibration_summary.csv'}", flush=True)
+        print(f"summary_json={output_root / 'calibration_summary.json'}", flush=True)
+        print(f"best_candidate_json={output_root / 'best_candidate.json'}", flush=True)
+        return 0 if bool(best.get("passed", False)) else int(args.exit_code_on_no_pass)
+
     rows: list[dict[str, Any]] = []
-    for index, candidate in enumerate(candidates, start=1):
+    for item_i, (index, candidate) in enumerate(candidates, start=1):
         print(f"\n=== candidate {index}/{len(candidates)}: {candidate.name} ===", flush=True)
-        config_path = config_dir / f"{index:02d}_{candidate.name}.json"
-        candidate_output = run_root / f"{index:02d}_{candidate.name}"
+        config_path = _candidate_config_path(config_dir, index, candidate)
+        candidate_output = _candidate_output_dir(run_root, index)
         if not args.skip_existing or not (candidate_output / "policy_validation.json").exists():
             _write_candidate_config(base_config, config_path, candidate)
             _run_candidate(args, config_path=config_path, output_dir=candidate_output, candidate=candidate)
@@ -97,7 +108,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"skipping existing validation: {candidate_output}", flush=True)
         row = _summarize_candidate(candidate=candidate, output_dir=candidate_output)
         rows.append(row)
-        _write_summary(output_root, rows)
+        _write_candidate_summary(output_root, index, candidate, row)
+        if args.candidate_index is None:
+            _write_summary(output_root, rows)
         _print_one_line(row)
         if args.stop_on_pass and bool(row.get("passed", False)):
             print(f"stopping because candidate passed gates: {candidate.name}", flush=True)
@@ -121,6 +134,8 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--output-root", default="outputs/t15_reward_calibration")
     ap.add_argument("--candidate-json", default=None, help="Optional JSON file with [{'name': str, 'reward': {...}}, ...].")
     ap.add_argument("--max-candidates", type=int, default=None)
+    ap.add_argument("--candidate-index", type=int, default=None, help="Run only one 1-based candidate index. Useful for Slurm arrays.")
+    ap.add_argument("--summary-only", action="store_true", help="Do not train; rank existing candidate outputs.")
     ap.add_argument("--train-env-steps", type=int, default=2_000_000)
     ap.add_argument("--eval-env-steps", type=int, default=250_000)
     ap.add_argument("--checkpoint-env-steps", type=int, default=250_000)
@@ -145,6 +160,19 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--rerun-existing", action="store_false", dest="skip_existing")
     ap.add_argument("--exit-code-on-no-pass", type=int, default=0)
     return ap
+
+
+def _indexed_candidates(args: argparse.Namespace) -> list[tuple[int, Candidate]]:
+    candidates = _load_candidates(args)
+    if args.max_candidates is not None:
+        candidates = candidates[: max(0, int(args.max_candidates))]
+    indexed = list(enumerate(candidates, start=1))
+    if args.candidate_index is not None:
+        index = int(args.candidate_index)
+        if index < 1 or index > len(indexed):
+            raise ValueError(f"--candidate-index must be between 1 and {len(indexed)}, got {index}")
+        indexed = [indexed[index - 1]]
+    return indexed
 
 
 def _load_candidates(args: argparse.Namespace) -> list[Candidate]:
@@ -243,6 +271,21 @@ def _run_candidate(args: argparse.Namespace, *, config_path: Path, output_dir: P
         )
     print("command=" + " ".join(cmd), flush=True)
     subprocess.run(cmd, check=True)
+
+
+def _candidate_config_path(config_dir: Path, index: int, candidate: Candidate) -> Path:
+    return config_dir / f"{index:02d}_{candidate.name}.json"
+
+
+def _candidate_output_dir(run_root: Path, index: int) -> Path:
+    return run_root / f"{index:02d}"
+
+
+def _write_candidate_summary(output_root: Path, index: int, candidate: Candidate, row: dict[str, Any]) -> None:
+    summary_dir = output_root / "candidate_summaries"
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    path = summary_dir / f"{index:02d}_{candidate.name}.json"
+    path.write_text(json.dumps(_jsonable(row), indent=2), encoding="utf-8")
 
 
 def _summarize_candidate(*, candidate: Candidate, output_dir: Path) -> dict[str, Any]:
