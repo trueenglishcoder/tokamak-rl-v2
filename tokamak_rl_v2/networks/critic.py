@@ -9,6 +9,9 @@ import torch.nn.functional as F
 from tokamak_rl_v2.networks.initialization import truncated_fanin_init
 
 
+CRITIC_ACTION_INPUT_KIND = "normalized_action_v1"
+
+
 @dataclass(frozen=True, slots=True)
 class CriticState:
     h: Tensor
@@ -35,7 +38,8 @@ class RecurrentQCritic(nn.Module):
         if obs.ndim == 2:
             obs = obs.unsqueeze(1)
             action = action.unsqueeze(1)
-        x = torch.cat([obs, torch.tanh(action)], dim=-1)
+        normalized_action = torch.clamp(action, -1.0, 1.0)
+        x = torch.cat([obs, normalized_action], dim=-1)
         hx = None if state is None else (state.h.contiguous(), state.c.contiguous())
         y, (h, c) = self.lstm(x, hx)
         z = torch.cat([x, y], dim=-1)

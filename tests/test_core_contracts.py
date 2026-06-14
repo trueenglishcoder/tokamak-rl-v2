@@ -49,6 +49,27 @@ def test_network_shapes() -> None:
     assert state.h.shape[-1] == 16
 
 
+def test_critic_reads_normalized_env_actions_without_extra_squash() -> None:
+    critic = RecurrentQCritic(obs_dim=3, action_dim=2, lstm_hidden_dim=8, mlp_hidden_dim=8)
+    obs = torch.tensor([[0.25, -0.5, 0.75]], dtype=torch.float32)
+    action = torch.tensor([[1.0, -1.0]], dtype=torch.float32)
+    captured: dict[str, torch.Tensor] = {}
+
+    def capture_lstm_input(_module, args):
+        captured["x"] = args[0].detach().clone()
+
+    handle = critic.lstm.register_forward_pre_hook(capture_lstm_input)
+    try:
+        critic(obs, action)
+    finally:
+        handle.remove()
+
+    lstm_input = captured["x"][0, 0]
+    assert torch.allclose(lstm_input[:3], obs[0])
+    assert torch.allclose(lstm_input[3:], action[0])
+    assert not torch.allclose(lstm_input[3:], torch.tanh(action[0]))
+
+
 def test_physical_reward_cannot_replace_tracking_with_low_action() -> None:
     reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0), control_rate_hz=1000.0)
     ref = torch.zeros((2, 32, 2), dtype=torch.float32)
@@ -602,6 +623,21 @@ def test_training_checkpoint_resume_restores_replay_and_counters(tmp_path: Path)
     state = torch.load(second_dir / "checkpoints" / "final.pt", map_location="cpu", weights_only=False)
     assert state["training_state"]["step"] == 6
     assert state["replay_state"]["size"] > 0
+
+
+def test_training_checkpoint_resume_rejects_old_critic_action_input_kind(tmp_path: Path) -> None:
+    first_dir = tmp_path / "first"
+    cfg = _small_config(first_dir)
+    trainer = Trainer(cfg, device="cpu", output_dir=first_dir)
+    trainer.env.reset()
+    checkpoint = trainer._save_checkpoint("old_critic_semantics.pt", step=0, updates=0)
+    state = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    state.pop("critic_action_input_kind", None)
+    torch.save(state, checkpoint)
+
+    resumed = Trainer(cfg, device="cpu", output_dir=tmp_path / "resume", resume_checkpoint=checkpoint)
+    with pytest.raises(ValueError, match="critic action input"):
+        resumed._load_checkpoint(checkpoint)
 
 
 def test_checkpoint_save_does_not_hide_single_env_state_errors(tmp_path: Path) -> None:

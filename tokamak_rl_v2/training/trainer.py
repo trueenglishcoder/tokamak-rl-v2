@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover - optional local dependency
 from tokamak_rl_v2.config.schema import ExperimentConfig
 from tokamak_rl_v2.env import TokamakMagneticControlEnv
 from tokamak_rl_v2.export import export_deterministic_actor
-from tokamak_rl_v2.networks import FeedForwardGaussianActor, RecurrentQCritic
+from tokamak_rl_v2.networks import CRITIC_ACTION_INPUT_KIND, FeedForwardGaussianActor, RecurrentQCritic
 from tokamak_rl_v2.training.distributed import broadcast_actor, start_actor_workers, stop_actor_workers
 from tokamak_rl_v2.training.mpo import MaximumAPosterioriPolicyOptimiser
 from tokamak_rl_v2.training.replay import FIFOSequenceReplay
@@ -96,6 +96,7 @@ class Trainer:
         losses_path = self.output_dir / "losses.csv"
         metrics_path = self.output_dir / "metrics.json"
         rewards_path = self.output_dir / "reward_components.csv"
+        eval_path = self.output_dir / "eval_history.csv"
         with losses_path.open("w", newline="", encoding="utf-8") as loss_f, rewards_path.open("w", newline="", encoding="utf-8") as reward_f:
             loss_writer = csv.DictWriter(loss_f, fieldnames=["step", "critic_loss", "actor_loss", "mean_kl", "std_kl", "q_mean", "target_q_mean", "actor_mle_loss", "actor_param_delta_norm", "action_mean_abs", "action_std_mean", "sampled_q_spread", "policy_weight_entropy", "policy_weight_max", "mpo_temperature", "mean_kl_penalty", "std_kl_penalty", "env_steps_per_second"])
             reward_writer = None
@@ -140,6 +141,7 @@ class Trainer:
                     eval_metrics = self.evaluate_detailed(max_steps=int(self.config.training.eval_max_steps), episodes=int(self.config.training.eval_episodes))
                     score = self._selection_score(eval_metrics)
                     eval_metrics["selection_score"] = score
+                    _append_csv_row(eval_path, {"step": step, "env_step": step * self.num_envs, **eval_metrics})
                     self._wandb_log({f"eval/{k}": v for k, v in eval_metrics.items()}, step=step)
                     if score > self.best_eval:
                         self.best_eval = score
@@ -188,6 +190,7 @@ class Trainer:
         )
         losses_path = self.output_dir / "losses.csv"
         metrics_path = self.output_dir / "metrics.json"
+        eval_path = self.output_dir / "eval_history.csv"
         self.output_dir.mkdir(parents=True, exist_ok=True)
         updates = int(self.start_updates)
         env_steps = int(self.start_step)
@@ -243,6 +246,7 @@ class Trainer:
                         eval_metrics = self.evaluate_detailed(max_steps=int(self.config.training.eval_max_steps), episodes=int(self.config.training.eval_episodes))
                         score = self._selection_score(eval_metrics)
                         eval_metrics["selection_score"] = score
+                        _append_csv_row(eval_path, {"step": env_steps, "env_step": env_steps, **eval_metrics})
                         self._wandb_log({f"eval/{k}": v for k, v in eval_metrics.items()}, step=env_steps)
                         if score > self.best_eval:
                             self.best_eval = score
@@ -440,6 +444,7 @@ class Trainer:
                 raise
         torch.save({
             "checkpoint_version": 2,
+            "critic_action_input_kind": CRITIC_ACTION_INPUT_KIND,
             "actor_state_dict": self.actor.state_dict(),
             "critic_state_dict": self.critic.state_dict(),
             "target_actor_state_dict": self.target_actor.state_dict(),
@@ -504,6 +509,8 @@ class Trainer:
         return self.env.reset()
 
     def _validate_checkpoint(self, data: dict[str, object], path: Path) -> None:
+        if data.get("critic_action_input_kind") != CRITIC_ACTION_INPUT_KIND:
+            raise ValueError(f"checkpoint critic action input convention mismatch: {path}")
         if data.get("schema", {}).get("observation_kind") != self.schema.get("observation_kind"):
             raise ValueError(f"checkpoint observation schema mismatch: {path}")
         if int(data.get("schema", {}).get("obs_dim", -1)) != int(self.schema.get("obs_dim", -2)):
@@ -567,3 +574,14 @@ def _resolve_device(value: str) -> torch.device:
     if dev.type == "cuda" and dev.index is not None and dev.index >= torch.cuda.device_count():
         raise RuntimeError(f"CUDA device index is not visible: {value}; visible device count is {torch.cuda.device_count()}")
     return dev
+
+
+def _append_csv_row(path: Path, row: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    exists = path.exists() and path.stat().st_size > 0
+    fields = list(row.keys())
+    with path.open("a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        if not exists:
+            writer.writeheader()
+        writer.writerow(row)
