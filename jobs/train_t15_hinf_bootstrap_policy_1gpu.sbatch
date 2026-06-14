@@ -18,8 +18,9 @@ export WANDB_MODE=${WANDB_MODE:-online}
 export WANDB__SERVICE_WAIT=${WANDB__SERVICE_WAIT:-30}
 
 export NUM_ENVS=${NUM_ENVS:-32}
-export BOOTSTRAP_DECISION_STEPS=${BOOTSTRAP_DECISION_STEPS:-2500}
+export BOOTSTRAP_DECISION_STEPS=${BOOTSTRAP_DECISION_STEPS:-500}
 export BOOTSTRAP_RESET_INTERVAL_STEPS=${BOOTSTRAP_RESET_INTERVAL_STEPS:-250}
+export BOOTSTRAP_LOG_INTERVAL=${BOOTSTRAP_LOG_INTERVAL:-10}
 export TRAIN_ENV_STEPS=${TRAIN_ENV_STEPS:-1000000}
 export TRAIN_DECISION_STEPS=$(( (TRAIN_ENV_STEPS + NUM_ENVS - 1) / NUM_ENVS ))
 export EVAL_ENV_STEPS=${EVAL_ENV_STEPS:-125000}
@@ -67,6 +68,7 @@ PYCUDA
     echo "num_envs=${NUM_ENVS}"
     echo "bootstrap_decision_steps=${BOOTSTRAP_DECISION_STEPS}"
     echo "bootstrap_reset_interval_steps=${BOOTSTRAP_RESET_INTERVAL_STEPS}"
+    echo "bootstrap_log_interval=${BOOTSTRAP_LOG_INTERVAL}"
     echo "train_env_steps=${TRAIN_ENV_STEPS}"
     echo "train_decision_steps=${TRAIN_DECISION_STEPS}"
     echo "eval_env_steps=${EVAL_ENV_STEPS}"
@@ -108,6 +110,7 @@ PYCUDA
       --eval-interval-steps ${EVAL_DECISION_STEPS} \
       --bootstrap-steps ${BOOTSTRAP_DECISION_STEPS} \
       --bootstrap-reset-interval-steps ${BOOTSTRAP_RESET_INTERVAL_STEPS} \
+      --bootstrap-log-interval ${BOOTSTRAP_LOG_INTERVAL} \
       --bootstrap-lr 0.0001 \
       --bootstrap-target-std 0.08 \
       --hinf-q-error ${HINF_Q_ERROR} \

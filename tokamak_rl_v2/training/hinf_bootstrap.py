@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -74,11 +75,16 @@ def run_hinf_bootstrap(
         "action_abs_error",
         "mean_reward",
         "replay_size",
+        "elapsed_s",
+        "steps_per_second",
     ]
     last_row: dict[str, float] = {}
     with metrics_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
+        start_time = time.monotonic()
+        last_log_time = start_time
+        last_log_step = 0
         for step in range(1, int(bootstrap.steps) + 1):
             teacher_action_cpu = _hinf_teacher_action(teacher_env, controllers, bootstrap)
             obs = obs_cpu.to(device=trainer.device, dtype=torch.float32)
@@ -121,6 +127,9 @@ def run_hinf_bootstrap(
                 with torch.no_grad():
                     actor_mean = trainer.actor(obs).mean
                     abs_error = torch.mean(torch.abs(actor_mean - teacher_action))
+                    now = time.monotonic()
+                    interval_s = max(now - last_log_time, 1.0e-9)
+                    interval_steps = max(step - last_log_step, 1)
                     row = {
                         "step": float(step),
                         "loss": float(loss.detach().cpu()),
@@ -131,10 +140,24 @@ def run_hinf_bootstrap(
                         "action_abs_error": float(abs_error.detach().cpu()),
                         "mean_reward": float(torch.mean(out.reward).detach().cpu()),
                         "replay_size": float(trainer.replay.size),
+                        "elapsed_s": float(now - start_time),
+                        "steps_per_second": float(interval_steps / interval_s),
                     }
                 writer.writerow(row)
                 f.flush()
                 last_row = row
+                last_log_time = now
+                last_log_step = step
+                print(
+                    "hinf_bootstrap "
+                    f"step={step}/{int(bootstrap.steps)} "
+                    f"loss={row['loss']:.6g} "
+                    f"teacher_rms={row['teacher_action_rms']:.4f} "
+                    f"actor_rms={row['actor_action_rms']:.4f} "
+                    f"abs_error={row['action_abs_error']:.4f} "
+                    f"steps_per_second={row['steps_per_second']:.3f}",
+                    flush=True,
+                )
                 if wandb_run is not None:
                     env_step = int(step) * int(trainer.num_envs)
                     wandb_run.log({"global_step": env_step, **{f"bootstrap/{k}": v for k, v in row.items() if k != "step"}}, step=env_step)
