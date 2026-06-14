@@ -93,6 +93,8 @@ class RewardConfig:
     delta_action_bad: float = 1.0
     terminal_reward: float = -20.0
     reward_scale: float = 1.0
+    late_error_weight: float = 0.0
+    late_error_power: float = 2.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +120,8 @@ class SimConfig:
     terminate_on_boundary_loss: bool = True
     terminate_on_current_limit: bool = False
     current_termination_over_limit_a: float = 0.0
+    project_actions_to_current_limits: bool = False
+    current_projection_margin_fraction: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)

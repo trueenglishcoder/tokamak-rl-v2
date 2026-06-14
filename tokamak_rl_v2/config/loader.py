@@ -130,6 +130,8 @@ def _sim(raw: Mapping[str, Any], base: Path) -> SimConfig:
         terminate_on_boundary_loss=bool(raw.get("terminate_on_boundary_loss", True)),
         terminate_on_current_limit=bool(raw.get("terminate_on_current_limit", False)),
         current_termination_over_limit_a=float(raw.get("current_termination_over_limit_a", 0.0)),
+        project_actions_to_current_limits=bool(raw.get("project_actions_to_current_limits", False)),
+        current_projection_margin_fraction=float(raw.get("current_projection_margin_fraction", 0.0)),
     )
 
 
@@ -262,6 +264,10 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
         raise ValueError("sim.action_scale must be finite and in (0, 1]")
     if not math.isfinite(float(cfg.sim.current_termination_over_limit_a)) or float(cfg.sim.current_termination_over_limit_a) < 0.0:
         raise ValueError("sim.current_termination_over_limit_a must be finite and non-negative")
+    if not math.isfinite(float(cfg.sim.current_projection_margin_fraction)) or not 0.0 <= float(cfg.sim.current_projection_margin_fraction) < 1.0:
+        raise ValueError("sim.current_projection_margin_fraction must be finite and in [0, 1)")
+    if cfg.sim.project_actions_to_current_limits and cfg.sim.current_safety_limits is None:
+        raise ValueError("sim.project_actions_to_current_limits requires current_safety_limits")
     _validate_reward_config(cfg.reward, prefix="reward")
     if cfg.randomization.ip_measurement_noise_a < 0.0 or cfg.randomization.current_measurement_noise_a < 0.0:
         raise ValueError("randomization noise values must be non-negative")
@@ -300,10 +306,12 @@ def _sign(value: float) -> int:
 
 
 def _validate_reward_config(reward: RewardConfig, *, prefix: str) -> None:
-    for name in ("shape_bad_m", "shape_max_bad_m", "ip_bad_a", "reward_scale", "delta_action_bad"):
+    for name in ("shape_bad_m", "shape_max_bad_m", "ip_bad_a", "reward_scale", "delta_action_bad", "late_error_power"):
         value = float(getattr(reward, name))
         if not math.isfinite(value) or value <= 0.0:
             raise ValueError(f"{prefix}.{name} must be finite and positive")
+    if not math.isfinite(float(reward.late_error_weight)) or float(reward.late_error_weight) < 0.0:
+        raise ValueError(f"{prefix}.late_error_weight must be finite and non-negative")
     if not math.isfinite(float(reward.boundary_missing_error_m)) or float(reward.boundary_missing_error_m) < 0.0:
         raise ValueError(f"{prefix}.boundary_missing_error_m must be finite and non-negative")
     for name in ("shape_weight", "ip_weight", "current_weight", "derivative_weight", "action_saturation_weight", "delta_action_weight"):

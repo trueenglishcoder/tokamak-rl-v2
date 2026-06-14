@@ -167,6 +167,33 @@ def test_physical_reward_improves_when_tracking_errors_improve() -> None:
     assert rb.components["ip_loss"][0] < rb.components["ip_loss"][1]
 
 
+def test_physical_reward_weights_late_episode_errors_more() -> None:
+    reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0, late_error_weight=4.0, late_error_power=2.0), control_rate_hz=1000.0)
+    ref = torch.zeros((2, 32, 2), dtype=torch.float32)
+    boundary = ref.clone()
+    boundary[:, :, 0] = 0.03
+    action = torch.zeros((2, 9), dtype=torch.float32)
+    rb = reward_fn(
+        ip=torch.tensor([240000.0, 240000.0]),
+        ip_ref=torch.tensor([200000.0, 200000.0]),
+        boundary_points=boundary,
+        reference_points=ref,
+        action=action,
+        previous_action=action,
+        current_over_limit_a=torch.zeros((2,), dtype=torch.float32),
+        current_usage_fraction=torch.full((2,), 0.5, dtype=torch.float32),
+        current_margin_fraction=torch.full((2,), 0.5, dtype=torch.float32),
+        derivative_usage=torch.zeros((2,), dtype=torch.float32),
+        boundary_found=torch.ones((2,), dtype=torch.bool),
+        terminated=torch.zeros((2,), dtype=torch.bool),
+        episode_progress=torch.tensor([0.0, 1.0], dtype=torch.float32),
+    )
+    assert float(rb.components["base_physical_cost"][0].item()) == pytest.approx(float(rb.components["base_physical_cost"][1].item()))
+    assert float(rb.components["time_weight"][1].item()) == pytest.approx(5.0)
+    assert rb.components["physical_cost"][1] > rb.components["physical_cost"][0]
+    assert rb.reward[1] < rb.reward[0]
+
+
 def test_physical_reward_current_margin_warns_before_limit() -> None:
     reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0), control_rate_hz=1000.0)
     ref = torch.zeros((3, 32, 2), dtype=torch.float32)
@@ -250,6 +277,21 @@ def test_action_scale_caps_physical_derivative_usage() -> None:
     comps = result.info["reward_components"]
     assert float(np.nanmax(comps["derivative_usage"])) <= 0.25001
     assert np.allclose(np.asarray(env.normalization()["derivative_scale"]), env.raw_derivative_limits.detach().cpu().numpy() * 0.25)
+
+
+def test_current_safety_projection_prevents_next_step_over_limit() -> None:
+    cfg = load_experiment_config(CONFIG)
+    cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=4, project_actions_to_current_limits=True, current_projection_margin_fraction=0.02))
+    env = TokamakMagneticControlEnv(cfg, batch_size=1, device="cpu", seed=12)
+    env.reset()
+    limit = float(env.current_limits[0].item())
+    env._cpu_models[0].state.pfc_currents[0] = 0.979 * limit
+    result = env.step(torch.ones((1, env.action_dim), dtype=torch.float32))
+    comps = result.info["reward_components"]
+    assert float(np.nanmax(comps["current_over_limit_a"])) == pytest.approx(0.0)
+    assert float(np.nanmax(comps["current_usage_fraction"])) <= 0.9801
+    assert float(np.nanmax(comps["action_projection_delta_rms"])) > 0.0
+    assert env.normalization()["current_projection_enabled"] is True
 
 
 def test_hold_reset_boundary_uses_observed_reset_boundary() -> None:
@@ -519,6 +561,20 @@ def test_config_loader_rejects_invalid_values(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="boundary_missing_error"):
         load_experiment_config(bad_missing_boundary)
 
+    data = json.loads(CONFIG.read_text())
+    data["reward"]["late_error_weight"] = -1.0
+    bad_late_weight = tmp_path / "bad_late_weight.json"
+    bad_late_weight.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="late_error_weight"):
+        load_experiment_config(bad_late_weight)
+
+    data = json.loads(CONFIG.read_text())
+    data["sim"]["current_projection_margin_fraction"] = 1.0
+    bad_projection_margin = tmp_path / "bad_projection_margin.json"
+    bad_projection_margin.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="current_projection_margin_fraction"):
+        load_experiment_config(bad_projection_margin)
+
 
 def test_policy_pipeline_gates_require_learning_signals() -> None:
     actor_eval = {
@@ -591,6 +647,27 @@ def test_policy_pipeline_gates_require_learning_signals() -> None:
     )
     spike_reasons = {check["name"]: check["passed"] for check in current_spike["checks"]}
     assert spike_reasons["current_limit"] is False
+
+    late_drift = evaluate_policy_gates(
+        actor_eval=dict(actor_eval, shape_error_mean_m_late=0.05, current_over_limit_a_late_max=0.0, boundary_found_late_min=1.0, ip_error_a_late=90000.0),
+        no_control=dict(no_control, ip_error_a_late=100000.0),
+        tail_losses=tail_losses,
+        action_samples=20,
+        min_boundary_found=0.999,
+        max_current_over_limit_a=0.0,
+        max_shape_error_m=0.03,
+        min_ip_improvement_frac=0.25,
+        min_ip_improvement_a=20000.0,
+        min_action_rms=0.005,
+        max_action_rms=0.5,
+        min_policy_weight_extra=1.0e-4,
+        min_sampled_q_spread=1.0e-8,
+        require_controller_rollout=True,
+        controller_rollout={"status": "ok"},
+    )
+    late_reasons = {check["name"]: check["passed"] for check in late_drift["checks"]}
+    assert late_reasons["shape_error_late"] is False
+    assert late_reasons["ip_improvement_late"] is False
 
 
 def test_experiment_configs_use_neutral_output_names() -> None:
@@ -728,7 +805,12 @@ def test_evaluate_detailed_reports_physical_metrics(tmp_path: Path) -> None:
     assert "max_abs_action" in metrics
     assert "max_abs_action_max" in metrics
     assert "physical_cost" in metrics
+    assert "physical_cost_late" in metrics
+    assert "shape_error_mean_m_late" in metrics
+    assert "shape_error_mean_m_late_minus_early" in metrics
+    assert "ip_error_a_late" in metrics
     assert "boundary_found" in metrics
+    assert "boundary_found_late_min" in metrics
     assert "boundary_found_min" in metrics
     assert np.isfinite(metrics["mean_return"])
 

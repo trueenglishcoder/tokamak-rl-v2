@@ -336,6 +336,8 @@ class Trainer:
         totals = torch.zeros((env.batch_size,), dtype=torch.float32, device=self.device)
         steps = torch.zeros((env.batch_size,), dtype=torch.long, device=self.device)
         component_values: dict[str, list[float]] = {}
+        early_component_values: dict[str, list[float]] = {}
+        late_component_values: dict[str, list[float]] = {}
         while len(returns) < int(episodes):
             if policy == "actor":
                 action = self.actor.deterministic(obs)
@@ -346,10 +348,21 @@ class Trainer:
             steps += 1
             comps = out.info.get("reward_components", {}) if isinstance(out.info, dict) else {}
             if isinstance(comps, dict):
+                max_steps_f = max(float(max_steps), 1.0)
+                progress = (steps.to(torch.float32) / max_steps_f).detach().cpu().numpy().reshape(-1)
+                early_cutoff = max(0.2, 1.0 / max_steps_f)
                 for name, value in comps.items():
                     arr = np.asarray(value, dtype=float).reshape(-1)
                     if arr.size:
-                        component_values.setdefault(str(name), []).extend(arr[np.isfinite(arr)].astype(float).tolist())
+                        finite = np.isfinite(arr)
+                        component_values.setdefault(str(name), []).extend(arr[finite].astype(float).tolist())
+                        if progress.shape == arr.shape:
+                            early = finite & (progress <= early_cutoff)
+                            late = finite & (progress >= 0.8)
+                            if np.any(early):
+                                early_component_values.setdefault(str(name), []).extend(arr[early].astype(float).tolist())
+                            if np.any(late):
+                                late_component_values.setdefault(str(name), []).extend(arr[late].astype(float).tolist())
             done = out.terminated | out.truncated | (steps >= int(max_steps))
             if bool(torch.any(done).item()):
                 done_cpu = done.detach().cpu().numpy().astype(bool)
@@ -374,6 +387,7 @@ class Trainer:
             "max_abs_action",
             "action_rms",
             "delta_action_rms",
+            "base_physical_cost",
             "physical_cost",
             "shape_loss",
             "ip_loss",
@@ -381,6 +395,8 @@ class Trainer:
             "derivative_loss",
             "action_saturation_loss",
             "delta_action_loss",
+            "action_projection_delta_rms",
+            "action_projection_delta_max",
         }
         min_metrics = {"current_margin_fraction", "boundary_found"}
         for name, values in component_values.items():
@@ -393,17 +409,40 @@ class Trainer:
                     metrics[f"{name}_min"] = float(np.nanmin(arr))
                 if name == "current_over_limit_a":
                     metrics["current_over_limit_fraction"] = float(np.nanmean(arr > 0.0))
+        profile_metrics = max_metrics | min_metrics | {"episode_progress", "time_weight"}
+        drift_metrics = {"shape_error_mean_m", "shape_error_max_m", "ip_error_a", "physical_cost", "base_physical_cost", "current_usage_fraction"}
+        for name in profile_metrics:
+            early = np.asarray(early_component_values.get(name, []), dtype=float)
+            late = np.asarray(late_component_values.get(name, []), dtype=float)
+            if early.size:
+                metrics[f"{name}_early"] = float(np.nanmean(early))
+            if late.size:
+                metrics[f"{name}_late"] = float(np.nanmean(late))
+                if name in max_metrics:
+                    metrics[f"{name}_late_max"] = float(np.nanmax(late))
+                if name in min_metrics:
+                    metrics[f"{name}_late_min"] = float(np.nanmin(late))
+                if name == "current_over_limit_a":
+                    metrics["current_over_limit_fraction_late"] = float(np.nanmean(late > 0.0))
+            if early.size and late.size and name in drift_metrics:
+                metrics[f"{name}_late_minus_early"] = float(np.nanmean(late) - np.nanmean(early))
         return metrics
 
     @staticmethod
     def _selection_score(metrics: dict[str, float]) -> float:
-        score = float(metrics.get("mean_return", -float("inf")))
-        current_over = float(metrics.get("current_over_limit_a_max", metrics.get("current_over_limit_a", 0.0)))
-        boundary_found = float(metrics.get("boundary_found", 1.0))
+        score = -float(metrics.get("physical_cost_late", metrics.get("physical_cost", float("inf"))))
+        current_over = float(metrics.get("current_over_limit_a_late_max", metrics.get("current_over_limit_a_max", metrics.get("current_over_limit_a", 0.0))))
+        boundary_found = float(metrics.get("boundary_found_late_min", metrics.get("boundary_found_min", metrics.get("boundary_found", 1.0))))
+        shape_drift = float(metrics.get("shape_error_mean_m_late_minus_early", 0.0))
+        ip_drift = float(metrics.get("ip_error_a_late_minus_early", 0.0))
         if np.isfinite(current_over) and current_over > 0.0:
             score -= 1.0e6 + min(current_over, 1.0e6)
         if np.isfinite(boundary_found) and boundary_found < 0.999:
             score -= 1.0e6 * (0.999 - boundary_found)
+        if np.isfinite(shape_drift) and shape_drift > 0.0:
+            score -= 1000.0 * shape_drift
+        if np.isfinite(ip_drift) and ip_drift > 0.0:
+            score -= ip_drift / 1000.0
         return float(score)
 
     def _metadata(self, *, step: int, updates: int, eval_score: float | None = None) -> dict[str, object]:

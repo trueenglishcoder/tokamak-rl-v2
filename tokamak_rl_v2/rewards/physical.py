@@ -36,6 +36,7 @@ class T15PhysicalReward:
         derivative_usage: Tensor,
         boundary_found: Tensor,
         terminated: Tensor,
+        episode_progress: Tensor | None = None,
     ) -> RewardBatch:
         c = self.config
 
@@ -66,7 +67,7 @@ class T15PhysicalReward:
         action_saturation_loss = _threshold_huber(max_abs_action, start=float(c.action_penalty_start_fraction), bad=1.0)
         delta_action_loss = _threshold_huber(delta_action_rms, start=float(c.delta_action_penalty_start), bad=float(c.delta_action_bad))
 
-        physical_cost = (
+        base_physical_cost = (
             float(c.shape_weight) * shape_loss
             + float(c.ip_weight) * ip_loss
             + float(c.current_weight) * current_margin_loss
@@ -74,6 +75,12 @@ class T15PhysicalReward:
             + float(c.action_saturation_weight) * action_saturation_loss
             + float(c.delta_action_weight) * delta_action_loss
         )
+        if episode_progress is None:
+            progress = torch.zeros_like(base_physical_cost)
+        else:
+            progress = torch.clamp(episode_progress.to(dtype=base_physical_cost.dtype, device=base_physical_cost.device).reshape_as(base_physical_cost), 0.0, 1.0)
+        time_weight = 1.0 + float(c.late_error_weight) * progress.pow(float(c.late_error_power))
+        physical_cost = base_physical_cost * time_weight
         reward = -float(c.reward_scale) * physical_cost
         terminal = torch.full_like(reward, float(c.terminal_reward) * float(c.reward_scale))
         reward = torch.where(terminated, reward + terminal, reward)
@@ -91,6 +98,9 @@ class T15PhysicalReward:
                 "max_abs_action": max_abs_action,
                 "action_rms": action_rms,
                 "delta_action_rms": delta_action_rms,
+                "episode_progress": progress,
+                "time_weight": time_weight,
+                "base_physical_cost": base_physical_cost,
                 "physical_cost": physical_cost,
                 "shape_loss": shape_loss,
                 "ip_loss": ip_loss,

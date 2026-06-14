@@ -143,13 +143,20 @@ def evaluate_policy_gates(
 
     boundary_found = _metric(actor_eval, "boundary_found")
     add("boundary_found", _finite(boundary_found) and boundary_found >= min_boundary_found, value=boundary_found, threshold=f">= {min_boundary_found:g}")
+    boundary_found_late = _metric(actor_eval, "boundary_found_late_min", default=_metric(actor_eval, "boundary_found_min", default=boundary_found))
+    add("boundary_found_late", _finite(boundary_found_late) and boundary_found_late >= min_boundary_found, value=boundary_found_late, threshold=f"late/min >= {min_boundary_found:g}")
 
     current_over_mean = _metric(actor_eval, "current_over_limit_a")
     current_over_max = _metric(actor_eval, "current_over_limit_a_max", default=current_over_mean)
     add("current_limit", _finite(current_over_max) and current_over_max <= max_current_over_limit_a, value={"max_a": current_over_max, "mean_a": current_over_mean, "fraction": _metric(actor_eval, "current_over_limit_fraction")}, threshold=f"max <= {max_current_over_limit_a:g} A")
+    current_over_late = _metric(actor_eval, "current_over_limit_a_late_max", default=current_over_max)
+    add("current_limit_late", _finite(current_over_late) and current_over_late <= max_current_over_limit_a, value={"late_max_a": current_over_late, "late_fraction": _metric(actor_eval, "current_over_limit_fraction_late")}, threshold=f"late/max <= {max_current_over_limit_a:g} A")
 
     shape_error = _metric(actor_eval, "shape_error_mean_m")
     add("shape_error_mean", _finite(shape_error) and shape_error <= max_shape_error_m, value=shape_error, threshold=f"<= {max_shape_error_m:g} m")
+    shape_error_late = _metric(actor_eval, "shape_error_mean_m_late", default=shape_error)
+    shape_drift = _metric(actor_eval, "shape_error_mean_m_late_minus_early")
+    add("shape_error_late", _finite(shape_error_late) and shape_error_late <= max_shape_error_m, value={"late_m": shape_error_late, "late_minus_early_m": shape_drift}, threshold=f"late <= {max_shape_error_m:g} m")
 
     baseline_ip = _metric(no_control, "ip_error_a")
     actor_ip = _metric(actor_eval, "ip_error_a")
@@ -169,6 +176,25 @@ def evaluate_policy_gates(
             value={"absolute_a": ip_improvement, "fraction": ip_improvement_frac, "baseline_a": baseline_ip, "actor_a": actor_ip},
             threshold=f"skipped unless no-control Ip error >= {min_ip_improvement_a:g} A",
             details="baseline error is below the absolute gate",
+        )
+
+    baseline_ip_late = _metric(no_control, "ip_error_a_late", default=baseline_ip)
+    actor_ip_late = _metric(actor_eval, "ip_error_a_late", default=actor_ip)
+    ip_late_improvement = baseline_ip_late - actor_ip_late if _finite(baseline_ip_late) and _finite(actor_ip_late) else float("nan")
+    ip_late_improvement_frac = ip_late_improvement / max(abs(baseline_ip_late), 1.0e-12) if _finite(ip_late_improvement) and _finite(baseline_ip_late) else float("nan")
+    if _finite(baseline_ip_late) and baseline_ip_late >= min_ip_improvement_a:
+        add(
+            "ip_improvement_late",
+            ip_late_improvement >= min_ip_improvement_a and ip_late_improvement_frac >= min_ip_improvement_frac,
+            value={"absolute_a": ip_late_improvement, "fraction": ip_late_improvement_frac, "baseline_a": baseline_ip_late, "actor_a": actor_ip_late, "late_minus_early_a": _metric(actor_eval, "ip_error_a_late_minus_early")},
+            threshold=f"late >= {min_ip_improvement_a:g} A and >= {min_ip_improvement_frac:g}",
+        )
+    else:
+        add(
+            "ip_improvement_late",
+            True,
+            value={"absolute_a": ip_late_improvement, "fraction": ip_late_improvement_frac, "baseline_a": baseline_ip_late, "actor_a": actor_ip_late},
+            threshold=f"skipped unless late no-control Ip error >= {min_ip_improvement_a:g} A",
         )
 
     action_rms = _metric(actor_eval, "action_rms")
@@ -253,14 +279,27 @@ def validate_exported_controller(export_dir: Path | None, config: ExperimentConf
         scenario = make_scenario("nominal", ref_radii, float(ip0[0]), params={}, center=center)
         action_rms: list[float] = []
         boundary_found: list[float] = []
+        shape_error: list[float] = []
+        ip_error: list[float] = []
+        current_over: list[float] = []
+        current_limits = None
+        if config.sim.current_safety_limits is not None:
+            current_limits = np.concatenate([
+                np.asarray(config.sim.current_safety_limits.pfc_currents, dtype=float),
+                np.asarray(config.sim.current_safety_limits.sol_currents, dtype=float),
+            ])
         for _step in range(max(1, int(steps))):
             psi = model.compute_psi()
             try:
                 poly, _level, _status = find_plasma_boundary_with_status(psi, model.grid, center, n_levels=80, limiter_shape=loaded.limiter_shape, boundary_mode=loaded.boundary_mode)
                 found = 1.0
+                radii = radii_from_polyline_ray_intersections(poly, center, angles)
+                shape_error.append(float(np.nanmean(np.abs(np.nan_to_num(radii) - ref_radii))))
             except BoundaryNotFoundError:
                 poly = None
                 found = 0.0
+                shape_error.append(float(config.reward.boundary_missing_error_m))
+            ip_error.append(abs(float(model.state.Ip) - float(ip0[0])))
             action = controller.compute_control(
                 model=model,
                 psi=psi,
@@ -280,12 +319,20 @@ def validate_exported_controller(export_dir: Path | None, config: ExperimentConf
             action_rms.append(float(np.sqrt(np.mean(np.square(deriv)))) if deriv.size else 0.0)
             boundary_found.append(found)
             model.step(pfc_derivs, sol_derivs)
+            if current_limits is not None:
+                currents = np.concatenate([np.asarray(model.state.pfc_currents, dtype=float), np.asarray(model.state.sol_currents, dtype=float)])
+                current_over.append(float(np.nanmax(np.maximum(np.abs(currents) - current_limits, 0.0))))
         return {
             "status": "ok",
             "export_dir": str(export_dir),
             "steps": int(max(1, int(steps))),
             "physical_derivative_rms": float(np.nanmean(np.asarray(action_rms, dtype=float))),
             "boundary_found_mean": float(np.nanmean(np.asarray(boundary_found, dtype=float))),
+            "shape_error_mean_m": float(np.nanmean(np.asarray(shape_error, dtype=float))),
+            "shape_error_late_m": float(np.nanmean(np.asarray(shape_error[-max(1, len(shape_error) // 5) :], dtype=float))),
+            "ip_error_a": float(np.nanmean(np.asarray(ip_error, dtype=float))),
+            "ip_error_late_a": float(np.nanmean(np.asarray(ip_error[-max(1, len(ip_error) // 5) :], dtype=float))),
+            "current_over_limit_a_max": float(np.nanmax(np.asarray(current_over, dtype=float))) if current_over else 0.0,
         }
     except Exception as exc:
         return {"status": "error", "export_dir": str(export_dir), "error": repr(exc)}
