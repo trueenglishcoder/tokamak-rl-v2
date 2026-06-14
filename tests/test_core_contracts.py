@@ -15,6 +15,7 @@ from tokamak_rl_v2.networks import FeedForwardGaussianActor, RecurrentQCritic
 from tokamak_rl_v2.rewards import T15PhysicalReward
 from tokamak_rl_v2.export.cli import main as export_cli_main
 from tokamak_rl_v2.training.mpo import MaximumAPosterioriPolicyOptimiser
+from scripts.calibrate_physical_reward import Candidate, _write_candidate_config
 from tokamak_rl_v2.training.policy_pipeline import evaluate_policy_gates, run_reset_sanity
 from tokamak_rl_v2.training.replay import FIFOSequenceReplay, SequenceBatch
 from tokamak_rl_v2.training.trainer import Trainer
@@ -830,3 +831,14 @@ def test_actor_update_changes_policy_parameters_on_sequence_batch() -> None:
     assert metrics.actor_param_delta_norm > 0.0
     assert np.isfinite(metrics.sampled_q_spread)
     assert np.isfinite(metrics.policy_weight_entropy)
+
+
+def test_reward_calibration_candidate_config_keeps_sim_paths_valid(tmp_path: Path) -> None:
+    candidate_path = tmp_path / "generated" / "candidate.json"
+    candidate_path.parent.mkdir(parents=True)
+    _write_candidate_config(CONFIG, candidate_path, Candidate("test", {"shape_weight": 3.0}))
+    data = json.loads(candidate_path.read_text(encoding="utf-8"))
+    sim_config = Path(data["sim"]["config_path"])
+    assert sim_config.is_absolute()
+    assert sim_config.exists()
+    assert data["reward"]["shape_weight"] == pytest.approx(3.0)

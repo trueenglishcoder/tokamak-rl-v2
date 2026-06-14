@@ -196,6 +196,13 @@ def _load_candidates(args: argparse.Namespace) -> list[Candidate]:
 def _write_candidate_config(base_config: Path, config_path: Path, candidate: Candidate) -> None:
     data = json.loads(base_config.read_text(encoding="utf-8"))
     data["name"] = f"{data.get('name', 't15')}_{candidate.name}"
+    sim = data.get("sim", {})
+    if isinstance(sim, dict):
+        for key in ("config_path", "initial_currents_path"):
+            raw = sim.get(key)
+            if raw:
+                path = Path(str(raw))
+                sim[key] = str(path if path.is_absolute() else (base_config.parent / path).resolve())
     reward = dict(data.get("reward", {}))
     reward.update(candidate.reward)
     data["reward"] = reward
