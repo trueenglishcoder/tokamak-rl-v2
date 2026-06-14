@@ -34,6 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--eval-max-steps", type=int, default=None)
     ap.add_argument("--actor-workers", type=int, default=None)
     ap.add_argument("--actor-devices", default=None)
+    ap.add_argument("--save-checkpoints", action=argparse.BooleanOptionalAction, default=None)
     ap.add_argument("--wandb", action="store_true")
     ap.add_argument("--wandb-project", default="tokamak-rl-v2")
     ap.add_argument("--wandb-name", default=None)
@@ -66,11 +67,12 @@ def main(argv: list[str] | None = None) -> int:
                 critic_mlp_hidden_dim=args.critic_mlp_hidden_dim if args.critic_mlp_hidden_dim is not None else cfg.network.critic_mlp_hidden_dim,
             ),
         )
-    if any(v is not None for v in (args.checkpoint_interval_steps, args.eval_interval_steps, args.eval_episodes, args.eval_max_steps, args.actor_workers, args.actor_devices)):
+    if any(v is not None for v in (args.save_checkpoints, args.checkpoint_interval_steps, args.eval_interval_steps, args.eval_episodes, args.eval_max_steps, args.actor_workers, args.actor_devices)):
         cfg = replace(
             cfg,
             training=replace(
                 cfg.training,
+                save_checkpoints=args.save_checkpoints if args.save_checkpoints is not None else cfg.training.save_checkpoints,
                 checkpoint_interval_steps=args.checkpoint_interval_steps if args.checkpoint_interval_steps is not None else cfg.training.checkpoint_interval_steps,
                 eval_interval_steps=args.eval_interval_steps if args.eval_interval_steps is not None else cfg.training.eval_interval_steps,
                 eval_episodes=args.eval_episodes if args.eval_episodes is not None else cfg.training.eval_episodes,

@@ -54,6 +54,7 @@ def generate_reference_batch(
     seed: int,
     initial_boundary_points: Tensor | np.ndarray | None = None,
     initial_boundary_radii: Tensor | np.ndarray | None = None,
+    ip_reference: Tensor | np.ndarray | None = None,
 ) -> ReferenceBatch:
     dev = torch.device(device)
     rng = np.random.default_rng(int(seed))
@@ -61,8 +62,16 @@ def generate_reference_batch(
     ip = np.zeros((B, int(steps) + 1), dtype=np.float64)
     params = np.zeros((B, int(steps) + 1, 5), dtype=np.float64)
     theta = torch.linspace(-torch.pi, torch.pi, int(config.theta_count) + 1, dtype=torch.float64, device=dev)[:-1]
+    ip_reference_arr = None
+    if config.ip.kind == "shot_trapezoid_fragment":
+        if ip_reference is None:
+            raise ValueError("shot_trapezoid_fragment requires ip_reference")
+        ip_reference_arr = np.asarray(ip_reference, dtype=float).reshape(B, int(steps) + 1)
     for b in range(B):
-        if config.ip.kind == "hold_reset":
+        if config.ip.kind == "shot_trapezoid_fragment":
+            assert ip_reference_arr is not None
+            ip[b] = ip_reference_arr[b]
+        elif config.ip.kind == "hold_reset":
             ip[b] = float(initial_ip[b])
         else:
             ip[b] = _segmented_ip(config.ip, float(initial_ip[b]), int(steps), rng, dt=float(config.t_step))

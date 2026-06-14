@@ -62,6 +62,7 @@ class Trainer:
         self.normalization = self.env.normalization()
         self.best_eval = -float("inf")
         self.best_eval_details: dict[str, float] = {}
+        self.best_actor_state_dict: dict[str, torch.Tensor] | None = None
         self._configure_wandb_metrics()
 
     def _configure_wandb_metrics(self) -> None:
@@ -135,7 +136,7 @@ class Trainer:
                         reward_writer.writeheader()
                     reward_writer.writerow(flat); reward_f.flush()
                     self._wandb_log({f"reward/{k}": v for k, v in flat.items() if k != "step"}, step=step)
-                if step % int(self.config.training.checkpoint_interval_steps) == 0:
+                if self._save_checkpoints_enabled() and step % int(self.config.training.checkpoint_interval_steps) == 0:
                     self._save_checkpoint("latest.pt", step=step, updates=updates)
                 if step % int(self.config.training.eval_interval_steps) == 0:
                     eval_metrics = self.evaluate_detailed(max_steps=int(self.config.training.eval_max_steps), episodes=int(self.config.training.eval_episodes))
@@ -146,7 +147,9 @@ class Trainer:
                     if score > self.best_eval:
                         self.best_eval = score
                         self.best_eval_details = dict(eval_metrics)
-                        self._save_checkpoint("best.pt", step=step, updates=updates)
+                        self._remember_best_actor()
+                        if self._save_checkpoints_enabled():
+                            self._save_checkpoint("best.pt", step=step, updates=updates)
                         self._export("exports/best_actor", step=step, updates=updates, eval_score=score)
                 progress.update(1)
                 progress.set_postfix(replay=self.replay.size, updates=updates, reward=f"{float(batch_step.reward.mean().detach().cpu()):.4f}", refresh=False)
@@ -162,8 +165,10 @@ class Trainer:
             "device": str(self.device),
             "output_dir": str(self.output_dir),
             "total_training_envs": self.num_envs,
+            "save_checkpoints": self._save_checkpoints_enabled(),
         }
-        self._save_checkpoint("final.pt", step=self.steps, updates=updates)
+        if self._save_checkpoints_enabled():
+            self._save_checkpoint("final.pt", step=self.steps, updates=updates)
         self._export("exports/final_actor", step=self.steps, updates=updates, eval_score=self.best_eval)
         metrics_path.write_text(json.dumps(final, indent=2), encoding="utf-8")
         return final
@@ -239,7 +244,7 @@ class Trainer:
                         if updates % 4 == 0:
                             broadcast_actor(param_queues, self.actor.state_dict())
                         break
-                    if env_steps - last_checkpoint_step >= max(int(self.config.training.checkpoint_interval_steps), 1):
+                    if self._save_checkpoints_enabled() and env_steps - last_checkpoint_step >= max(int(self.config.training.checkpoint_interval_steps), 1):
                         self._save_checkpoint("latest.pt", step=env_steps, updates=updates)
                         last_checkpoint_step = env_steps
                     if env_steps - last_eval_step >= max(int(self.config.training.eval_interval_steps), 1):
@@ -251,7 +256,9 @@ class Trainer:
                         if score > self.best_eval:
                             self.best_eval = score
                             self.best_eval_details = dict(eval_metrics)
-                            self._save_checkpoint("best.pt", step=env_steps, updates=updates)
+                            self._remember_best_actor()
+                            if self._save_checkpoints_enabled():
+                                self._save_checkpoint("best.pt", step=env_steps, updates=updates)
                             self._export("exports/best_actor", step=env_steps, updates=updates, eval_score=score)
                         last_eval_step = env_steps
                     progress.update(min(T * B, max(self.steps - (env_steps - T * B), 0)))
@@ -259,7 +266,8 @@ class Trainer:
                 progress.close()
         finally:
             stop_actor_workers(processes, stop, param_queues=param_queues, data_q=data_q)
-        self._save_checkpoint("final.pt", step=env_steps, updates=updates)
+        if self._save_checkpoints_enabled():
+            self._save_checkpoint("final.pt", step=env_steps, updates=updates)
         self._export("exports/final_actor", step=env_steps, updates=updates, eval_score=None)
         final = {
             "start_step": self.start_step,
@@ -276,6 +284,7 @@ class Trainer:
             "envs_per_worker": envs_per_worker,
             "total_training_envs": envs_per_worker * worker_count,
             "worker_rollout_counts": worker_rollout_counts,
+            "save_checkpoints": self._save_checkpoints_enabled(),
         }
         metrics_path.write_text(json.dumps(final, indent=2), encoding="utf-8")
         return final
@@ -326,11 +335,11 @@ class Trainer:
         return float(self.evaluate_detailed(episodes=episodes, max_steps=max_steps)["mean_return"])
 
     @torch.no_grad()
-    def evaluate_detailed(self, *, episodes: int, max_steps: int, policy: Literal["actor", "no_control"] = "actor") -> dict[str, float]:
+    def evaluate_detailed(self, *, episodes: int, max_steps: int, policy: Literal["actor", "no_control"] = "actor", seed_offset: int = 100000) -> dict[str, float]:
         if policy not in {"actor", "no_control"}:
             raise ValueError(f"unsupported evaluation policy: {policy}")
         batch_size = max(1, min(int(episodes), self.num_envs))
-        env = TokamakMagneticControlEnv(self.config, batch_size=batch_size, device=self.device, seed=int(self.config.training.seed) + 100000)
+        env = TokamakMagneticControlEnv(self.config, batch_size=batch_size, device=self.device, seed=int(self.config.training.seed) + int(seed_offset))
         obs = env.reset()
         returns: list[float] = []
         totals = torch.zeros((env.batch_size,), dtype=torch.float32, device=self.device)
@@ -463,6 +472,18 @@ class Trainer:
             out["total_training_envs"] = self._last_total_training_envs
             out["resume_limitation"] = "actor-worker environment states are not checkpointed"
         return out
+
+    def restore_best_actor(self) -> bool:
+        if self.best_actor_state_dict is None:
+            return False
+        self.actor.load_state_dict({name: value.to(self.device) for name, value in self.best_actor_state_dict.items()})
+        return True
+
+    def _remember_best_actor(self) -> None:
+        self.best_actor_state_dict = {name: value.detach().cpu().clone() for name, value in self.actor.state_dict().items()}
+
+    def _save_checkpoints_enabled(self) -> bool:
+        return bool(self.config.training.save_checkpoints)
 
     def _save_checkpoint(self, name: str, *, step: int, updates: int) -> Path:
         ckpt_dir = self.output_dir / "checkpoints"

@@ -23,6 +23,10 @@ from tokamak_rl_v2.training.trainer import Trainer
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if int(args.eval_seed_offset) < 0 or int(args.holdout_eval_seed_offset) < 0:
+        raise ValueError("evaluation seed offsets must be non-negative")
+    if int(args.eval_seed_offset) == int(args.holdout_eval_seed_offset):
+        raise ValueError("holdout_eval_seed_offset must differ from eval_seed_offset")
     cfg = _apply_overrides(load_experiment_config(args.config), args)
     _validate_experiment_config(cfg)
     output_dir = Path(args.output_dir or cfg.training.output_dir).resolve()
@@ -44,23 +48,29 @@ def main(argv: list[str] | None = None) -> int:
             return 2 if not args.allow_failed_gates else 0
 
         trainer = Trainer(cfg, steps=args.steps, num_envs=args.num_envs, device=args.device, output_dir=output_dir, wandb_run=wandb_run, resume_checkpoint=args.resume_checkpoint)
-        baseline = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=int(cfg.training.eval_max_steps), policy="no_control")
-        _wandb_log(wandb_run, "pipeline/no_control", baseline, step=0)
+        selection_seed_offset = int(args.eval_seed_offset)
+        holdout_seed_offset = int(args.holdout_eval_seed_offset)
+        baseline = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=int(cfg.training.eval_max_steps), policy="no_control", seed_offset=selection_seed_offset)
+        holdout_baseline = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=int(cfg.training.eval_max_steps), policy="no_control", seed_offset=holdout_seed_offset)
+        _wandb_log(wandb_run, "pipeline/no_control_selection", baseline, step=0)
+        _wandb_log(wandb_run, "pipeline/no_control_holdout", holdout_baseline, step=0)
         train_result = trainer.train()
 
         selected_checkpoint = _selected_checkpoint(output_dir)
         if selected_checkpoint is not None and selected_checkpoint.name == "best.pt":
             _load_actor_weights(trainer, selected_checkpoint)
-        actor_eval = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=int(cfg.training.eval_max_steps), policy="actor")
+        elif selected_checkpoint is None:
+            trainer.restore_best_actor()
+        actor_eval = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=int(cfg.training.eval_max_steps), policy="actor", seed_offset=holdout_seed_offset)
         train_env_step = _train_env_step(train_result, cfg)
-        _wandb_log(wandb_run, "pipeline/actor_eval", actor_eval, step=train_env_step)
+        _wandb_log(wandb_run, "pipeline/actor_eval_holdout", actor_eval, step=train_env_step)
         losses = summarize_training_losses(output_dir / "losses.csv")
         selected_export = _selected_export_dir(output_dir)
         rollout_report = validate_exported_controller(selected_export, cfg, steps=int(args.controller_rollout_steps)) if selected_export is not None else {"status": "missing_export"}
 
         gate_report = evaluate_policy_gates(
             actor_eval=actor_eval,
-            no_control=baseline,
+            no_control=holdout_baseline,
             tail_losses=losses,
             action_samples=int(cfg.learner.action_samples),
             min_boundary_found=float(args.min_boundary_found),
@@ -79,10 +89,15 @@ def main(argv: list[str] | None = None) -> int:
             "status": "passed" if gate_report["passed"] else "failed_gates",
             "config": str(Path(args.config).resolve()),
             "output_dir": str(output_dir),
+            "evaluation_seed_offsets": {
+                "selection": selection_seed_offset,
+                "holdout": holdout_seed_offset,
+            },
             "checkpoint": None if selected_checkpoint is None else str(selected_checkpoint),
             "export_dir": None if selected_export is None else str(selected_export),
             "reset_sanity": reset_report,
-            "no_control": baseline,
+            "no_control_selection": baseline,
+            "no_control": holdout_baseline,
             "train_result": train_result,
             "actor_eval": actor_eval,
             "tail_losses": losses,
@@ -404,7 +419,7 @@ def _apply_overrides(cfg: ExperimentConfig, args: argparse.Namespace) -> Experim
                 critic_mlp_hidden_dim=args.critic_mlp_hidden_dim if args.critic_mlp_hidden_dim is not None else cfg.network.critic_mlp_hidden_dim,
             ),
         )
-    if any(v is not None for v in (args.steps, args.num_envs, args.device, args.output_dir, args.checkpoint_interval_steps, args.eval_interval_steps, args.eval_episodes, args.eval_max_steps, args.actor_workers, args.actor_devices)):
+    if any(v is not None for v in (args.steps, args.num_envs, args.device, args.output_dir, args.save_checkpoints, args.checkpoint_interval_steps, args.eval_interval_steps, args.eval_episodes, args.eval_max_steps, args.actor_workers, args.actor_devices)):
         steps = int(args.steps) if args.steps is not None else int(cfg.training.steps)
         checkpoint_interval = args.checkpoint_interval_steps if args.checkpoint_interval_steps is not None else cfg.training.checkpoint_interval_steps
         eval_interval = args.eval_interval_steps if args.eval_interval_steps is not None else cfg.training.eval_interval_steps
@@ -418,6 +433,7 @@ def _apply_overrides(cfg: ExperimentConfig, args: argparse.Namespace) -> Experim
                 num_envs=args.num_envs if args.num_envs is not None else cfg.training.num_envs,
                 device=args.device if args.device is not None else cfg.training.device,
                 output_dir=Path(args.output_dir).resolve() if args.output_dir is not None else cfg.training.output_dir,
+                save_checkpoints=args.save_checkpoints if args.save_checkpoints is not None else cfg.training.save_checkpoints,
                 checkpoint_interval_steps=checkpoint_interval,
                 eval_interval_steps=eval_interval,
                 eval_episodes=args.eval_episodes if args.eval_episodes is not None else cfg.training.eval_episodes,
@@ -453,8 +469,11 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--eval-interval-steps", type=int, default=None)
     ap.add_argument("--eval-episodes", type=int, default=None)
     ap.add_argument("--eval-max-steps", type=int, default=None)
+    ap.add_argument("--eval-seed-offset", type=int, default=100000)
+    ap.add_argument("--holdout-eval-seed-offset", type=int, default=200000)
     ap.add_argument("--actor-workers", type=int, default=None)
     ap.add_argument("--actor-devices", default=None)
+    ap.add_argument("--save-checkpoints", action=argparse.BooleanOptionalAction, default=None)
     ap.add_argument("--reset-error-tolerance-m", type=float, default=1.0e-6)
     ap.add_argument("--min-boundary-found", type=float, default=0.999)
     ap.add_argument("--max-current-over-limit-a", type=float, default=0.0)
@@ -568,6 +587,8 @@ def _start_wandb(args: argparse.Namespace, cfg: ExperimentConfig, *, output_dir:
             "experiment": cfg.name,
             "policy_pipeline": "hold_reset_boundary",
             "output_dir": str(output_dir),
+            "eval_seed_offset": int(args.eval_seed_offset),
+            "holdout_eval_seed_offset": int(args.holdout_eval_seed_offset),
         },
     )
 

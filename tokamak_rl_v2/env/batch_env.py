@@ -16,6 +16,7 @@ from tokamak_control.io.config_io import load_config
 
 from tokamak_rl_v2.config.schema import ExperimentConfig
 from tokamak_rl_v2.env.references import ReferenceBatch, generate_reference_batch, sample_initial_conditions
+from tokamak_rl_v2.env.shot_fragments import ShotFragmentLibrary
 from tokamak_rl_v2.rewards import T15PhysicalReward
 
 
@@ -26,6 +27,18 @@ class BatchStep:
     terminated: Tensor
     truncated: Tensor
     info: dict[str, object]
+
+
+@dataclass(slots=True)
+class ResetPayload:
+    ip0: np.ndarray
+    pfc0: np.ndarray
+    sol0: np.ndarray
+    params0: np.ndarray
+    reference_seed: int
+    ip_reference: np.ndarray | None = None
+    shot_ids: tuple[str, ...] = ()
+    shot_start_times_s: np.ndarray | None = None
 
 
 class TokamakMagneticControlEnv:
@@ -56,6 +69,17 @@ class TokamakMagneticControlEnv:
         self.done = torch.ones((self.batch_size,), dtype=torch.bool, device=self.device)
         self._cpu_models: list[PlasmaModel] = []
         self._gpu_sim: BatchedGpuTokamakSimulator | None = None
+        self._shot_fragments = (
+            ShotFragmentLibrary(
+                config.sim.shot_fragments,
+                n_pfc=self.cfg.pfc.n_coils,
+                n_sol=self.cfg.sol.n_coils,
+                dt=float(self.cfg.physics.t_step),
+            )
+            if config.sim.shot_fragments is not None
+            else None
+        )
+        self.reset_metadata: list[dict[str, object]] = []
 
     @property
     def pfc(self):
@@ -66,7 +90,9 @@ class TokamakMagneticControlEnv:
         return self.cfg.sol
 
     def reset(self) -> Tensor:
-        ip0, pfc0, sol0, params0, reference_seed = self._sample_reset_payload(self.batch_size)
+        payload = self._sample_reset_payload(self.batch_size)
+        ip0, pfc0, sol0, params0 = payload.ip0, payload.pfc0, payload.sol0, payload.params0
+        self._record_reset_metadata(payload)
         self.previous_action.zero_()
         self.action_offset = self._sample_action_offset(self.batch_size)
         self.step_index.zero_()
@@ -83,11 +109,11 @@ class TokamakMagneticControlEnv:
                 gpu_device=self.config.sim.gpu_device,
             )
             result = self._gpu_sim.reset(ip=ip0, pfc_currents=pfc0, sol_currents=sol0)
-            self.reference = self._reference_for_reset_payload(ip0=ip0, params0=params0, seed=reference_seed, boundary_points=result.boundary.points, boundary_radii=result.boundary.radii)
+            self.reference = self._reference_for_reset_payload(payload=payload, boundary_points=result.boundary.points, boundary_radii=result.boundary.radii)
             return self._obs_gpu(result=result)
         self._cpu_models = [self._new_cpu_model(ip=float(ip0[b]), pfc_currents=pfc0[b], sol_currents=sol0[b]) for b in range(self.batch_size)]
         points0, radii0, _found0 = self._cpu_boundary_samples()
-        self.reference = self._reference_for_reset_payload(ip0=ip0, params0=params0, seed=reference_seed, boundary_points=points0, boundary_radii=radii0)
+        self.reference = self._reference_for_reset_payload(payload=payload, boundary_points=points0, boundary_radii=radii0)
         return self._obs_cpu()
 
     def reset_indices(self, done_mask: Tensor | np.ndarray | list[bool]) -> Tensor:
@@ -99,7 +125,8 @@ class TokamakMagneticControlEnv:
         indices_t = torch.nonzero(mask, as_tuple=False).reshape(-1)
         indices = [int(v) for v in indices_t.detach().cpu().tolist()]
         count = len(indices)
-        ip0, pfc0, sol0, params0, reference_seed = self._sample_reset_payload(count)
+        payload = self._sample_reset_payload(count)
+        ip0, pfc0, sol0 = payload.ip0, payload.pfc0, payload.sol0
         assert self.reference is not None
         self.previous_action[indices_t] = 0.0
         self.action_offset[indices_t] = self._sample_action_offset(count)
@@ -109,28 +136,41 @@ class TokamakMagneticControlEnv:
             assert self._gpu_sim is not None
             result = self._gpu_sim.reset_indices(indices, ip=ip0, pfc_currents=pfc0, sol_currents=sol0)
             idx_for_boundary = indices_t.to(device=result.boundary.points.device)
-            reference = self._reference_for_reset_payload(ip0=ip0, params0=params0, seed=reference_seed, boundary_points=result.boundary.points[idx_for_boundary], boundary_radii=result.boundary.radii[idx_for_boundary])
+            reference = self._reference_for_reset_payload(payload=payload, boundary_points=result.boundary.points[idx_for_boundary], boundary_radii=result.boundary.radii[idx_for_boundary])
             self._write_reference_indices(indices_t, reference)
+            self._record_reset_metadata(payload, indices=indices)
             return self._obs_gpu(result=result)
         for local, env_index in enumerate(indices):
             self._cpu_models[env_index] = self._new_cpu_model(ip=float(ip0[local]), pfc_currents=pfc0[local], sol_currents=sol0[local])
         points0, radii0, _found0 = self._cpu_boundary_samples(indices=indices)
-        reference = self._reference_for_reset_payload(ip0=ip0, params0=params0, seed=reference_seed, boundary_points=points0, boundary_radii=radii0)
+        reference = self._reference_for_reset_payload(payload=payload, boundary_points=points0, boundary_radii=radii0)
         self._write_reference_indices(indices_t, reference)
+        self._record_reset_metadata(payload, indices=indices)
         return self._obs_cpu()
 
-    def _sample_reset_payload(self, count: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+    def _sample_reset_payload(self, count: int) -> ResetPayload:
         if self.config.sim.initial_ranges is None:
             raise ValueError("training config must provide replay-bounded initial_ranges")
+        if self._shot_fragments is not None:
+            shot = self._shot_fragments.sample(self.rng, count=int(count), steps=int(self.config.sim.max_episode_steps))
+            _ip_unused, _pfc_unused, _sol_unused, params0 = sample_initial_conditions(self.rng, self.config.sim.initial_ranges, int(count))
+            return ResetPayload(
+                ip0=shot.ip0,
+                pfc0=shot.pfc_currents,
+                sol0=shot.sol_currents,
+                params0=params0,
+                reference_seed=int(self.rng.integers(0, 2**31 - 1)),
+                ip_reference=shot.ip_reference,
+                shot_ids=shot.shot_ids,
+                shot_start_times_s=shot.start_times_s,
+            )
         ip0, pfc0, sol0, params0 = sample_initial_conditions(self.rng, self.config.sim.initial_ranges, int(count))
-        return ip0, pfc0, sol0, params0, int(self.rng.integers(0, 2**31 - 1))
+        return ResetPayload(ip0=ip0, pfc0=pfc0, sol0=sol0, params0=params0, reference_seed=int(self.rng.integers(0, 2**31 - 1)))
 
     def _reference_for_reset_payload(
         self,
         *,
-        ip0: np.ndarray,
-        params0: np.ndarray,
-        seed: int,
+        payload: ResetPayload,
         boundary_points,
         boundary_radii,
     ) -> ReferenceBatch:
@@ -138,15 +178,33 @@ class TokamakMagneticControlEnv:
         if self.config.reference.boundary.kind == "hold_reset_boundary":
             kwargs["initial_boundary_points"] = boundary_points
             kwargs["initial_boundary_radii"] = boundary_radii
+        if self.config.reference.ip.kind == "shot_trapezoid_fragment":
+            kwargs["ip_reference"] = payload.ip_reference
         return generate_reference_batch(
             config=self.config.reference,
-            initial_ip=ip0,
-            initial_parameters=params0,
+            initial_ip=payload.ip0,
+            initial_parameters=payload.params0,
             steps=int(self.config.sim.max_episode_steps),
             device=self.device,
-            seed=int(seed),
+            seed=int(payload.reference_seed),
             **kwargs,
         )
+
+    def _record_reset_metadata(self, payload: ResetPayload, *, indices: list[int] | None = None) -> None:
+        if not payload.shot_ids:
+            self.reset_metadata = []
+            return
+        env_indices = list(range(len(payload.shot_ids))) if indices is None else list(indices)
+        starts = payload.shot_start_times_s if payload.shot_start_times_s is not None else np.full((len(payload.shot_ids),), np.nan)
+        self.reset_metadata = [
+            {
+                "env_index": int(env_indices[i]),
+                "shot_id": str(payload.shot_ids[i]),
+                "shot_start_time_s": float(starts[i]),
+                "initial_ip": float(payload.ip0[i]),
+            }
+            for i in range(len(payload.shot_ids))
+        ]
 
     def _write_reference_indices(self, indices_t: Tensor, reference: ReferenceBatch) -> None:
         assert self.reference is not None

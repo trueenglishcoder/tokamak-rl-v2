@@ -23,8 +23,10 @@ from tokamak_rl_v2.config.schema import (
     Range,
     ReferenceConfig,
     RewardConfig,
+    ShotFragmentConfig,
     SimConfig,
     TrainingConfig,
+    TrapezoidValueRanges,
 )
 
 
@@ -114,6 +116,46 @@ def _current_safety_limits(raw: Mapping[str, Any] | None) -> CurrentSafetyLimits
     )
 
 
+def _trapezoid_value_ranges(raw: Mapping[str, Any], name: str) -> TrapezoidValueRanges:
+    return TrapezoidValueRanges(
+        start=_range(_mapping(raw.get("start"), f"{name}.start"), f"{name}.start"),
+        plateau=_range(_mapping(raw.get("plateau"), f"{name}.plateau"), f"{name}.plateau"),
+        end=_range(_mapping(raw.get("end"), f"{name}.end"), f"{name}.end"),
+    )
+
+
+def _trapezoid_profile_tuple(raw: object, name: str) -> tuple[TrapezoidValueRanges, ...]:
+    if isinstance(raw, Mapping):
+        values = [v for _k, v in sorted(raw.items())]
+    elif isinstance(raw, (list, tuple)):
+        values = list(raw)
+    else:
+        raise ValueError(f"{name} must be a list or mapping")
+    out = tuple(_trapezoid_value_ranges(_mapping(value, f"{name}.{idx}"), f"{name}.{idx}") for idx, value in enumerate(values))
+    if not out:
+        raise ValueError(f"{name} must contain at least one profile")
+    return out
+
+
+def _shot_fragments(raw: Mapping[str, Any] | None, base: Path) -> ShotFragmentConfig | None:
+    if not raw:
+        return None
+    kind = str(raw.get("kind", "idealized_t15_trapezoid"))
+    return ShotFragmentConfig(
+        kind=kind,
+        ip_a=_trapezoid_value_ranges(_mapping(raw.get("ip_a"), "sim.shot_fragments.ip_a"), "sim.shot_fragments.ip_a"),
+        pfc_currents=_trapezoid_profile_tuple(raw.get("pfc_currents"), "sim.shot_fragments.pfc_currents"),
+        sol_currents=_trapezoid_profile_tuple(raw.get("sol_currents"), "sim.shot_fragments.sol_currents"),
+        ramp_up_s=_range(_mapping(raw.get("ramp_up_s"), "sim.shot_fragments.ramp_up_s"), "sim.shot_fragments.ramp_up_s"),
+        hold_s=_range(_mapping(raw.get("hold_s"), "sim.shot_fragments.hold_s"), "sim.shot_fragments.hold_s"),
+        ramp_down_s=_range(_mapping(raw.get("ramp_down_s"), "sim.shot_fragments.ramp_down_s"), "sim.shot_fragments.ramp_down_s"),
+        start_time_min_s=float(raw.get("start_time_min_s", 0.0)),
+        start_time_max_s=None if raw.get("start_time_max_s") is None else float(raw.get("start_time_max_s")),
+        trim_end_s=float(raw.get("trim_end_s", 0.02)),
+        corner_smoothing_s=float(raw.get("corner_smoothing_s", 0.05)),
+    )
+
+
 def _sim(raw: Mapping[str, Any], base: Path) -> SimConfig:
     config_path = _resolve(base, raw["config_path"])
     initial_raw = raw.get("initial_currents_path")
@@ -127,6 +169,7 @@ def _sim(raw: Mapping[str, Any], base: Path) -> SimConfig:
         initial_ranges=_ranges(_mapping(raw.get("initial_ranges", {}), "initial_ranges")),
         current_safety_limits=_current_safety_limits(_mapping(raw.get("current_safety_limits", {}), "current_safety_limits")),
         action_scale=float(raw.get("action_scale", 1.0)),
+        shot_fragments=_shot_fragments(_mapping(raw.get("shot_fragments", {}), "shot_fragments"), base),
         terminate_on_boundary_loss=bool(raw.get("terminate_on_boundary_loss", True)),
         terminate_on_current_limit=bool(raw.get("terminate_on_current_limit", False)),
         current_termination_over_limit_a=float(raw.get("current_termination_over_limit_a", 0.0)),
@@ -204,6 +247,7 @@ def _training(raw: Mapping[str, Any], base: Path) -> TrainingConfig:
         steps=int(raw.get("steps", defaults.steps)), num_envs=int(raw.get("num_envs", defaults.num_envs)),
         device=str(raw.get("device", defaults.device)), seed=int(raw.get("seed", defaults.seed)),
         output_dir=_resolve(base, raw.get("output_dir", defaults.output_dir)),
+        save_checkpoints=bool(raw.get("save_checkpoints", defaults.save_checkpoints)),
         checkpoint_interval_steps=int(raw.get("checkpoint_interval_steps", defaults.checkpoint_interval_steps)),
         eval_interval_steps=int(raw.get("eval_interval_steps", defaults.eval_interval_steps)),
         eval_episodes=int(raw.get("eval_episodes", defaults.eval_episodes)),
@@ -236,7 +280,7 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
     ip = cfg.reference.ip
     if not (math.isfinite(ip.min) and math.isfinite(ip.max) and ip.max >= ip.min):
         raise ValueError("reference.ip min/max are invalid")
-    if ip.kind not in {"segmented", "hold_reset"}:
+    if ip.kind not in {"segmented", "hold_reset", "shot_trapezoid_fragment"}:
         raise ValueError("reference.ip.kind is unsupported")
     if _range_crosses_or_touches_zero(float(ip.min), float(ip.max)):
         raise ValueError("reference.ip range must stay strictly on one side of zero")
@@ -246,6 +290,29 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
             raise ValueError("sim.initial_ranges.ip must stay strictly on one side of zero")
         if _sign(float(initial_ip.min)) != _sign(float(ip.min)):
             raise ValueError("sim.initial_ranges.ip must have the same sign as reference.ip")
+    if ip.kind == "shot_trapezoid_fragment":
+        if cfg.sim.shot_fragments is None:
+            raise ValueError("reference.ip.kind=shot_trapezoid_fragment requires sim.shot_fragments")
+    elif cfg.sim.shot_fragments is not None:
+        raise ValueError("sim.shot_fragments requires reference.ip.kind=shot_trapezoid_fragment")
+    if cfg.sim.shot_fragments is not None:
+        shots = cfg.sim.shot_fragments
+        if shots.kind != "idealized_t15_trapezoid":
+            raise ValueError("sim.shot_fragments.kind is unsupported")
+        if shots.ip_a is None:
+            raise ValueError("sim.shot_fragments.ip_a is required")
+        for name in ("start_time_min_s", "trim_end_s", "corner_smoothing_s"):
+            value = getattr(shots, name)
+            if not math.isfinite(float(value)) or float(value) < 0.0:
+                raise ValueError(f"sim.shot_fragments.{name} must be finite and non-negative")
+        if shots.start_time_max_s is not None:
+            if not math.isfinite(float(shots.start_time_max_s)) or float(shots.start_time_max_s) < float(shots.start_time_min_s):
+                raise ValueError("sim.shot_fragments.start_time_max_s must be finite and >= start_time_min_s")
+        if cfg.sim.initial_ranges is not None:
+            if len(shots.pfc_currents) != len(cfg.sim.initial_ranges.pfc_currents):
+                raise ValueError("sim.shot_fragments.pfc_currents length must match sim.initial_ranges.pfc_currents")
+            if len(shots.sol_currents) != len(cfg.sim.initial_ranges.sol_currents):
+                raise ValueError("sim.shot_fragments.sol_currents length must match sim.initial_ranges.sol_currents")
     if not math.isfinite(ip.rate_limit) or ip.rate_limit < 0.0:
         raise ValueError("reference.ip.rate_limit must be finite and non-negative")
     if ip.segment_min_steps <= 0 or ip.segment_max_steps < ip.segment_min_steps:

@@ -11,6 +11,7 @@ import torch
 from tokamak_rl_v2.config import load_experiment_config
 from tokamak_rl_v2.config.schema import IpReferenceConfig, LearnerConfig, RewardConfig
 from tokamak_rl_v2.env import TokamakMagneticControlEnv
+from tokamak_rl_v2.env.shot_fragments import ShotFragmentLibrary
 from tokamak_rl_v2.networks import FeedForwardGaussianActor, RecurrentQCritic
 from tokamak_rl_v2.rewards import T15PhysicalReward
 from tokamak_rl_v2.export.cli import main as export_cli_main
@@ -25,6 +26,7 @@ from tokamak_rl_v2.training.cli import _device_list
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "configs/experiments/t15_static_boundary.yaml"
+SHOT_FRAGMENT_CONFIG = ROOT / "configs/experiments/t15_shot_fragment_boundary_ip_500_gpu.yaml"
 
 
 def _small_config(tmp_path: Path):
@@ -444,6 +446,64 @@ def test_hold_reset_ip_reference_uses_actual_reset_ip() -> None:
     assert torch.allclose(batch.ip[1], torch.full((21,), 125100.0, dtype=torch.float64))
 
 
+def test_shot_fragment_library_samples_coherent_reset_and_reference() -> None:
+    cfg = load_experiment_config(SHOT_FRAGMENT_CONFIG)
+    assert cfg.sim.shot_fragments is not None
+    library = ShotFragmentLibrary(cfg.sim.shot_fragments, n_pfc=6, n_sol=3, dt=0.001)
+    sample = library.sample(np.random.default_rng(123), count=6, steps=100)
+    assert sample.ip0.shape == (6,)
+    assert sample.pfc_currents.shape == (6, 6)
+    assert sample.sol_currents.shape == (6, 3)
+    assert sample.ip_reference.shape == (6, 101)
+    assert np.all(sample.ip_reference > 0.0)
+    assert np.allclose(sample.ip0, sample.ip_reference[:, 0])
+    assert np.all(np.isfinite(sample.pfc_currents))
+    assert np.all(np.isfinite(sample.sol_currents))
+    assert len(set(sample.shot_ids)) >= 1
+    assert np.all(sample.start_times_s >= 0.0)
+    max_step_delta = np.max(np.abs(np.diff(sample.ip_reference, axis=1)))
+    assert max_step_delta < 15000.0
+
+
+def test_shot_fragment_reference_requires_concrete_ip_reference() -> None:
+    cfg = load_experiment_config(SHOT_FRAGMENT_CONFIG)
+    with pytest.raises(ValueError, match="ip_reference"):
+        generate_reference_batch(
+            config=cfg.reference,
+            initial_ip=np.asarray([125000.0]),
+            initial_parameters=np.asarray([[1.4, 0.0, 0.55, 1.2, 0.2]]),
+            steps=10,
+            device="cpu",
+            seed=123,
+        )
+    ip_reference = np.linspace(125000.0, 130000.0, 11, dtype=float).reshape(1, -1)
+    batch = generate_reference_batch(
+        config=replace(cfg.reference, boundary=replace(cfg.reference.boundary, kind="static_initial_parameters")),
+        initial_ip=np.asarray([125000.0]),
+        initial_parameters=np.asarray([[1.4, 0.0, 0.55, 1.2, 0.2]]),
+        steps=10,
+        device="cpu",
+        seed=123,
+        ip_reference=ip_reference,
+    )
+    assert torch.allclose(batch.ip.cpu(), torch.as_tensor(ip_reference, dtype=torch.float64))
+
+
+def test_shot_fragment_env_reset_uses_sampled_reference() -> None:
+    cfg = load_experiment_config(SHOT_FRAGMENT_CONFIG)
+    cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=12))
+    env = TokamakMagneticControlEnv(cfg, batch_size=2, device="cpu", seed=44)
+    obs = env.reset()
+    assert torch.all(torch.isfinite(obs))
+    assert env.reference is not None
+    assert env.reference.ip.shape == (2, 13)
+    assert torch.all(env.reference.ip > 0.0)
+    assert env.reset_metadata
+    assert all("shot_id" in item and "shot_start_time_s" in item for item in env.reset_metadata)
+    for b, model in enumerate(env._cpu_models):
+        assert float(model.state.Ip) == pytest.approx(float(env.reference.ip[b, 0].item()))
+
+
 def test_ip_reference_inserts_hold_between_opposite_ramps() -> None:
     cfg = IpReferenceConfig(
         min=100000.0,
@@ -503,7 +563,7 @@ def test_small_training_writes_export(tmp_path: Path) -> None:
     trainer = Trainer(cfg, device="cpu", output_dir=tmp_path)
     result = trainer.train()
     assert result["updates"] > 0
-    assert (tmp_path / "checkpoints" / "final.pt").exists()
+    assert not (tmp_path / "checkpoints" / "final.pt").exists()
     assert (tmp_path / "exports" / "final_actor" / "policy_weights.npz").exists()
     assert (tmp_path / "losses.csv").exists()
     assert (tmp_path / "reward_components.csv").exists()
@@ -523,7 +583,7 @@ def test_small_distributed_training_writes_export(tmp_path: Path) -> None:
     metrics = json.loads((tmp_path / "metrics.json").read_text())
     assert set(metrics["worker_rollout_counts"]) == {"0", "1"}
     assert sum(metrics["worker_rollout_counts"].values()) >= result["steps"]
-    assert (tmp_path / "checkpoints" / "final.pt").exists()
+    assert not (tmp_path / "checkpoints" / "final.pt").exists()
     assert (tmp_path / "exports" / "final_actor" / "policy_weights.npz").exists()
 
 
@@ -757,12 +817,12 @@ def test_export_metadata_records_update_count(tmp_path: Path) -> None:
 def test_training_checkpoint_resume_restores_replay_and_counters(tmp_path: Path) -> None:
     first_dir = tmp_path / "first"
     cfg = _small_config(first_dir)
-    cfg = replace(cfg, training=replace(cfg.training, steps=4, output_dir=first_dir, checkpoint_interval_steps=4, eval_interval_steps=1000))
+    cfg = replace(cfg, training=replace(cfg.training, steps=4, output_dir=first_dir, save_checkpoints=True, checkpoint_interval_steps=4, eval_interval_steps=1000))
     first = Trainer(cfg, device="cpu", output_dir=first_dir).train()
     checkpoint = first_dir / "checkpoints" / "final.pt"
     assert checkpoint.exists()
     second_dir = tmp_path / "second"
-    resumed_cfg = replace(cfg, training=replace(cfg.training, steps=6, output_dir=second_dir, checkpoint_interval_steps=6, eval_interval_steps=1000))
+    resumed_cfg = replace(cfg, training=replace(cfg.training, steps=6, output_dir=second_dir, save_checkpoints=True, checkpoint_interval_steps=6, eval_interval_steps=1000))
     resumed = Trainer(resumed_cfg, device="cpu", output_dir=second_dir, resume_checkpoint=checkpoint).train()
     assert resumed["start_step"] == 4
     assert resumed["steps"] == 6
@@ -822,6 +882,7 @@ def test_export_cli_rejects_obsolete_checkpoint(tmp_path: Path) -> None:
 def test_export_cli_writes_policy_bundle_from_valid_checkpoint(tmp_path: Path) -> None:
     train_dir = tmp_path / "train"
     cfg = _small_config(train_dir)
+    cfg = replace(cfg, training=replace(cfg.training, save_checkpoints=True))
     Trainer(cfg, device="cpu", output_dir=train_dir).train()
     export_dir = tmp_path / "manual_export"
     assert export_cli_main(["--checkpoint", str(train_dir / "checkpoints" / "final.pt"), "--out", str(export_dir)]) == 0
@@ -834,7 +895,7 @@ def test_export_cli_writes_policy_bundle_from_valid_checkpoint(tmp_path: Path) -
 def test_distributed_resume_fails_clearly_because_worker_envs_are_not_checkpointed(tmp_path: Path) -> None:
     first_dir = tmp_path / "first"
     cfg = _small_config(first_dir)
-    cfg = replace(cfg, training=replace(cfg.training, steps=4, output_dir=first_dir, checkpoint_interval_steps=4, eval_interval_steps=1000))
+    cfg = replace(cfg, training=replace(cfg.training, steps=4, output_dir=first_dir, save_checkpoints=True, checkpoint_interval_steps=4, eval_interval_steps=1000))
     Trainer(cfg, device="cpu", output_dir=first_dir).train()
     checkpoint = first_dir / "checkpoints" / "final.pt"
     dist_dir = tmp_path / "dist"
@@ -857,7 +918,9 @@ def test_distributed_resume_fails_clearly_because_worker_envs_are_not_checkpoint
 def test_evaluate_detailed_reports_physical_metrics(tmp_path: Path) -> None:
     cfg = _small_config(tmp_path)
     trainer = Trainer(cfg, device="cpu", output_dir=tmp_path)
-    metrics = trainer.evaluate_detailed(episodes=2, max_steps=4, policy="no_control")
+    metrics = trainer.evaluate_detailed(episodes=2, max_steps=4, policy="no_control", seed_offset=123456)
+    repeat = trainer.evaluate_detailed(episodes=2, max_steps=4, policy="no_control", seed_offset=123456)
+    holdout = trainer.evaluate_detailed(episodes=2, max_steps=4, policy="no_control", seed_offset=123457)
     assert "mean_return" in metrics
     assert "shape_error_mean_m" in metrics
     assert "shape_error_max_m" in metrics
@@ -882,6 +945,8 @@ def test_evaluate_detailed_reports_physical_metrics(tmp_path: Path) -> None:
     assert "boundary_found_late_min" in metrics
     assert "boundary_found_min" in metrics
     assert np.isfinite(metrics["mean_return"])
+    assert repeat["mean_return"] == pytest.approx(metrics["mean_return"])
+    assert np.isfinite(holdout["mean_return"])
 
 
 def test_mpo_e_step_keeps_uniform_weights_when_sampled_q_is_uniform() -> None:

@@ -50,7 +50,7 @@ class IpReferenceConfig:
     segment_count_min: int
     segment_count_max: int
     hold_probability: float
-    kind: Literal["segmented", "hold_reset"] = "segmented"
+    kind: Literal["segmented", "hold_reset", "shot_trapezoid_fragment"] = "segmented"
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +110,28 @@ class RandomizationConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class TrapezoidValueRanges:
+    start: Range
+    plateau: Range
+    end: Range
+
+
+@dataclass(frozen=True, slots=True)
+class ShotFragmentConfig:
+    kind: Literal["idealized_t15_trapezoid"] = "idealized_t15_trapezoid"
+    ip_a: TrapezoidValueRanges | None = None
+    pfc_currents: tuple[TrapezoidValueRanges, ...] = ()
+    sol_currents: tuple[TrapezoidValueRanges, ...] = ()
+    ramp_up_s: Range = field(default_factory=lambda: Range(0.25, 0.45))
+    hold_s: Range = field(default_factory=lambda: Range(0.25, 0.75))
+    ramp_down_s: Range = field(default_factory=lambda: Range(0.25, 0.55))
+    start_time_min_s: float = 0.0
+    start_time_max_s: float | None = None
+    trim_end_s: float = 0.02
+    corner_smoothing_s: float = 0.05
+
+
+@dataclass(frozen=True, slots=True)
 class SimConfig:
     config_path: Path
     initial_currents_path: Path | None
@@ -120,6 +142,7 @@ class SimConfig:
     initial_ranges: InitialRanges | None = None
     current_safety_limits: CurrentSafetyLimits | None = None
     action_scale: float = 1.0
+    shot_fragments: ShotFragmentConfig | None = None
     terminate_on_boundary_loss: bool = True
     terminate_on_current_limit: bool = False
     current_termination_over_limit_a: float = 0.0
@@ -163,6 +186,7 @@ class TrainingConfig:
     device: str = "auto"
     seed: int = 1
     output_dir: Path = Path("outputs/run")
+    save_checkpoints: bool = False
     checkpoint_interval_steps: int = 10000
     eval_interval_steps: int = 10000
     eval_episodes: int = 8
