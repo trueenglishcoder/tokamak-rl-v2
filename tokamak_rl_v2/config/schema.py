@@ -136,6 +136,7 @@ class SimConfig:
     project_actions_to_current_limits: bool = False
     current_projection_margin_fraction: float = 0.0
     action_projection_termination_rms: float = 0.05
+    terminate_on_action_projection: bool = False
 
 
 @dataclass(frozen=True, slots=True)

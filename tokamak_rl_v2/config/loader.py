@@ -176,6 +176,7 @@ def _sim(raw: Mapping[str, Any], base: Path) -> SimConfig:
         project_actions_to_current_limits=bool(raw.get("project_actions_to_current_limits", False)),
         current_projection_margin_fraction=float(raw.get("current_projection_margin_fraction", 0.0)),
         action_projection_termination_rms=float(raw.get("action_projection_termination_rms", 0.05)),
+        terminate_on_action_projection=bool(raw.get("terminate_on_action_projection", False)),
     )
 
 

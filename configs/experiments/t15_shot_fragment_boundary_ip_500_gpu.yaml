@@ -1,12 +1,12 @@
 {
-  "name": "t15_shot_fragment_boundary_ip_500",
+  "name": "t15_shot_fragment_boundary_ip_1000",
   "sim": {
     "config_path": "../../../tokamak-sim/configs/T15MD_new_data.toml",
     "initial_currents_path": null,
     "compute_backend": "gpu",
     "gpu_device": "cuda:0",
     "angles": 32,
-    "max_episode_steps": 500,
+    "max_episode_steps": 1000,
     "shot_fragments": {
       "kind": "idealized_t15_trapezoid",
       "ip_a": {
@@ -157,10 +157,11 @@
     "project_actions_to_current_limits": true,
     "current_projection_margin_fraction": 0.02,
     "action_projection_termination_rms": 0.05,
+    "terminate_on_action_projection": false,
     "terminate_on_boundary_loss": true
   },
   "reference": {
-    "duration_s": 0.5,
+    "duration_s": 1.0,
     "t_step": 0.001,
     "theta_count": 32,
     "seed": 11,
@@ -220,16 +221,16 @@
     "updates_per_rollout_chunk": 32
   },
   "training": {
-    "steps": 1000000,
+    "steps": 31250,
     "num_envs": 32,
     "device": "auto",
     "seed": 1,
-    "output_dir": "../../outputs/t15_shot_fragment_boundary_ip_500_gpu",
-    "save_checkpoints": false,
-    "checkpoint_interval_steps": 7813,
-    "eval_interval_steps": 7813,
+    "output_dir": "../../outputs/t15_shot_fragment_boundary_ip_1000_gpu",
+    "save_checkpoints": true,
+    "checkpoint_interval_steps": 3125,
+    "eval_interval_steps": 3125,
     "eval_episodes": 32,
-    "eval_max_steps": 500,
+    "eval_max_steps": 1000,
     "actor_workers": 1
   }
 }

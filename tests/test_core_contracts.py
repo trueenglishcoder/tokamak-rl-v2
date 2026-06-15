@@ -273,12 +273,23 @@ def test_current_safety_projection_prevents_next_step_over_limit() -> None:
     assert float(np.nanmax(comps["current_over_limit_a"])) == pytest.approx(0.0)
     assert float(np.nanmax(comps["current_usage_fraction"])) <= 0.9801
     assert float(np.nanmax(comps["action_projection_delta_rms"])) > 0.0
-    assert bool(result.terminated[0].item()) is True
-    assert float(np.nanmax(comps["terminated_action_projection"])) == pytest.approx(1.0)
+    assert bool(result.terminated[0].item()) is False
+    assert float(np.nanmax(comps["action_projection_violation"])) == pytest.approx(1.0)
+    assert float(np.nanmax(comps["terminated_action_projection"])) == pytest.approx(0.0)
     assert not torch.allclose(result.applied_action, torch.ones_like(result.applied_action))
     assert torch.allclose(env.previous_action, result.applied_action)
     assert env.normalization()["current_projection_enabled"] is True
     assert env.normalization()["action_projection_termination_rms"] == pytest.approx(0.05)
+    assert env.normalization()["terminate_on_action_projection"] is False
+
+    terminating_cfg = replace(cfg, sim=replace(cfg.sim, terminate_on_action_projection=True))
+    terminating_env = TokamakMagneticControlEnv(terminating_cfg, batch_size=1, device="cpu", seed=12)
+    terminating_env.reset()
+    terminating_env._cpu_models[0].state.pfc_currents[0] = 0.979 * float(terminating_env.current_limits[0].item())
+    terminating_result = terminating_env.step(torch.ones((1, terminating_env.action_dim), dtype=torch.float32))
+    terminating_comps = terminating_result.info["reward_components"]
+    assert bool(terminating_result.terminated[0].item()) is True
+    assert float(np.nanmax(terminating_comps["terminated_action_projection"])) == pytest.approx(1.0)
 
 
 def test_hold_reset_boundary_uses_observed_reset_boundary() -> None:
@@ -796,29 +807,61 @@ def test_config_loader_rejects_invalid_values(tmp_path: Path) -> None:
 def test_policy_pipeline_gates_require_learning_signals() -> None:
     actor_eval = {
         "boundary_found": 1.0,
+        "boundary_found_late_min": 1.0,
         "current_over_limit_a": 0.0,
+        "current_over_limit_a_max": 0.0,
+        "current_over_limit_a_late_max": 0.0,
         "shape_error_mean_m": 0.02,
+        "shape_error_mean_m_late": 0.02,
         "ip_error_a": 70000.0,
+        "ip_error_a_late": 70000.0,
         "action_rms": 0.02,
+        "mean_episode_completion": 1.0,
+        "min_episode_completion": 1.0,
+        "mean_episode_steps": 500.0,
+        "min_episode_steps": 500.0,
+        "action_projection_delta_rms": 0.0,
+        "action_projection_delta_rms_max": 0.0,
+        "action_projection_violation": 0.0,
+        "action_projection_violation_max": 0.0,
+        "terminated_action_projection": 0.0,
+        "terminated_action_projection_max": 0.0,
     }
-    no_control = {"ip_error_a": 100000.0}
+    no_control = {"ip_error_a": 100000.0, "ip_error_a_late": 100000.0}
     tail_losses = {"tail100.policy_weight_max": 0.06, "tail100.sampled_q_spread": 1.0e-4}
+    controller_rollout = {
+        "status": "ok",
+        "boundary_found_mean": 1.0,
+        "current_over_limit_a_max": 0.0,
+        "shape_error_mean_m": 0.02,
+        "shape_error_late_m": 0.02,
+        "ip_error_a": 30000.0,
+        "ip_error_late_a": 30000.0,
+    }
+    gate_kwargs = {
+        "action_samples": 20,
+        "min_boundary_found": 0.999,
+        "max_current_over_limit_a": 0.0,
+        "max_shape_error_m": 0.03,
+        "min_ip_improvement_frac": 0.25,
+        "min_ip_improvement_a": 20000.0,
+        "min_action_rms": 0.005,
+        "max_action_rms": 0.5,
+        "min_episode_completion": 0.95,
+        "max_action_projection_violation_fraction": 0.0,
+        "max_action_projection_delta_rms": 0.05,
+        "min_policy_weight_extra": 1.0e-4,
+        "min_sampled_q_spread": 1.0e-8,
+        "require_controller_rollout": True,
+        "controller_rollout": controller_rollout,
+        "max_controller_shape_error_m": 0.03,
+        "max_controller_ip_error_a": 40000.0,
+    }
     gates = evaluate_policy_gates(
         actor_eval=actor_eval,
         no_control=no_control,
         tail_losses=tail_losses,
-        action_samples=20,
-        min_boundary_found=0.999,
-        max_current_over_limit_a=0.0,
-        max_shape_error_m=0.03,
-        min_ip_improvement_frac=0.25,
-        min_ip_improvement_a=20000.0,
-        min_action_rms=0.005,
-        max_action_rms=0.5,
-        min_policy_weight_extra=1.0e-4,
-        min_sampled_q_spread=1.0e-8,
-        require_controller_rollout=True,
-        controller_rollout={"status": "ok"},
+        **gate_kwargs,
     )
     assert gates["passed"] is True
 
@@ -826,18 +869,7 @@ def test_policy_pipeline_gates_require_learning_signals() -> None:
         actor_eval=dict(actor_eval, action_rms=0.0),
         no_control=no_control,
         tail_losses={"tail100.policy_weight_max": 0.05, "tail100.sampled_q_spread": 0.0},
-        action_samples=20,
-        min_boundary_found=0.999,
-        max_current_over_limit_a=0.0,
-        max_shape_error_m=0.03,
-        min_ip_improvement_frac=0.25,
-        min_ip_improvement_a=20000.0,
-        min_action_rms=0.005,
-        max_action_rms=0.5,
-        min_policy_weight_extra=1.0e-4,
-        min_sampled_q_spread=1.0e-8,
-        require_controller_rollout=True,
-        controller_rollout={"status": "ok"},
+        **gate_kwargs,
     )
     reasons = {check["name"]: check["passed"] for check in stalled["checks"]}
     assert stalled["passed"] is False
@@ -849,18 +881,7 @@ def test_policy_pipeline_gates_require_learning_signals() -> None:
         actor_eval=dict(actor_eval, current_over_limit_a=0.0, current_over_limit_a_max=1.0, current_over_limit_fraction=0.01),
         no_control=no_control,
         tail_losses=tail_losses,
-        action_samples=20,
-        min_boundary_found=0.999,
-        max_current_over_limit_a=0.0,
-        max_shape_error_m=0.03,
-        min_ip_improvement_frac=0.25,
-        min_ip_improvement_a=20000.0,
-        min_action_rms=0.005,
-        max_action_rms=0.5,
-        min_policy_weight_extra=1.0e-4,
-        min_sampled_q_spread=1.0e-8,
-        require_controller_rollout=True,
-        controller_rollout={"status": "ok"},
+        **gate_kwargs,
     )
     spike_reasons = {check["name"]: check["passed"] for check in current_spike["checks"]}
     assert spike_reasons["current_limit"] is False
@@ -869,22 +890,34 @@ def test_policy_pipeline_gates_require_learning_signals() -> None:
         actor_eval=dict(actor_eval, shape_error_mean_m_late=0.05, current_over_limit_a_late_max=0.0, boundary_found_late_min=1.0, ip_error_a_late=90000.0),
         no_control=dict(no_control, ip_error_a_late=100000.0),
         tail_losses=tail_losses,
-        action_samples=20,
-        min_boundary_found=0.999,
-        max_current_over_limit_a=0.0,
-        max_shape_error_m=0.03,
-        min_ip_improvement_frac=0.25,
-        min_ip_improvement_a=20000.0,
-        min_action_rms=0.005,
-        max_action_rms=0.5,
-        min_policy_weight_extra=1.0e-4,
-        min_sampled_q_spread=1.0e-8,
-        require_controller_rollout=True,
-        controller_rollout={"status": "ok"},
+        **gate_kwargs,
     )
     late_reasons = {check["name"]: check["passed"] for check in late_drift["checks"]}
     assert late_reasons["shape_error_late"] is False
     assert late_reasons["ip_improvement_late"] is False
+
+    fake_short_eval = evaluate_policy_gates(
+        actor_eval=dict(actor_eval, mean_episode_completion=0.003, min_episode_completion=0.002, action_projection_violation=0.3, action_projection_violation_max=1.0, terminated_action_projection=0.3, terminated_action_projection_max=1.0),
+        no_control=no_control,
+        tail_losses=tail_losses,
+        **gate_kwargs,
+    )
+    fake_reasons = {check["name"]: check["passed"] for check in fake_short_eval["checks"]}
+    assert fake_short_eval["passed"] is False
+    assert fake_reasons["episode_completion"] is False
+    assert fake_reasons["action_projection_violation"] is False
+    assert fake_reasons["action_projection_termination"] is False
+
+    bad_controller = evaluate_policy_gates(
+        actor_eval=actor_eval,
+        no_control=no_control,
+        tail_losses=tail_losses,
+        **{**gate_kwargs, "controller_rollout": dict(controller_rollout, shape_error_mean_m=0.12, shape_error_late_m=0.21, ip_error_a=100000.0, ip_error_late_a=130000.0)},
+    )
+    controller_reasons = {check["name"]: check["passed"] for check in bad_controller["checks"]}
+    assert bad_controller["passed"] is False
+    assert controller_reasons["controller_shape_error"] is False
+    assert controller_reasons["controller_ip_error"] is False
 
 
 def test_experiment_configs_use_neutral_output_names() -> None:
@@ -1010,6 +1043,10 @@ def test_evaluate_detailed_reports_physical_metrics(tmp_path: Path) -> None:
     repeat = trainer.evaluate_detailed(episodes=2, max_steps=4, policy="no_control", seed_offset=123456)
     holdout = trainer.evaluate_detailed(episodes=2, max_steps=4, policy="no_control", seed_offset=123457)
     assert "mean_return" in metrics
+    assert "mean_episode_steps" in metrics
+    assert "min_episode_steps" in metrics
+    assert "mean_episode_completion" in metrics
+    assert "min_episode_completion" in metrics
     assert "shape_error_mean_m" in metrics
     assert "shape_error_max_m" in metrics
     assert "ip_error_a" in metrics
@@ -1032,7 +1069,9 @@ def test_evaluate_detailed_reports_physical_metrics(tmp_path: Path) -> None:
     assert "boundary_found" in metrics
     assert "boundary_found_late_min" in metrics
     assert "boundary_found_min" in metrics
+    assert "action_projection_violation" in metrics
     assert np.isfinite(metrics["mean_return"])
+    assert 0.0 < metrics["mean_episode_completion"] <= 1.0
     assert repeat["mean_return"] == pytest.approx(metrics["mean_return"])
     assert np.isfinite(holdout["mean_return"])
 
@@ -1239,4 +1278,3 @@ def test_actor_update_changes_policy_parameters_on_sequence_batch() -> None:
     assert metrics.actor_param_delta_norm > 0.0
     assert np.isfinite(metrics.sampled_q_spread)
     assert np.isfinite(metrics.policy_weight_entropy)
-

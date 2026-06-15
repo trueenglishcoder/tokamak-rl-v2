@@ -356,6 +356,7 @@ class Trainer:
         env = TokamakMagneticControlEnv(self.config, batch_size=batch_size, device=self.device, seed=int(self.config.training.seed) + int(seed_offset))
         obs = env.reset()
         returns: list[float] = []
+        episode_steps: list[int] = []
         totals = torch.zeros((env.batch_size,), dtype=torch.float32, device=self.device)
         steps = torch.zeros((env.batch_size,), dtype=torch.long, device=self.device)
         component_values: dict[str, list[float]] = {}
@@ -390,16 +391,26 @@ class Trainer:
             if bool(torch.any(done).item()):
                 done_cpu = done.detach().cpu().numpy().astype(bool)
                 totals_cpu = totals.detach().cpu().numpy().astype(float)
+                steps_cpu = steps.detach().cpu().numpy().astype(int)
                 for index, is_done in enumerate(done_cpu):
                     if is_done and len(returns) < int(episodes):
                         returns.append(float(totals_cpu[index]))
+                        episode_steps.append(int(steps_cpu[index]))
                 totals = torch.where(done, torch.zeros_like(totals), totals)
                 steps = torch.where(done, torch.zeros_like(steps), steps)
                 obs = env.reset_indices(done) if len(returns) < int(episodes) else out.obs
             else:
                 obs = out.obs
         selected_returns = np.asarray(returns[: int(episodes)], dtype=float)
+        selected_steps = np.asarray(episode_steps[: int(episodes)], dtype=float)
+        max_steps_f = max(float(max_steps), 1.0)
         metrics: dict[str, float] = {"mean_return": float(np.nanmean(selected_returns)) if selected_returns.size else float("nan")}
+        if selected_steps.size:
+            completion = selected_steps / max_steps_f
+            metrics["mean_episode_steps"] = float(np.nanmean(selected_steps))
+            metrics["min_episode_steps"] = float(np.nanmin(selected_steps))
+            metrics["mean_episode_completion"] = float(np.nanmean(completion))
+            metrics["min_episode_completion"] = float(np.nanmin(completion))
         max_metrics = {
             "shape_error_mean_m",
             "shape_error_max_m",
@@ -416,6 +427,7 @@ class Trainer:
             "ip_loss",
             "action_projection_delta_rms",
             "action_projection_delta_max",
+            "action_projection_violation",
             "terminated_boundary",
             "terminated_current",
             "terminated_action_projection",
@@ -455,12 +467,18 @@ class Trainer:
         score = -float(metrics.get("physical_cost_late", metrics.get("physical_cost", float("inf"))))
         current_over = float(metrics.get("current_over_limit_a_late_max", metrics.get("current_over_limit_a_max", metrics.get("current_over_limit_a", 0.0))))
         boundary_found = float(metrics.get("boundary_found_late_min", metrics.get("boundary_found_min", metrics.get("boundary_found", 1.0))))
+        episode_completion = float(metrics.get("min_episode_completion", metrics.get("mean_episode_completion", 1.0)))
+        projection_violation = float(metrics.get("action_projection_violation_max", metrics.get("terminated_action_projection_max", 0.0)))
         shape_drift = float(metrics.get("shape_error_mean_m_late_minus_early", 0.0))
         ip_drift = float(metrics.get("ip_error_a_late_minus_early", 0.0))
         if np.isfinite(current_over) and current_over > 0.0:
             score -= 1.0e6 + min(current_over, 1.0e6)
         if np.isfinite(boundary_found) and boundary_found < 0.999:
             score -= 1.0e6 * (0.999 - boundary_found)
+        if np.isfinite(episode_completion) and episode_completion < 0.95:
+            score -= 1.0e6 * (0.95 - episode_completion)
+        if np.isfinite(projection_violation) and projection_violation > 0.0:
+            score -= 1.0e6 * projection_violation
         if np.isfinite(shape_drift) and shape_drift > 0.0:
             score -= 1000.0 * shape_drift
         if np.isfinite(ip_drift) and ip_drift > 0.0:

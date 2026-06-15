@@ -11,8 +11,8 @@ set -euo pipefail
 cd /scratch/$USER/tokamak
 
 export POLICY_CONFIG=${POLICY_CONFIG:-configs/experiments/t15_shot_fragment_boundary_ip_500_gpu.yaml}
-export TRAIN_OUTPUT=${TRAIN_OUTPUT:-outputs/t15_shot_fragment_policy_1gpu_${SLURM_JOB_ID:-manual}}
-export RUN_NAME=${RUN_NAME:-t15_shot_fragment_policy_1gpu_${SLURM_JOB_ID:-manual}}
+export TRAIN_OUTPUT=${TRAIN_OUTPUT:-outputs/t15_shot_fragment_policy_1gpu_1000_${SLURM_JOB_ID:-manual}}
+export RUN_NAME=${RUN_NAME:-t15_shot_fragment_policy_1gpu_1000_${SLURM_JOB_ID:-manual}}
 export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-tokamak-rl-v2-shot-fragment-1gpu-${SLURM_JOB_ID:-manual}}
 export WANDB_MODE=${WANDB_MODE:-online}
 export WANDB__SERVICE_WAIT=${WANDB__SERVICE_WAIT:-30}
@@ -20,10 +20,10 @@ export WANDB__SERVICE_WAIT=${WANDB__SERVICE_WAIT:-30}
 export NUM_ENVS=${NUM_ENVS:-32}
 export TRAIN_ENV_STEPS=${TRAIN_ENV_STEPS:-1000000}
 export TRAIN_DECISION_STEPS=$(( (TRAIN_ENV_STEPS + NUM_ENVS - 1) / NUM_ENVS ))
-export EVAL_ENV_STEPS=${EVAL_ENV_STEPS:-250000}
+export EVAL_ENV_STEPS=${EVAL_ENV_STEPS:-100000}
 export EVAL_DECISION_STEPS=$(( (EVAL_ENV_STEPS + NUM_ENVS - 1) / NUM_ENVS ))
-export SAVE_CHECKPOINTS=${SAVE_CHECKPOINTS:-0}
-export CHECKPOINT_ENV_STEPS=${CHECKPOINT_ENV_STEPS:-250000}
+export SAVE_CHECKPOINTS=${SAVE_CHECKPOINTS:-1}
+export CHECKPOINT_ENV_STEPS=${CHECKPOINT_ENV_STEPS:-100000}
 export CHECKPOINT_DECISION_STEPS=$(( (CHECKPOINT_ENV_STEPS + NUM_ENVS - 1) / NUM_ENVS ))
 export REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-256}
 
@@ -95,7 +95,7 @@ PYCUDA
       --wandb-name ${RUN_NAME} \
       --wandb-group ${RUN_NAME} \
       --wandb-mode ${WANDB_MODE} \
-      --controller-rollout-steps 500 \
+      --controller-rollout-steps 1000 \
       --allow-failed-gates
 
     echo "train_policy_pipeline completed at $(date -Is)"

@@ -87,10 +87,15 @@ def main(argv: list[str] | None = None) -> int:
             min_ip_improvement_a=float(args.min_ip_improvement_a),
             min_action_rms=float(args.min_action_rms),
             max_action_rms=float(args.max_action_rms),
+            min_episode_completion=float(args.min_episode_completion),
+            max_action_projection_violation_fraction=float(args.max_action_projection_violation_fraction),
+            max_action_projection_delta_rms=float(args.max_action_projection_delta_rms),
             min_policy_weight_extra=float(args.min_policy_weight_extra),
             min_sampled_q_spread=float(args.min_sampled_q_spread),
             require_controller_rollout=not bool(args.skip_controller_rollout_gate),
             controller_rollout=rollout_report,
+            max_controller_shape_error_m=float(args.max_controller_shape_error_m),
+            max_controller_ip_error_a=float(args.max_controller_ip_error_a),
         )
         report = {
             "status": "passed" if gate_report["passed"] else "failed_gates",
@@ -209,10 +214,15 @@ def evaluate_policy_gates(
     min_ip_improvement_a: float,
     min_action_rms: float,
     max_action_rms: float,
+    min_episode_completion: float,
+    max_action_projection_violation_fraction: float,
+    max_action_projection_delta_rms: float,
     min_policy_weight_extra: float,
     min_sampled_q_spread: float,
     require_controller_rollout: bool,
     controller_rollout: Mapping[str, object],
+    max_controller_shape_error_m: float,
+    max_controller_ip_error_a: float,
 ) -> dict[str, object]:
     checks: list[dict[str, object]] = []
 
@@ -279,6 +289,40 @@ def evaluate_policy_gates(
     add("action_rms_min", _finite(action_rms) and action_rms >= min_action_rms, value=action_rms, threshold=f">= {min_action_rms:g}")
     add("action_rms_max", _finite(action_rms) and action_rms < max_action_rms, value=action_rms, threshold=f"< {max_action_rms:g}")
 
+    mean_completion = _metric(actor_eval, "mean_episode_completion", default=_metric(actor_eval, "episode_progress"))
+    min_completion = _metric(actor_eval, "min_episode_completion", default=mean_completion)
+    add(
+        "episode_completion",
+        _finite(min_completion) and min_completion >= min_episode_completion,
+        value={"mean": mean_completion, "min": min_completion, "mean_steps": _metric(actor_eval, "mean_episode_steps"), "min_steps": _metric(actor_eval, "min_episode_steps")},
+        threshold=f"min >= {min_episode_completion:g}",
+    )
+
+    projection_delta = _metric(actor_eval, "action_projection_delta_rms")
+    projection_delta_max = _metric(actor_eval, "action_projection_delta_rms_max", default=projection_delta)
+    add(
+        "action_projection_delta",
+        _finite(projection_delta) and projection_delta <= max_action_projection_delta_rms,
+        value={"mean_rms": projection_delta, "max_rms": projection_delta_max},
+        threshold=f"mean RMS <= {max_action_projection_delta_rms:g}",
+    )
+    projection_violation = _metric(actor_eval, "action_projection_violation", default=_metric(actor_eval, "terminated_action_projection", default=0.0))
+    projection_violation_max = _metric(actor_eval, "action_projection_violation_max", default=_metric(actor_eval, "terminated_action_projection_max", default=projection_violation))
+    add(
+        "action_projection_violation",
+        _finite(projection_violation) and projection_violation <= max_action_projection_violation_fraction and (max_action_projection_violation_fraction > 0.0 or projection_violation_max <= 0.0),
+        value={"fraction": projection_violation, "max": projection_violation_max},
+        threshold=f"fraction <= {max_action_projection_violation_fraction:g}",
+    )
+    projection_terminated = _metric(actor_eval, "terminated_action_projection", default=0.0)
+    projection_terminated_max = _metric(actor_eval, "terminated_action_projection_max", default=projection_terminated)
+    add(
+        "action_projection_termination",
+        _finite(projection_terminated) and projection_terminated <= 0.0 and projection_terminated_max <= 0.0,
+        value={"fraction": projection_terminated, "max": projection_terminated_max},
+        threshold="0",
+    )
+
     policy_weight_max = _metric(tail_losses, "tail100.policy_weight_max")
     uniform = 1.0 / max(int(action_samples), 1)
     policy_weight_threshold = uniform + float(min_policy_weight_extra)
@@ -290,6 +334,16 @@ def evaluate_policy_gates(
     if require_controller_rollout:
         status = str(controller_rollout.get("status", "missing"))
         add("controller_rollout", status == "ok", value=status, threshold="ok")
+        controller_boundary = _metric(controller_rollout, "boundary_found_mean")
+        add("controller_boundary_found", status == "ok" and _finite(controller_boundary) and controller_boundary >= min_boundary_found, value=controller_boundary, threshold=f">= {min_boundary_found:g}")
+        controller_current = _metric(controller_rollout, "current_over_limit_a_max")
+        add("controller_current_limit", status == "ok" and _finite(controller_current) and controller_current <= max_current_over_limit_a, value=controller_current, threshold=f"<= {max_current_over_limit_a:g} A")
+        controller_shape = _metric(controller_rollout, "shape_error_mean_m")
+        controller_shape_late = _metric(controller_rollout, "shape_error_late_m", default=controller_shape)
+        add("controller_shape_error", status == "ok" and _finite(controller_shape) and controller_shape <= max_controller_shape_error_m and _finite(controller_shape_late) and controller_shape_late <= max_controller_shape_error_m, value={"mean_m": controller_shape, "late_m": controller_shape_late}, threshold=f"mean/late <= {max_controller_shape_error_m:g} m")
+        controller_ip = _metric(controller_rollout, "ip_error_a")
+        controller_ip_late = _metric(controller_rollout, "ip_error_late_a", default=controller_ip)
+        add("controller_ip_error", status == "ok" and _finite(controller_ip) and controller_ip <= max_controller_ip_error_a and _finite(controller_ip_late) and controller_ip_late <= max_controller_ip_error_a, value={"mean_a": controller_ip, "late_a": controller_ip_late}, threshold=f"mean/late <= {max_controller_ip_error_a:g} A")
 
     return {"passed": all(bool(check["passed"]) for check in checks), "checks": checks}
 
@@ -529,6 +583,11 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--min-ip-improvement-a", type=float, default=20000.0)
     ap.add_argument("--min-action-rms", type=float, default=0.005)
     ap.add_argument("--max-action-rms", type=float, default=0.5)
+    ap.add_argument("--min-episode-completion", type=float, default=0.95)
+    ap.add_argument("--max-action-projection-violation-fraction", type=float, default=0.0)
+    ap.add_argument("--max-action-projection-delta-rms", type=float, default=0.05)
+    ap.add_argument("--max-controller-shape-error-m", type=float, default=0.03)
+    ap.add_argument("--max-controller-ip-error-a", type=float, default=40000.0)
     ap.add_argument("--min-policy-weight-extra", type=float, default=1.0e-4)
     ap.add_argument("--min-sampled-q-spread", type=float, default=1.0e-8)
     ap.add_argument("--controller-rollout-steps", type=int, default=8)
