@@ -76,7 +76,7 @@ def test_critic_reads_normalized_env_actions_without_extra_squash() -> None:
     assert not torch.allclose(lstm_input[3:], torch.tanh(action[0]))
 
 
-def test_physical_reward_tracks_errors_without_action_cost() -> None:
+def test_tcv_style_reward_tracks_errors_without_action_cost() -> None:
     reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0), control_rate_hz=1000.0)
     ref = torch.zeros((2, 32, 2), dtype=torch.float32)
     boundary = ref.clone()
@@ -102,6 +102,7 @@ def test_physical_reward_tracks_errors_without_action_cost() -> None:
     assert active.reward[0] > zero.reward[1]
     assert float(active.reward[0].item()) == pytest.approx(float(zero.reward[0].item()))
     assert float(active.components["action_rms"][0].item()) > float(zero.components["action_rms"][0].item())
+    assert float(zero.components["combined_quality"][0].item()) == pytest.approx(1.0)
 
 
 def test_reward_components_remain_finite_when_boundary_is_missing() -> None:
@@ -145,8 +146,9 @@ def test_physical_reward_makes_missing_boundary_expensive() -> None:
         terminated=torch.zeros((1,), dtype=torch.bool),
     )
     assert float(rb.components["shape_error_mean_m"].item()) == pytest.approx(0.1)
-    assert float(rb.components["shape_loss"].item()) > 3.0
-    assert float(rb.components["physical_cost"].item()) > 6.0
+    assert float(rb.components["shape_quality"].item()) < 0.05
+    assert float(rb.components["shape_loss"].item()) > 0.95
+    assert float(rb.components["physical_cost"].item()) > 0.80
 
 
 def test_physical_reward_improves_when_tracking_errors_improve() -> None:
@@ -172,10 +174,37 @@ def test_physical_reward_improves_when_tracking_errors_improve() -> None:
     assert rb.reward[0] > rb.reward[1]
     assert rb.components["shape_loss"][0] < rb.components["shape_loss"][1]
     assert rb.components["ip_loss"][0] < rb.components["ip_loss"][1]
+    assert rb.components["shape_quality"][0] > rb.components["shape_quality"][1]
+    assert rb.components["ip_quality"][0] > rb.components["ip_quality"][1]
+
+
+def test_tcv_style_reward_worst_boundary_point_matters() -> None:
+    reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0), control_rate_hz=1000.0)
+    ref = torch.zeros((2, 32, 2), dtype=torch.float32)
+    boundary = ref.clone()
+    boundary[0, :, 0] = 0.01
+    boundary[1, 0, 0] = 0.10
+    action = torch.zeros((2, 9), dtype=torch.float32)
+    rb = reward_fn(
+        ip=torch.full((2,), 200000.0),
+        ip_ref=torch.full((2,), 200000.0),
+        boundary_points=boundary,
+        reference_points=ref,
+        action=action,
+        previous_action=action,
+        current_over_limit_a=torch.zeros((2,), dtype=torch.float32),
+        current_usage_fraction=torch.full((2,), 0.5, dtype=torch.float32),
+        current_margin_fraction=torch.full((2,), 0.5, dtype=torch.float32),
+        derivative_usage=torch.zeros((2,), dtype=torch.float32),
+        boundary_found=torch.ones((2,), dtype=torch.bool),
+        terminated=torch.zeros((2,), dtype=torch.bool),
+    )
+    assert rb.components["shape_error_mean_m"][1] < rb.components["shape_error_mean_m"][0]
+    assert rb.components["shape_quality"][1] < rb.components["shape_quality"][0]
 
 
 def test_physical_reward_terminal_penalty_applies_to_hard_failures() -> None:
-    reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0, terminal_reward=-20.0), control_rate_hz=1000.0)
+    reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0, terminal_reward=-100.0), control_rate_hz=1000.0)
     ref = torch.zeros((2, 32, 2), dtype=torch.float32)
     action = torch.zeros((2, 9), dtype=torch.float32)
     rb = reward_fn(
@@ -193,10 +222,10 @@ def test_physical_reward_terminal_penalty_applies_to_hard_failures() -> None:
         terminated=torch.tensor([False, True], dtype=torch.bool),
     )
     assert rb.reward[1] < rb.reward[0]
-    assert float((rb.reward[0] - rb.reward[1]).item()) == pytest.approx(20.0)
+    assert float((rb.reward[0] - rb.reward[1]).item()) == pytest.approx(100.0)
 
 
-def test_physical_reward_keeps_actuator_terms_as_diagnostics_only() -> None:
+def test_tcv_style_reward_penalizes_current_usage() -> None:
     reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0), control_rate_hz=1000.0)
     ref = torch.zeros((2, 32, 2), dtype=torch.float32)
     action = torch.zeros((2, 9), dtype=torch.float32)
@@ -215,8 +244,11 @@ def test_physical_reward_keeps_actuator_terms_as_diagnostics_only() -> None:
         boundary_found=torch.ones((2,), dtype=torch.bool),
         terminated=torch.zeros((2,), dtype=torch.bool),
     )
-    assert float(rb.reward[0].item()) == pytest.approx(float(rb.reward[1].item()))
+    assert rb.reward[0] > rb.reward[1]
     assert rb.components["current_over_limit_a"][1] > rb.components["current_over_limit_a"][0]
+    assert rb.components["current_quality"][0] > 0.99
+    assert rb.components["current_quality"][1] < 0.01
+    assert rb.components["current_limit_loss"][1] > rb.components["current_limit_loss"][0]
     assert rb.components["derivative_usage"][1] > rb.components["derivative_usage"][0]
     assert rb.components["max_abs_action"][1] > rb.components["max_abs_action"][0]
     for removed in ("current_margin_loss", "derivative_loss", "action_saturation_loss", "delta_action_loss", "time_weight"):
@@ -258,21 +290,73 @@ def test_action_scale_caps_physical_derivative_usage() -> None:
     assert np.allclose(np.asarray(env.normalization()["derivative_scale"]), env.raw_derivative_limits.detach().cpu().numpy() * 0.25)
 
 
-def test_current_limit_violation_is_reported_and_terminates() -> None:
+def test_small_current_limit_violation_gets_grace_before_termination() -> None:
     cfg = load_experiment_config(CONFIG)
-    cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=4, terminate_on_current_limit=True))
+    cfg = replace(
+        cfg,
+        sim=replace(
+            cfg.sim,
+            compute_backend="cpu",
+            max_episode_steps=16,
+            terminate_on_current_limit=True,
+            current_termination_over_limit_a=5000.0,
+            current_termination_grace_steps=3,
+            current_hard_termination_fraction=1.10,
+        ),
+    )
     env = TokamakMagneticControlEnv(cfg, batch_size=1, device="cpu", seed=12)
     env.reset()
     limit = float(env.current_limits[0].item())
-    env._cpu_models[0].state.pfc_currents[0] = 1.01 * limit
-    result = env.step(torch.ones((1, env.action_dim), dtype=torch.float32))
+    action = torch.zeros((1, env.action_dim), dtype=torch.float32)
+    env._cpu_models[0].state.pfc_currents[0] = 1.04 * limit
+    first = env.step(action)
+    assert bool(first.terminated[0].item()) is False
+    assert int(env.current_over_limit_steps[0].item()) == 1
+    env._cpu_models[0].state.pfc_currents[0] = 0.90 * limit
+    recovered = env.step(action)
+    assert bool(recovered.terminated[0].item()) is False
+    assert int(env.current_over_limit_steps[0].item()) == 0
+
+    for _ in range(2):
+        env._cpu_models[0].state.pfc_currents[0] = 1.04 * limit
+        result = env.step(action)
+    comps = result.info["reward_components"]
+    assert bool(result.terminated[0].item()) is False
+    assert float(np.nanmax(comps["terminated_current"])) == pytest.approx(0.0)
+    env._cpu_models[0].state.pfc_currents[0] = 1.04 * limit
+    result = env.step(action)
     comps = result.info["reward_components"]
     assert float(np.nanmax(comps["current_over_limit_a"])) > 0.0
     assert float(np.nanmax(comps["current_usage_fraction"])) > 1.0
     assert bool(result.terminated[0].item()) is True
     assert float(np.nanmax(comps["terminated_current"])) == pytest.approx(1.0)
-    assert torch.allclose(result.applied_action, torch.ones_like(result.applied_action))
+    assert float(np.nanmax(comps["terminated_current_grace"])) == pytest.approx(1.0)
+    assert torch.allclose(result.applied_action, action)
     assert torch.allclose(env.previous_action, result.applied_action)
+
+
+def test_severe_current_limit_violation_terminates_immediately() -> None:
+    cfg = load_experiment_config(CONFIG)
+    cfg = replace(
+        cfg,
+        sim=replace(
+            cfg.sim,
+            compute_backend="cpu",
+            max_episode_steps=4,
+            terminate_on_current_limit=True,
+            current_termination_over_limit_a=5000.0,
+            current_termination_grace_steps=8,
+            current_hard_termination_fraction=1.05,
+        ),
+    )
+    env = TokamakMagneticControlEnv(cfg, batch_size=1, device="cpu", seed=12)
+    env.reset()
+    limit = float(env.current_limits[0].item())
+    env._cpu_models[0].state.pfc_currents[0] = 1.06 * limit
+    result = env.step(torch.zeros((1, env.action_dim), dtype=torch.float32))
+    comps = result.info["reward_components"]
+    assert bool(result.terminated[0].item()) is True
+    assert float(np.nanmax(comps["terminated_current_hard"])) == pytest.approx(1.0)
 
 
 def test_hold_reset_boundary_uses_observed_reset_boundary() -> None:
@@ -382,6 +466,27 @@ def test_replay_start_new_episodes_prevents_external_reset_crossing() -> None:
     )
 
     assert not replay.ready(sequence_length=3, batch_size=1)
+
+
+def test_replay_samples_short_terminal_episodes_with_padding_mask() -> None:
+    replay = FIFOSequenceReplay(capacity_episodes=4, max_episode_steps=8, active_envs=1, obs_dim=1, action_dim=1, device="cpu")
+    for t in range(3):
+        replay.add_batch(
+            torch.tensor([[float(t)]]),
+            torch.tensor([[0.1 * t]]),
+            torch.tensor([float(t)]),
+            torch.ones((1,)),
+            torch.tensor([[float(t + 1)]]),
+            torch.tensor([t == 2], dtype=torch.bool),
+        )
+
+    assert not replay.ready(sequence_length=6, batch_size=2)
+    assert replay.ready(sequence_length=6, batch_size=2, min_sequence_length=3)
+    batch = replay.sample(batch_size=2, sequence_length=6, min_sequence_length=3)
+    assert batch.obs.shape == (2, 6, 1)
+    assert torch.all(batch.mask[:, :3] == 1.0)
+    assert torch.all(batch.mask[:, 3:] == 0.0)
+    assert torch.all(batch.done[:, 2])
 
 
 def test_environment_reset_indices_only_resets_done_slot() -> None:
@@ -642,6 +747,7 @@ def test_small_training_writes_export(tmp_path: Path) -> None:
     assert (tmp_path / "exports" / "final_actor" / "policy_weights.npz").exists()
     assert (tmp_path / "losses.csv").exists()
     assert (tmp_path / "reward_components.csv").exists()
+    assert (tmp_path / "replay_health.csv").exists()
 
 
 def test_small_distributed_training_writes_export(tmp_path: Path) -> None:
@@ -660,6 +766,7 @@ def test_small_distributed_training_writes_export(tmp_path: Path) -> None:
     assert sum(metrics["worker_rollout_counts"].values()) >= result["steps"]
     assert not (tmp_path / "checkpoints" / "final.pt").exists()
     assert (tmp_path / "exports" / "final_actor" / "policy_weights.npz").exists()
+    assert (tmp_path / "replay_health.csv").exists()
 
 
 def test_distributed_training_requires_enough_actor_devices(tmp_path: Path) -> None:
@@ -708,6 +815,13 @@ def test_config_loader_rejects_invalid_values(tmp_path: Path) -> None:
     bad_mode.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(ValueError, match="mode"):
         load_experiment_config(bad_mode)
+
+    data = json.loads(CONFIG.read_text())
+    data["reward"]["shape_max_bad_m"] = 0.08
+    bad_shape_max = tmp_path / "bad_shape_max.json"
+    bad_shape_max.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="stale keys.*shape_max_bad_m"):
+        load_experiment_config(bad_shape_max)
 
     data = json.loads(CONFIG.read_text())
     data["reward"]["current_margin_start_fraction"] = 0.75
@@ -1029,6 +1143,9 @@ def test_evaluate_detailed_reports_physical_metrics(tmp_path: Path) -> None:
     assert "max_abs_action_max" in metrics
     assert "physical_cost" in metrics
     assert "physical_cost_late" in metrics
+    assert "combined_quality" in metrics
+    assert "combined_quality_min" in metrics
+    assert "current_limit_loss" in metrics
     assert "shape_error_mean_m_late" in metrics
     assert "shape_error_mean_m_late_minus_early" in metrics
     assert "ip_error_a_late" in metrics
@@ -1132,6 +1249,37 @@ def test_mpo_e_step_solves_batch_dual_for_distinct_sampled_q() -> None:
     assert metrics[10] < 1.0
     assert metrics[11] > 0.0
     assert metrics[12] > 0.0
+
+
+def test_mpo_update_accepts_padded_short_terminal_sequence() -> None:
+    torch.manual_seed(781)
+    obs_dim = 5
+    action_dim = 2
+    actor = FeedForwardGaussianActor(obs_dim=obs_dim, action_dim=action_dim, hidden_dim=8)
+    critic = RecurrentQCritic(obs_dim=obs_dim, action_dim=action_dim, lstm_hidden_dim=8, mlp_hidden_dim=8)
+    target_actor = FeedForwardGaussianActor(obs_dim=obs_dim, action_dim=action_dim, hidden_dim=8)
+    target_critic = RecurrentQCritic(obs_dim=obs_dim, action_dim=action_dim, lstm_hidden_dim=8, mlp_hidden_dim=8)
+    learner = MaximumAPosterioriPolicyOptimiser(
+        actor=actor,
+        critic=critic,
+        target_actor=target_actor,
+        target_critic=target_critic,
+        config=LearnerConfig(batch_size=2, unroll_length=6, action_samples=4),
+        device="cpu",
+    )
+    batch = SequenceBatch(
+        obs=torch.randn((2, 6, obs_dim)),
+        action=torch.zeros((2, 6, action_dim)),
+        reward=torch.randn((2, 6)),
+        discount=torch.full((2, 6), 0.99),
+        next_obs=torch.randn((2, 6, obs_dim)),
+        done=torch.tensor([[False, False, True, True, True, True], [False, True, True, True, True, True]], dtype=torch.bool),
+        mask=torch.tensor([[1, 1, 1, 0, 0, 0], [1, 1, 0, 0, 0, 0]], dtype=torch.float32),
+    )
+    metrics = learner.update(batch)
+    assert np.isfinite(metrics.critic_loss)
+    assert np.isfinite(metrics.actor_loss)
+    assert np.isfinite(metrics.sampled_q_spread)
 
 
 def test_mpo_actor_update_honors_chunk_size(monkeypatch: pytest.MonkeyPatch) -> None:

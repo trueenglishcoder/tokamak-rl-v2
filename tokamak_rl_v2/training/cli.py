@@ -21,6 +21,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--batch-size", type=int, default=None)
     ap.add_argument("--unroll-length", type=int, default=None)
     ap.add_argument("--replay-capacity-episodes", type=int, default=None)
+    ap.add_argument("--min-replay-sequence-length", type=int, default=None)
     ap.add_argument("--hidden-dim", type=int, default=None)
     ap.add_argument("--critic-hidden-dim", type=int, default=None)
     ap.add_argument("--critic-mlp-hidden-dim", type=int, default=None)
@@ -43,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_experiment_config(args.config)
     if args.sim_compute_backend is not None or args.sim_gpu_device is not None:
         cfg = replace(cfg, sim=replace(cfg.sim, compute_backend=args.sim_compute_backend if args.sim_compute_backend is not None else cfg.sim.compute_backend, gpu_device=args.sim_gpu_device if args.sim_gpu_device is not None else cfg.sim.gpu_device))
-    if any(v is not None for v in (args.batch_size, args.unroll_length, args.replay_capacity_episodes, args.rollout_chunk_length, args.updates_per_rollout_chunk, args.action_samples, args.actor_update_chunk_size)):
+    if any(v is not None for v in (args.batch_size, args.unroll_length, args.replay_capacity_episodes, args.min_replay_sequence_length, args.rollout_chunk_length, args.updates_per_rollout_chunk, args.action_samples, args.actor_update_chunk_size)):
         cfg = replace(
             cfg,
             learner=replace(
@@ -51,6 +52,7 @@ def main(argv: list[str] | None = None) -> int:
                 batch_size=args.batch_size if args.batch_size is not None else cfg.learner.batch_size,
                 unroll_length=args.unroll_length if args.unroll_length is not None else cfg.learner.unroll_length,
                 replay_capacity_episodes=args.replay_capacity_episodes if args.replay_capacity_episodes is not None else cfg.learner.replay_capacity_episodes,
+                min_replay_sequence_length=args.min_replay_sequence_length if args.min_replay_sequence_length is not None else cfg.learner.min_replay_sequence_length,
                 rollout_chunk_length=args.rollout_chunk_length if args.rollout_chunk_length is not None else cfg.learner.rollout_chunk_length,
                 updates_per_rollout_chunk=args.updates_per_rollout_chunk if args.updates_per_rollout_chunk is not None else cfg.learner.updates_per_rollout_chunk,
                 action_samples=args.action_samples if args.action_samples is not None else cfg.learner.action_samples,

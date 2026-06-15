@@ -164,6 +164,10 @@ def _shot_fragments(raw: Mapping[str, Any] | None, base: Path) -> ShotFragmentCo
 
 def _sim(raw: Mapping[str, Any], base: Path) -> SimConfig:
     _reject_stale_keys(raw, _STALE_SIM_KEYS, prefix="sim")
+    defaults = SimConfig(
+        config_path=Path("unused"),
+        initial_currents_path=None,
+    )
     config_path = _resolve(base, raw["config_path"])
     initial_raw = raw.get("initial_currents_path")
     return SimConfig(
@@ -179,7 +183,9 @@ def _sim(raw: Mapping[str, Any], base: Path) -> SimConfig:
         shot_fragments=_shot_fragments(_mapping(raw.get("shot_fragments", {}), "shot_fragments"), base),
         terminate_on_boundary_loss=bool(raw.get("terminate_on_boundary_loss", True)),
         terminate_on_current_limit=bool(raw.get("terminate_on_current_limit", True)),
-        current_termination_over_limit_a=float(raw.get("current_termination_over_limit_a", 0.0)),
+        current_termination_over_limit_a=float(raw.get("current_termination_over_limit_a", defaults.current_termination_over_limit_a)),
+        current_termination_grace_steps=int(raw.get("current_termination_grace_steps", defaults.current_termination_grace_steps)),
+        current_hard_termination_fraction=float(raw.get("current_hard_termination_fraction", defaults.current_hard_termination_fraction)),
     )
 
 
@@ -339,6 +345,10 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
         raise ValueError("sim.action_scale must be finite and in (0, 1]")
     if not math.isfinite(float(cfg.sim.current_termination_over_limit_a)) or float(cfg.sim.current_termination_over_limit_a) < 0.0:
         raise ValueError("sim.current_termination_over_limit_a must be finite and non-negative")
+    if int(cfg.sim.current_termination_grace_steps) <= 0:
+        raise ValueError("sim.current_termination_grace_steps must be positive")
+    if not math.isfinite(float(cfg.sim.current_hard_termination_fraction)) or float(cfg.sim.current_hard_termination_fraction) <= 1.0:
+        raise ValueError("sim.current_hard_termination_fraction must be finite and > 1")
     _validate_reward_config(cfg.reward, prefix="reward")
     if cfg.randomization.ip_measurement_noise_a < 0.0 or cfg.randomization.current_measurement_noise_a < 0.0:
         raise ValueError("randomization noise values must be non-negative")
@@ -357,9 +367,11 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
             raise ValueError(f"learner.{name} must be finite and positive")
     if learner.discount >= 1.0:
         raise ValueError("learner.discount must be < 1")
-    for name in ("unroll_length", "batch_size", "replay_capacity_episodes", "action_samples", "actor_update_chunk_size", "rollout_chunk_length", "updates_per_rollout_chunk"):
+    for name in ("unroll_length", "batch_size", "replay_capacity_episodes", "action_samples", "min_replay_sequence_length", "actor_update_chunk_size", "rollout_chunk_length", "updates_per_rollout_chunk"):
         if int(getattr(learner, name)) <= 0:
             raise ValueError(f"learner.{name} must be positive")
+    if int(learner.min_replay_sequence_length) > int(learner.unroll_length):
+        raise ValueError("learner.min_replay_sequence_length must be <= learner.unroll_length")
     if int(learner.action_samples) <= 1:
         raise ValueError("learner.action_samples must be greater than 1")
     training = cfg.training
@@ -377,13 +389,19 @@ def _sign(value: float) -> int:
 
 
 def _validate_reward_config(reward: RewardConfig, *, prefix: str) -> None:
-    for name in ("shape_bad_m", "shape_max_bad_m", "ip_bad_a", "reward_scale"):
+    for name in ("shape_good_m", "shape_bad_m", "ip_good_a", "ip_bad_a", "current_good_fraction", "current_bad_fraction", "max_episode_reward", "reward_scale"):
         value = float(getattr(reward, name))
         if not math.isfinite(value) or value <= 0.0:
             raise ValueError(f"{prefix}.{name} must be finite and positive")
+    if float(reward.shape_good_m) >= float(reward.shape_bad_m):
+        raise ValueError(f"{prefix}.shape_good_m must be less than shape_bad_m")
+    if float(reward.ip_good_a) >= float(reward.ip_bad_a):
+        raise ValueError(f"{prefix}.ip_good_a must be less than ip_bad_a")
+    if float(reward.current_good_fraction) >= float(reward.current_bad_fraction):
+        raise ValueError(f"{prefix}.current_good_fraction must be less than current_bad_fraction")
     if not math.isfinite(float(reward.boundary_missing_error_m)) or float(reward.boundary_missing_error_m) < 0.0:
         raise ValueError(f"{prefix}.boundary_missing_error_m must be finite and non-negative")
-    for name in ("shape_weight", "ip_weight"):
+    for name in ("shape_weight", "ip_weight", "current_weight"):
         value = float(getattr(reward, name))
         if not math.isfinite(value) or value <= 0.0:
             raise ValueError(f"{prefix}.{name} must be finite and positive")
@@ -393,15 +411,13 @@ def _validate_reward_config(reward: RewardConfig, *, prefix: str) -> None:
 
 _STALE_REWARD_KEYS = {
     "mode",
-    "shape_good_m",
-    "ip_good_a",
+    "shape_max_bad_m",
     "current_good_a",
     "current_bad_a",
     "derivative_good",
     "derivative_bad",
     "action_penalty_weight",
     "delta_action_penalty_weight",
-    "current_weight",
     "derivative_weight",
     "action_saturation_weight",
     "delta_action_weight",

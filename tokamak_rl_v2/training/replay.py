@@ -138,15 +138,19 @@ class FIFOSequenceReplay:
                 self._close_active_episode(lane)
         self.size = int(torch.sum(self.episode_lengths).item())
 
-    def ready(self, sequence_length: int, batch_size: int) -> bool:
-        eligible = self._eligible_slots(int(sequence_length))
-        return int(eligible.numel()) >= 1 and self.size >= int(sequence_length)
+    def ready(self, sequence_length: int, batch_size: int, min_sequence_length: int | None = None) -> bool:
+        min_len = self._effective_min_sequence_length(sequence_length, min_sequence_length)
+        eligible = self._eligible_slots(min_len)
+        return int(eligible.numel()) >= 1 and self.size >= min_len
 
-    def sample(self, *, batch_size: int, sequence_length: int, generator: torch.Generator | None = None) -> SequenceBatch:
-        if not self.ready(sequence_length, batch_size):
+    def sample(self, *, batch_size: int, sequence_length: int, min_sequence_length: int | None = None, generator: torch.Generator | None = None) -> SequenceBatch:
+        if not self.ready(sequence_length, batch_size, min_sequence_length=min_sequence_length):
             raise RuntimeError("replay does not contain enough transitions")
         T = int(sequence_length)
-        eligible = self._eligible_slots(T)
+        if T > self.max_episode_steps:
+            raise ValueError("sequence_length cannot exceed max_episode_steps")
+        min_len = self._effective_min_sequence_length(T, min_sequence_length)
+        eligible = self._eligible_slots(min_len)
         choice = torch.randint(0, int(eligible.numel()), (int(batch_size),), device=self.device, generator=generator)
         slots = eligible[choice]
         lengths = self.episode_lengths[slots]
@@ -165,6 +169,22 @@ class FIFOSequenceReplay:
             done=self.done[slots[:, None], idx],
             mask=mask,
         )
+
+    def stats(self, *, sequence_length: int, min_sequence_length: int | None = None) -> dict[str, float]:
+        lengths = self.episode_lengths.detach().to(dtype=torch.float32)
+        nonzero = lengths[lengths > 0]
+        min_len = self._effective_min_sequence_length(sequence_length, min_sequence_length)
+        full = self._eligible_slots(int(sequence_length))
+        short = self._eligible_slots(min_len)
+        return {
+            "replay_size": float(self.size),
+            "replay_completed_episodes": float(self.completed_episodes),
+            "replay_full_sequence_eligible_episodes": float(int(full.numel())),
+            "replay_min_sequence_eligible_episodes": float(int(short.numel())),
+            "replay_mean_episode_length": float(torch.mean(nonzero).item()) if int(nonzero.numel()) else 0.0,
+            "replay_min_episode_length": float(torch.min(nonzero).item()) if int(nonzero.numel()) else 0.0,
+            "replay_max_episode_length": float(torch.max(nonzero).item()) if int(nonzero.numel()) else 0.0,
+        }
 
     def state_dict(self) -> dict[str, object]:
         return {
@@ -204,6 +224,18 @@ class FIFOSequenceReplay:
     def _eligible_slots(self, sequence_length: int) -> Tensor:
         length_ok = self.episode_lengths >= int(sequence_length)
         return torch.nonzero(length_ok, as_tuple=False).reshape(-1)
+
+    @staticmethod
+    def _effective_min_sequence_length(sequence_length: int, min_sequence_length: int | None) -> int:
+        seq = int(sequence_length)
+        if seq <= 0:
+            raise ValueError("sequence_length must be positive")
+        if min_sequence_length is None:
+            return seq
+        min_len = int(min_sequence_length)
+        if min_len <= 0:
+            raise ValueError("min_sequence_length must be positive")
+        return min(seq, min_len)
 
     def _allocate_episode_slot(self, *, protected_slots: set[int] | None = None) -> int:
         active = {int(v) for v in self.active_slots.detach().cpu().tolist() if int(v) >= 0}

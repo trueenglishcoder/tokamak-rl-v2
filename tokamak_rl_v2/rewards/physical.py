@@ -15,7 +15,7 @@ class RewardBatch:
 
 
 class T15PhysicalReward:
-    """Single physical-cost reward for T15 magnetic-control training."""
+    """TCV-style adapted quality reward for T15 magnetic-control training."""
 
     def __init__(self, config: RewardConfig, *, control_rate_hz: float) -> None:
         self.config = config
@@ -56,15 +56,30 @@ class T15PhysicalReward:
         delta_action_rms = torch.sqrt(torch.mean(delta_action.pow(2), dim=-1))
         max_abs_action = torch.max(torch.abs(action), dim=-1).values
 
-        shape_loss = _huber01(shape_error_mean / max(float(c.shape_bad_m), 1.0e-12)) + 0.25 * _huber01(shape_error_max / max(float(c.shape_max_bad_m), 1.0e-12))
-        ip_loss = _huber01(ip_error / max(float(c.ip_bad_a), 1.0e-12))
+        point_quality = _quality_between(raw_shape_error, good=float(c.shape_good_m), bad=float(c.shape_bad_m))
+        missing_quality = torch.zeros_like(point_quality)
+        point_quality = torch.where(boundary_mask, point_quality, missing_quality)
+        shape_loss_points = 1.0 - point_quality
+        shape_loss = _smooth_max(shape_loss_points, sharpness=10.0)
+        shape_quality = torch.clamp(1.0 - shape_loss, 0.0, 1.0)
 
-        physical_cost = float(c.shape_weight) * shape_loss + float(c.ip_weight) * ip_loss
+        ip_quality = _quality_between(ip_error, good=float(c.ip_good_a), bad=float(c.ip_bad_a))
+        ip_loss = 1.0 - ip_quality
+
+        current_quality = _quality_between(current_usage_fraction, good=float(c.current_good_fraction), bad=float(c.current_bad_fraction))
+        current_limit_loss = 1.0 - current_quality
+
+        combined_quality = _weighted_geometric_mean(
+            (shape_quality, ip_quality, current_quality),
+            (float(c.shape_weight), float(c.ip_weight), float(c.current_weight)),
+        )
+        physical_cost = 1.0 - combined_quality
         if episode_progress is None:
             progress = torch.zeros_like(physical_cost)
         else:
             progress = torch.clamp(episode_progress.to(dtype=physical_cost.dtype, device=physical_cost.device).reshape_as(physical_cost), 0.0, 1.0)
-        reward = -float(c.reward_scale) * physical_cost
+        max_step_reward = float(c.max_episode_reward) / max(self.control_rate_hz, 1.0e-12)
+        reward = float(c.reward_scale) * max_step_reward * combined_quality
         terminal = torch.full_like(reward, float(c.terminal_reward) * float(c.reward_scale))
         reward = torch.where(terminated, reward + terminal, reward)
 
@@ -86,11 +101,36 @@ class T15PhysicalReward:
                 "physical_cost": physical_cost,
                 "shape_loss": shape_loss,
                 "ip_loss": ip_loss,
+                "current_limit_loss": current_limit_loss,
+                "shape_quality": shape_quality,
+                "ip_quality": ip_quality,
+                "current_quality": current_quality,
+                "combined_quality": combined_quality,
                 "boundary_found": boundary_found.to(dtype=reward.dtype),
             },
         )
 
 
-def _huber01(x: Tensor) -> Tensor:
-    x = torch.clamp(x, min=0.0)
-    return torch.where(x <= 1.0, 0.5 * x.pow(2), x - 0.5)
+def _quality_between(x: Tensor, *, good: float, bad: float) -> Tensor:
+    good_f = float(good)
+    bad_f = float(bad)
+    width = max(bad_f - good_f, 1.0e-12)
+    z = torch.clamp((x - good_f) / width, min=0.0)
+    return torch.exp(-3.0 * z.pow(2)).clamp(0.0, 1.0)
+
+
+def _smooth_max(x: Tensor, *, sharpness: float) -> Tensor:
+    if x.shape[-1] == 1:
+        return x[..., 0]
+    weights = torch.softmax(float(sharpness) * x, dim=-1)
+    return torch.sum(weights * x, dim=-1)
+
+
+def _weighted_geometric_mean(values: tuple[Tensor, ...], weights: tuple[float, ...]) -> Tensor:
+    if len(values) != len(weights):
+        raise ValueError("values and weights must have the same length")
+    total_weight = max(sum(float(w) for w in weights), 1.0e-12)
+    out = torch.zeros_like(values[0])
+    for value, weight in zip(values, weights, strict=True):
+        out = out + float(weight) * torch.log(torch.clamp(value, min=1.0e-6, max=1.0))
+    return torch.exp(out / total_weight).clamp(0.0, 1.0)

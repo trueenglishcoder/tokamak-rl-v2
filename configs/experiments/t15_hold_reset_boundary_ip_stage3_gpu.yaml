@@ -90,7 +90,11 @@
         "sol2": 3408556.22
       }
     },
-    "terminate_on_boundary_loss": true
+    "terminate_on_boundary_loss": true,
+    "terminate_on_current_limit": true,
+    "current_termination_over_limit_a": 5000.0,
+    "current_termination_grace_steps": 8,
+    "current_hard_termination_fraction": 1.05
   },
   "reference": {
     "duration_s": 1.0,
@@ -116,13 +120,18 @@
     "target_preview_stride": 10
   },
   "reward": {
-    "shape_bad_m": 0.03,
-    "shape_max_bad_m": 0.08,
+    "shape_good_m": 0.005,
+    "shape_bad_m": 0.05,
+    "ip_good_a": 500.0,
     "ip_bad_a": 20000.0,
     "boundary_missing_error_m": 0.1,
-    "shape_weight": 2.0,
+    "shape_weight": 3.0,
     "ip_weight": 2.0,
-    "terminal_reward": -20.0,
+    "current_weight": 2.0,
+    "current_good_fraction": 0.85,
+    "current_bad_fraction": 1.0,
+    "max_episode_reward": 100.0,
+    "terminal_reward": -100.0,
     "reward_scale": 1.0
   },
   "randomization": {

@@ -77,13 +77,18 @@ class ObservationConfig:
 
 @dataclass(frozen=True, slots=True)
 class RewardConfig:
-    shape_bad_m: float = 0.03
-    shape_max_bad_m: float = 0.08
+    shape_good_m: float = 0.005
+    shape_bad_m: float = 0.05
+    ip_good_a: float = 500.0
     ip_bad_a: float = 20000.0
     boundary_missing_error_m: float = 0.10
-    shape_weight: float = 2.0
+    shape_weight: float = 3.0
     ip_weight: float = 2.0
-    terminal_reward: float = -20.0
+    current_weight: float = 2.0
+    current_good_fraction: float = 0.85
+    current_bad_fraction: float = 1.0
+    max_episode_reward: float = 100.0
+    terminal_reward: float = -100.0
     reward_scale: float = 1.0
 
 
@@ -132,7 +137,9 @@ class SimConfig:
     shot_fragments: ShotFragmentConfig | None = None
     terminate_on_boundary_loss: bool = True
     terminate_on_current_limit: bool = True
-    current_termination_over_limit_a: float = 0.0
+    current_termination_over_limit_a: float = 5000.0
+    current_termination_grace_steps: int = 8
+    current_hard_termination_fraction: float = 1.05
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +161,7 @@ class LearnerConfig:
     critic_lr: float = 3.0e-4
     kl_lr: float = 3.0e-4
     action_samples: int = 20
+    min_replay_sequence_length: int = 8
     actor_update_chunk_size: int = 2048
     temperature: float = 1.0
     mpo_epsilon: float = 0.1

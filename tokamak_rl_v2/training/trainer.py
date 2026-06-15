@@ -90,6 +90,54 @@ class Trainer:
         payload = {"global_step": int(env_step), "env_step": int(env_step), "decision_step": int(decision_step), **values}
         self.wandb_run.log(payload, step=int(env_step))
 
+    def _min_replay_sequence_length(self) -> int:
+        return int(getattr(self.config.learner, "min_replay_sequence_length", self.config.learner.unroll_length))
+
+    def _replay_ready(self) -> bool:
+        return self.replay.ready(
+            self.config.learner.unroll_length,
+            self.config.learner.batch_size,
+            min_sequence_length=self._min_replay_sequence_length(),
+        )
+
+    def _sample_replay(self):
+        return self.replay.sample(
+            batch_size=self.config.learner.batch_size,
+            sequence_length=self.config.learner.unroll_length,
+            min_sequence_length=self._min_replay_sequence_length(),
+        )
+
+    @staticmethod
+    def _replay_health_fields() -> list[str]:
+        return [
+            "updates",
+            "replay_ready",
+            "replay_size",
+            "replay_completed_episodes",
+            "replay_full_sequence_eligible_episodes",
+            "replay_min_sequence_eligible_episodes",
+            "replay_mean_episode_length",
+            "replay_min_episode_length",
+            "replay_max_episode_length",
+            "learner_no_update_steps",
+            "learner_no_update_warning",
+        ]
+
+    def _replay_health(self, *, step: int, updates: int, last_update_step: int) -> dict[str, float]:
+        stats = self.replay.stats(
+            sequence_length=int(self.config.learner.unroll_length),
+            min_sequence_length=self._min_replay_sequence_length(),
+        )
+        no_update_steps = max(0, int(step) - int(last_update_step))
+        warning = no_update_steps > int(self.config.learner.rollout_chunk_length)
+        return {
+            "updates": float(updates),
+            "replay_ready": 1.0 if self._replay_ready() else 0.0,
+            **stats,
+            "learner_no_update_steps": float(no_update_steps),
+            "learner_no_update_warning": 1.0 if warning else 0.0,
+        }
+
     def train(self) -> dict[str, Any]:
         if int(self.config.training.actor_workers) > 1:
             return self._train_distributed()
@@ -98,10 +146,14 @@ class Trainer:
         metrics_path = self.output_dir / "metrics.json"
         rewards_path = self.output_dir / "reward_components.csv"
         eval_path = self.output_dir / "eval_history.csv"
-        with losses_path.open("w", newline="", encoding="utf-8") as loss_f, rewards_path.open("w", newline="", encoding="utf-8") as reward_f:
-            loss_writer = csv.DictWriter(loss_f, fieldnames=["step", "critic_loss", "actor_loss", "mean_kl", "std_kl", "q_mean", "target_q_mean", "actor_mle_loss", "actor_param_delta_norm", "action_mean_abs", "action_std_mean", "sampled_q_spread", "policy_weight_entropy", "policy_weight_max", "mpo_temperature", "mean_kl_penalty", "std_kl_penalty", "env_steps_per_second"])
+        health_path = self.output_dir / "replay_health.csv"
+        replay_health_fields = self._replay_health_fields()
+        with losses_path.open("w", newline="", encoding="utf-8") as loss_f, rewards_path.open("w", newline="", encoding="utf-8") as reward_f, health_path.open("w", newline="", encoding="utf-8") as health_f:
+            loss_writer = csv.DictWriter(loss_f, fieldnames=["step", "critic_loss", "actor_loss", "mean_kl", "std_kl", "q_mean", "target_q_mean", "actor_mle_loss", "actor_param_delta_norm", "action_mean_abs", "action_std_mean", "sampled_q_spread", "policy_weight_entropy", "policy_weight_max", "mpo_temperature", "mean_kl_penalty", "std_kl_penalty", "env_steps_per_second", *replay_health_fields])
+            health_writer = csv.DictWriter(health_f, fieldnames=["step", *replay_health_fields])
             reward_writer = None
             loss_writer.writeheader()
+            health_writer.writeheader()
             if self.resume_checkpoint is None and self.replay.size > 0:
                 self.replay.start_new_episodes()
             obs = self.env.reset()
@@ -109,6 +161,7 @@ class Trainer:
                 obs = self._load_checkpoint(self.resume_checkpoint)
             start = time.time()
             updates = int(self.start_updates)
+            last_update_step = int(self.start_step)
             progress = tqdm(total=max(self.steps - self.start_step, 0), desc="train", unit="step", dynamic_ncols=True)
             for step in range(self.start_step + 1, self.steps + 1):
                 with torch.no_grad():
@@ -119,13 +172,21 @@ class Trainer:
                 self.replay.add_batch(obs, batch_step.applied_action, batch_step.reward, discount, batch_step.obs, done)
                 obs = self.env.reset_indices(done) if bool(torch.any(done).item()) else batch_step.obs
                 metrics = None
-                if self.replay.ready(self.config.learner.unroll_length, self.config.learner.batch_size) and step % int(self.config.learner.rollout_chunk_length) == 0:
+                if step % int(self.config.learner.rollout_chunk_length) == 0:
+                    replay_health = self._replay_health(step=step, updates=updates, last_update_step=last_update_step)
+                    health_writer.writerow({"step": step, **replay_health}); health_f.flush()
+                    self._wandb_log({f"train/{k}": v for k, v in replay_health.items()}, step=step)
+                else:
+                    replay_health = None
+                if self._replay_ready() and step % int(self.config.learner.rollout_chunk_length) == 0:
                     for _ in range(int(self.config.learner.updates_per_rollout_chunk)):
-                        seq = self.replay.sample(batch_size=self.config.learner.batch_size, sequence_length=self.config.learner.unroll_length)
+                        seq = self._sample_replay()
                         metrics = self.learner.update(seq)
                         updates += 1
+                    last_update_step = step
                     speed = float(step * self.num_envs) / max(time.time() - start, 1.0e-9)
-                    row = {"step": step, "env_steps_per_second": speed, **asdict(metrics)}
+                    replay_health = self._replay_health(step=step, updates=updates, last_update_step=last_update_step)
+                    row = {"step": step, "env_steps_per_second": speed, **asdict(metrics), **replay_health}
                     loss_writer.writerow(row); loss_f.flush()
                     self._wandb_log({f"train/{k}": v for k, v in row.items() if k != "step"}, step=step)
                 comps = batch_step.info.get("reward_components", {}) if isinstance(batch_step.info, dict) else {}
@@ -199,17 +260,22 @@ class Trainer:
         metrics_path = self.output_dir / "metrics.json"
         rewards_path = self.output_dir / "reward_components.csv"
         eval_path = self.output_dir / "eval_history.csv"
+        health_path = self.output_dir / "replay_health.csv"
+        replay_health_fields = self._replay_health_fields()
         self.output_dir.mkdir(parents=True, exist_ok=True)
         updates = int(self.start_updates)
         env_steps = int(self.start_step)
+        last_update_step = int(self.start_step)
         last_checkpoint_step = 0
         last_eval_step = 0
         worker_rollout_counts = {str(index): 0 for index in range(worker_count)}
         start = time.time()
         try:
-            with losses_path.open("w", newline="", encoding="utf-8") as loss_f, rewards_path.open("w", newline="", encoding="utf-8") as reward_f:
-                loss_writer = csv.DictWriter(loss_f, fieldnames=["step", "critic_loss", "actor_loss", "mean_kl", "std_kl", "q_mean", "target_q_mean", "actor_mle_loss", "actor_param_delta_norm", "action_mean_abs", "action_std_mean", "sampled_q_spread", "policy_weight_entropy", "policy_weight_max", "mpo_temperature", "mean_kl_penalty", "std_kl_penalty", "env_steps_per_second"])
+            with losses_path.open("w", newline="", encoding="utf-8") as loss_f, rewards_path.open("w", newline="", encoding="utf-8") as reward_f, health_path.open("w", newline="", encoding="utf-8") as health_f:
+                loss_writer = csv.DictWriter(loss_f, fieldnames=["step", "critic_loss", "actor_loss", "mean_kl", "std_kl", "q_mean", "target_q_mean", "actor_mle_loss", "actor_param_delta_norm", "action_mean_abs", "action_std_mean", "sampled_q_spread", "policy_weight_entropy", "policy_weight_max", "mpo_temperature", "mean_kl_penalty", "std_kl_penalty", "env_steps_per_second", *replay_health_fields])
+                health_writer = csv.DictWriter(health_f, fieldnames=["step", *replay_health_fields])
                 loss_writer.writeheader()
+                health_writer.writeheader()
                 reward_writer = None
                 progress = tqdm(total=max(self.steps - self.start_step, 0), desc="distributed-train", unit="step", dynamic_ncols=True)
                 while env_steps < self.steps:
@@ -246,13 +312,18 @@ class Trainer:
                             reward_writer.writeheader()
                         reward_writer.writerow(flat); reward_f.flush()
                         self._wandb_log({f"reward/{k}": v for k, v in flat.items() if k != "step"}, step=env_steps)
-                    while self.replay.ready(self.config.learner.unroll_length, self.config.learner.batch_size):
+                    replay_health = self._replay_health(step=env_steps, updates=updates, last_update_step=last_update_step)
+                    health_writer.writerow({"step": env_steps, **replay_health}); health_f.flush()
+                    self._wandb_log({f"train/{k}": v for k, v in replay_health.items()}, step=env_steps)
+                    while self._replay_ready():
                         for _ in range(int(self.config.learner.updates_per_rollout_chunk)):
-                            seq = self.replay.sample(batch_size=self.config.learner.batch_size, sequence_length=self.config.learner.unroll_length)
+                            seq = self._sample_replay()
                             metrics = self.learner.update(seq)
                             updates += 1
+                        last_update_step = env_steps
                         speed = float(env_steps) / max(time.time() - start, 1.0e-9)
-                        row = {"step": env_steps, "env_steps_per_second": speed, **asdict(metrics)}
+                        replay_health = self._replay_health(step=env_steps, updates=updates, last_update_step=last_update_step)
+                        row = {"step": env_steps, "env_steps_per_second": speed, **asdict(metrics), **replay_health}
                         loss_writer.writerow(row); loss_f.flush()
                         self._wandb_log({f"train/{k}": v for k, v in row.items() if k != "step"}, step=env_steps)
                         if updates % 4 == 0:
@@ -425,10 +496,12 @@ class Trainer:
             "physical_cost",
             "shape_loss",
             "ip_loss",
+            "current_limit_loss",
             "terminated_boundary",
             "terminated_current",
+            "current_over_limit_steps",
         }
-        min_metrics = {"current_margin_fraction", "boundary_found"}
+        min_metrics = {"current_margin_fraction", "boundary_found", "shape_quality", "ip_quality", "current_quality", "combined_quality"}
         for name, values in component_values.items():
             arr = np.asarray(values, dtype=float)
             if arr.size:
