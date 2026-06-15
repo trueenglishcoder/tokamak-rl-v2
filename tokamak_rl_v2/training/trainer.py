@@ -197,6 +197,7 @@ class Trainer:
         )
         losses_path = self.output_dir / "losses.csv"
         metrics_path = self.output_dir / "metrics.json"
+        rewards_path = self.output_dir / "reward_components.csv"
         eval_path = self.output_dir / "eval_history.csv"
         self.output_dir.mkdir(parents=True, exist_ok=True)
         updates = int(self.start_updates)
@@ -206,9 +207,10 @@ class Trainer:
         worker_rollout_counts = {str(index): 0 for index in range(worker_count)}
         start = time.time()
         try:
-            with losses_path.open("w", newline="", encoding="utf-8") as loss_f:
+            with losses_path.open("w", newline="", encoding="utf-8") as loss_f, rewards_path.open("w", newline="", encoding="utf-8") as reward_f:
                 loss_writer = csv.DictWriter(loss_f, fieldnames=["step", "critic_loss", "actor_loss", "mean_kl", "std_kl", "q_mean", "target_q_mean", "actor_mle_loss", "actor_param_delta_norm", "action_mean_abs", "action_std_mean", "sampled_q_spread", "policy_weight_entropy", "policy_weight_max", "mpo_temperature", "mean_kl_penalty", "std_kl_penalty", "env_steps_per_second"])
                 loss_writer.writeheader()
+                reward_writer = None
                 progress = tqdm(total=max(self.steps - self.start_step, 0), desc="distributed-train", unit="step", dynamic_ncols=True)
                 while env_steps < self.steps:
                     self._raise_for_dead_actor_workers(processes, actor_devices)
@@ -234,6 +236,16 @@ class Trainer:
                             lane_indices=worker_lanes,
                         )
                     env_steps += T * B
+                    reward_components = payload.get("reward_components", {})
+                    if isinstance(reward_components, dict) and reward_components:
+                        flat = {"step": env_steps}
+                        for name, value in reward_components.items():
+                            flat[str(name)] = float(np.nanmean(np.asarray(value, dtype=float)))
+                        if reward_writer is None:
+                            reward_writer = csv.DictWriter(reward_f, fieldnames=list(flat.keys()))
+                            reward_writer.writeheader()
+                        reward_writer.writerow(flat); reward_f.flush()
+                        self._wandb_log({f"reward/{k}": v for k, v in flat.items() if k != "step"}, step=env_steps)
                     while self.replay.ready(self.config.learner.unroll_length, self.config.learner.batch_size):
                         for _ in range(int(self.config.learner.updates_per_rollout_chunk)):
                             seq = self.replay.sample(batch_size=self.config.learner.batch_size, sequence_length=self.config.learner.unroll_length)

@@ -107,6 +107,7 @@ def _actor_loop(
     while not stop.is_set():
         _drain_params(actor, params_q, dev)
         chunk = {"obs": [], "action": [], "reward": [], "discount": [], "next_obs": [], "done": []}
+        reward_components: dict[str, list[torch.Tensor]] = {}
         for _ in range(int(rollout_chunk_length)):
             if stop.is_set():
                 break
@@ -120,10 +121,16 @@ def _actor_loop(
             chunk["discount"].append(torch.full_like(out.reward.detach().cpu(), float(worker_config.learner.discount)))
             chunk["next_obs"].append(out.obs.detach().cpu())
             chunk["done"].append(done.detach().cpu())
+            comps = out.info.get("reward_components", {}) if isinstance(out.info, dict) else {}
+            if isinstance(comps, dict):
+                for name, value in comps.items():
+                    reward_components.setdefault(str(name), []).append(torch.as_tensor(value, dtype=torch.float32).detach().cpu())
             obs = env.reset_indices(done) if bool(torch.any(done).item()) else out.obs
         if not chunk["reward"]:
             break
         payload = {k: torch.stack(v, dim=0).numpy() for k, v in chunk.items()}
+        if reward_components:
+            payload["reward_components"] = {k: torch.stack(v, dim=0).numpy() for k, v in reward_components.items()}
         payload["worker_index"] = int(worker_index)
         payload["worker_device"] = str(dev)
         while not stop.is_set():
