@@ -20,7 +20,7 @@
       "start_time_min_s": 0.0,
       "start_time_max_s": null,
       "trim_end_s": 0.02,
-      "corner_smoothing_s": 0.0,
+      "corner_smoothing_s": 0.05,
       "sol_currents": {
         "sol0": {
           "start": {"min": 565000.0, "max": 645000.0},

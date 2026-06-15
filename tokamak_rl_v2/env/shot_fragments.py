@@ -13,6 +13,8 @@ class ShotFragmentSample:
     pfc_currents: np.ndarray
     sol_currents: np.ndarray
     ip_reference: np.ndarray
+    pfc_current_reference: np.ndarray
+    sol_current_reference: np.ndarray
     shot_ids: tuple[str, ...]
     start_times_s: np.ndarray
 
@@ -49,6 +51,8 @@ class ShotFragmentLibrary:
         episode_duration = float(steps_i) * self.dt
 
         ip_ref = np.zeros((count_i, steps_i + 1), dtype=float)
+        pfc_ref = np.zeros((count_i, steps_i + 1, self.n_pfc), dtype=float)
+        sol_ref = np.zeros((count_i, steps_i + 1, self.n_sol), dtype=float)
         ip0 = np.zeros((count_i,), dtype=float)
         pfc = np.zeros((count_i, self.n_pfc), dtype=float)
         sol = np.zeros((count_i, self.n_sol), dtype=float)
@@ -77,23 +81,30 @@ class ShotFragmentLibrary:
             if float(self.config.corner_smoothing_s) > 0.0:
                 ip_curve = _smooth_1d(ip_curve, window_steps=max(1, int(round(float(self.config.corner_smoothing_s) / self.dt))))
             ip_curve = np.clip(ip_curve, 1.0, None)
-            current_t = np.asarray([start], dtype=float)
-            sol[b] = _current_profile_values(
-                current_t,
+            sol_curve = _current_profile_values(
+                query_t,
                 profiles=profile["sol_profiles"],
                 ramp_up_s=float(profile["ramp_up_s"]),
                 hold_s=float(profile["hold_s"]),
                 ramp_down_s=float(profile["ramp_down_s"]),
-            ).reshape(-1)
-            pfc[b] = _current_profile_values(
-                current_t,
+            )
+            pfc_curve = _current_profile_values(
+                query_t,
                 profiles=profile["pfc_profiles"],
                 ramp_up_s=float(profile["ramp_up_s"]),
                 hold_s=float(profile["hold_s"]),
                 ramp_down_s=float(profile["ramp_down_s"]),
-            ).reshape(-1)
+            )
+            if float(self.config.corner_smoothing_s) > 0.0:
+                window = max(1, int(round(float(self.config.corner_smoothing_s) / self.dt)))
+                sol_curve = _smooth_2d(sol_curve, window_steps=window)
+                pfc_curve = _smooth_2d(pfc_curve, window_steps=window)
             ip_ref[b] = ip_curve
             ip0[b] = float(ip_curve[0])
+            sol_ref[b] = sol_curve
+            pfc_ref[b] = pfc_curve
+            sol[b] = sol_curve[0]
+            pfc[b] = pfc_curve[0]
             start_times[b] = start
             labels.append("idealized_t15_trapezoid")
 
@@ -102,6 +113,8 @@ class ShotFragmentLibrary:
             pfc_currents=pfc,
             sol_currents=sol,
             ip_reference=ip_ref,
+            pfc_current_reference=pfc_ref,
+            sol_current_reference=sol_ref,
             shot_ids=tuple(labels),
             start_times_s=start_times,
         )
@@ -197,6 +210,13 @@ def _smooth_1d(values: np.ndarray, *, window_steps: int) -> np.ndarray:
     kernel = np.full((width,), 1.0 / float(width), dtype=float)
     padded = np.pad(np.asarray(values, dtype=float), (pad, pad), mode="edge")
     return np.convolve(padded, kernel, mode="valid")
+
+
+def _smooth_2d(values: np.ndarray, *, window_steps: int) -> np.ndarray:
+    arr = np.asarray(values, dtype=float)
+    if arr.ndim != 2:
+        raise ValueError("values must be 2D")
+    return np.stack([_smooth_1d(arr[:, i], window_steps=window_steps) for i in range(arr.shape[1])], axis=1)
 
 
 __all__ = ["ShotFragmentLibrary", "ShotFragmentSample"]

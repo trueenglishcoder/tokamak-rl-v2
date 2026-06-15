@@ -455,10 +455,16 @@ def test_shot_fragment_library_samples_coherent_reset_and_reference() -> None:
     assert sample.pfc_currents.shape == (6, 6)
     assert sample.sol_currents.shape == (6, 3)
     assert sample.ip_reference.shape == (6, 101)
+    assert sample.pfc_current_reference.shape == (6, 101, 6)
+    assert sample.sol_current_reference.shape == (6, 101, 3)
     assert np.all(sample.ip_reference > 0.0)
     assert np.allclose(sample.ip0, sample.ip_reference[:, 0])
+    assert np.allclose(sample.pfc_currents, sample.pfc_current_reference[:, 0])
+    assert np.allclose(sample.sol_currents, sample.sol_current_reference[:, 0])
     assert np.all(np.isfinite(sample.pfc_currents))
     assert np.all(np.isfinite(sample.sol_currents))
+    assert np.all(np.isfinite(sample.pfc_current_reference))
+    assert np.all(np.isfinite(sample.sol_current_reference))
     assert len(set(sample.shot_ids)) >= 1
     assert np.all(sample.start_times_s >= 0.0)
     max_step_delta = np.max(np.abs(np.diff(sample.ip_reference, axis=1)))
@@ -502,6 +508,29 @@ def test_shot_fragment_env_reset_uses_sampled_reference() -> None:
     assert all("shot_id" in item and "shot_start_time_s" in item for item in env.reset_metadata)
     for b, model in enumerate(env._cpu_models):
         assert float(model.state.Ip) == pytest.approx(float(env.reference.ip[b, 0].item()))
+
+
+def test_shot_fragment_teacher_action_is_finite_and_tracks_current_reference() -> None:
+    cfg = load_experiment_config(SHOT_FRAGMENT_CONFIG)
+    cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=12))
+    env = TokamakMagneticControlEnv(cfg, batch_size=1, device="cpu", seed=45)
+    obs = env.reset()
+    assert torch.all(torch.isfinite(obs))
+    assert env.shot_pfc_current_reference is not None
+    assert env.shot_sol_current_reference is not None
+
+    pfc0, sol0 = env._pre_step_bank_currents()
+    target = torch.cat([env.shot_pfc_current_reference[:, 1], env.shot_sol_current_reference[:, 1]], dim=1)
+    error = target - torch.cat([pfc0, sol0], dim=1)
+    action = env.shot_fragment_teacher_action()
+    assert action.shape == (1, env.action_dim)
+    assert torch.all(torch.isfinite(action))
+    assert float(torch.max(torch.abs(action)).item()) > 0.0
+    physical_command = action * env.derivative_limits[None, :]
+    assert float(torch.sum(physical_command * error).item()) > 0.0
+
+    out = env.step(action)
+    assert torch.all(torch.isfinite(out.reward))
 
 
 def test_ip_reference_inserts_hold_between_opposite_ramps() -> None:
