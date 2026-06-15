@@ -87,6 +87,20 @@ class FIFOSequenceReplay:
             self.active_slots[env_index] = self._allocate_episode_slot()
             self.active_generation[env_index] = self.generation
 
+    def start_new_episodes(self) -> None:
+        """Start fresh active episodes without appending across an external reset."""
+        protected = {int(v) for v in self.active_slots.detach().cpu().tolist() if int(v) >= 0}
+        for env_index in range(self.active_envs):
+            slot = int(self.active_slots[env_index].item())
+            if slot >= 0 and int(self.episode_lengths[slot].item()) > 0:
+                self.episode_closed[slot] = True
+                self.completed_episodes += 1
+        for env_index in range(self.active_envs):
+            new_slot = self._allocate_episode_slot(protected_slots=protected)
+            self.active_slots[env_index] = new_slot
+            self.active_generation[env_index] = self.generation
+            protected.add(new_slot)
+
     def add_batch(self, obs: Tensor, action: Tensor, reward: Tensor, discount: Tensor, next_obs: Tensor, done: Tensor, lane_indices: Tensor | list[int] | None = None) -> None:
         B = int(obs.shape[0])
         if lane_indices is None:
@@ -191,8 +205,10 @@ class FIFOSequenceReplay:
         length_ok = self.episode_lengths >= int(sequence_length)
         return torch.nonzero(length_ok, as_tuple=False).reshape(-1)
 
-    def _allocate_episode_slot(self) -> int:
+    def _allocate_episode_slot(self, *, protected_slots: set[int] | None = None) -> int:
         active = {int(v) for v in self.active_slots.detach().cpu().tolist() if int(v) >= 0}
+        if protected_slots:
+            active.update(int(v) for v in protected_slots if int(v) >= 0)
         slot = -1
         for offset in range(self.capacity_episodes):
             candidate = (int(self.write_episode) + offset) % self.capacity_episodes

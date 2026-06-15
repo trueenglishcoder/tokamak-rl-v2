@@ -71,7 +71,7 @@ def run_shot_bootstrap(
 
             obs_for_update = obs
             actor_out = trainer.actor(obs_for_update)
-            mse_loss = F.mse_loss(actor_out.mean, teacher_action)
+            mse_loss = F.mse_loss(torch.tanh(actor_out.mean), teacher_action)
             target_std = torch.full_like(actor_out.std, float(bootstrap.target_std))
             std_loss = F.mse_loss(actor_out.std, target_std)
             loss = mse_loss + float(bootstrap.std_loss_weight) * std_loss
@@ -81,7 +81,7 @@ def run_shot_bootstrap(
             optimizer.step()
 
             with torch.no_grad():
-                actor_mean_after = trainer.actor(obs_for_update).mean
+                actor_mean_after = trainer.actor.deterministic(obs_for_update)
                 batch_step = env.step(teacher_action)
                 discount = torch.full((trainer.num_envs,), float(config.learner.discount), dtype=torch.float32, device=trainer.device)
                 done = batch_step.terminated | batch_step.truncated

@@ -50,7 +50,7 @@ class FeedForwardGaussianActor(nn.Module):
         x = F.elu(self.hidden1(x))
         x = F.elu(self.hidden2(x))
         x = F.elu(self.hidden3(x))
-        mean = torch.tanh(self.mean_head(x))
+        mean = self.mean_head(x)
         std = F.softplus(self.std_head(x)) + self.min_std
         return ActorOutput(mean=mean, std=std)
 
@@ -63,7 +63,7 @@ class FeedForwardGaussianActor(nn.Module):
         return action, log_prob, out.mean
 
     def deterministic(self, obs: Tensor) -> Tensor:
-        return self(obs).mean
+        return torch.tanh(self(obs).mean)
 
 
 def _inverse_softplus(value: float) -> float:

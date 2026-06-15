@@ -45,6 +45,10 @@ def test_network_shapes() -> None:
     out = actor(obs)
     assert out.mean.shape == (3, 5)
     assert out.std.shape == (3, 5)
+    det = actor.deterministic(obs)
+    assert det.shape == (3, 5)
+    assert torch.allclose(det, torch.tanh(out.mean))
+    assert torch.max(torch.abs(det)).item() <= 1.0
     assert torch.mean(out.std).item() == pytest.approx(0.2, rel=1.0e-3)
     q, state = critic(obs, torch.zeros((3, 5)))
     assert q.shape == (3, 1)
@@ -369,6 +373,37 @@ def test_episode_replay_never_crosses_env_or_done_boundaries() -> None:
         batch = replay.sample(batch_size=8, sequence_length=2)
         assert torch.all(batch.obs[:, :, 0] == batch.obs[:, :1, 0])
         assert not torch.any(batch.done[:, :-1])
+
+
+def test_replay_start_new_episodes_prevents_external_reset_crossing() -> None:
+    replay = FIFOSequenceReplay(capacity_episodes=4, max_episode_steps=6, active_envs=1, obs_dim=1, action_dim=1, device="cpu")
+    replay.add_batch(
+        torch.tensor([[1.0]]),
+        torch.zeros((1, 1)),
+        torch.zeros((1,)),
+        torch.ones((1,)),
+        torch.tensor([[2.0]]),
+        torch.zeros((1,), dtype=torch.bool),
+    )
+    replay.add_batch(
+        torch.tensor([[2.0]]),
+        torch.zeros((1, 1)),
+        torch.zeros((1,)),
+        torch.ones((1,)),
+        torch.tensor([[3.0]]),
+        torch.zeros((1,), dtype=torch.bool),
+    )
+    replay.start_new_episodes()
+    replay.add_batch(
+        torch.tensor([[100.0]]),
+        torch.zeros((1, 1)),
+        torch.zeros((1,)),
+        torch.ones((1,)),
+        torch.tensor([[101.0]]),
+        torch.zeros((1,), dtype=torch.bool),
+    )
+
+    assert not replay.ready(sequence_length=3, batch_size=1)
 
 
 def test_environment_reset_indices_only_resets_done_slot() -> None:
@@ -1004,7 +1039,7 @@ def test_mpo_e_step_keeps_uniform_weights_when_sampled_q_is_uniform() -> None:
         mask=torch.ones((2, 2)),
     )
 
-    def uniform_q(obs, sampled_actions, *, mask=None):
+    def uniform_q(obs, history_action, sampled_actions, *, mask=None):
         return torch.zeros((sampled_actions.shape[0], obs.shape[0], obs.shape[1]), dtype=obs.dtype, device=obs.device)
 
     learner._sampled_q_values = uniform_q  # type: ignore[method-assign]
@@ -1040,7 +1075,7 @@ def test_mpo_e_step_solves_batch_dual_for_distinct_sampled_q() -> None:
         mask=torch.ones((2, 2)),
     )
 
-    def ranked_q(obs, sampled_actions, *, mask=None):
+    def ranked_q(obs, history_action, sampled_actions, *, mask=None):
         ranks = torch.linspace(0.0, 0.05, sampled_actions.shape[0], dtype=obs.dtype, device=obs.device)
         return ranks[:, None, None].expand(-1, obs.shape[0], obs.shape[1])
 
@@ -1073,14 +1108,39 @@ def test_sequence_sampled_q_values_match_recurrent_reference() -> None:
         device="cpu",
     )
     obs = torch.randn((2, 3, obs_dim), dtype=torch.float32)
-    sampled = torch.randn((4, 2, 3, action_dim), dtype=torch.float32)
+    history_action = torch.tanh(torch.randn((2, 3, action_dim), dtype=torch.float32))
+    sampled = history_action.unsqueeze(0).repeat(4, 1, 1, 1)
     mask = torch.ones((2, 3), dtype=torch.float32)
-    chunked = learner._sampled_q_values(obs, sampled, mask=mask)
-    reference = []
-    for k in range(4):
-        q, _ = critic(obs, sampled[k], mask=mask)
-        reference.append(q)
-    assert torch.allclose(chunked, torch.stack(reference, dim=0), atol=1.0e-6)
+    chunked = learner._sampled_q_values(obs, history_action, sampled, mask=mask)
+    reference, _ = critic(obs, history_action, mask=mask)
+    assert torch.allclose(chunked, reference.unsqueeze(0).repeat(4, 1, 1), atol=1.0e-6)
+
+
+def test_sampled_q_values_use_replay_history_not_candidate_history() -> None:
+    torch.manual_seed(124)
+    obs_dim = 9
+    action_dim = 3
+    actor = FeedForwardGaussianActor(obs_dim=obs_dim, action_dim=action_dim, hidden_dim=8)
+    critic = RecurrentQCritic(obs_dim=obs_dim, action_dim=action_dim, lstm_hidden_dim=8, mlp_hidden_dim=8)
+    target_actor = FeedForwardGaussianActor(obs_dim=obs_dim, action_dim=action_dim, hidden_dim=8)
+    target_critic = RecurrentQCritic(obs_dim=obs_dim, action_dim=action_dim, lstm_hidden_dim=8, mlp_hidden_dim=8)
+    learner = MaximumAPosterioriPolicyOptimiser(
+        actor=actor,
+        critic=critic,
+        target_actor=target_actor,
+        target_critic=target_critic,
+        config=LearnerConfig(batch_size=2, unroll_length=3, action_samples=2),
+        device="cpu",
+    )
+    obs = torch.randn((2, 3, obs_dim), dtype=torch.float32)
+    history_action = torch.tanh(torch.randn((2, 3, action_dim), dtype=torch.float32))
+    sampled = torch.zeros((2, 2, 3, action_dim), dtype=torch.float32)
+    sampled[:, :, 0] = torch.tanh(torch.randn((2, 2, action_dim), dtype=torch.float32))
+    sampled[:, :, 1:] = 0.25
+    mask = torch.ones((2, 3), dtype=torch.float32)
+
+    q = learner._sampled_q_values(obs, history_action, sampled, mask=mask)
+    assert torch.allclose(q[0, :, 1:], q[1, :, 1:], atol=1.0e-6)
 
 
 def test_actor_update_changes_policy_parameters_on_sequence_batch() -> None:

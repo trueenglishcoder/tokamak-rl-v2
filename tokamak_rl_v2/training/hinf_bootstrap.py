@@ -91,7 +91,7 @@ def run_hinf_bootstrap(
             teacher_action = teacher_action_cpu.to(device=trainer.device, dtype=torch.float32)
 
             actor_out = trainer.actor(obs)
-            mse_loss = F.mse_loss(actor_out.mean, teacher_action)
+            mse_loss = F.mse_loss(torch.tanh(actor_out.mean), teacher_action)
             target_std = torch.full_like(actor_out.std, float(bootstrap.target_std))
             std_loss = F.mse_loss(actor_out.std, target_std)
             loss = mse_loss + float(bootstrap.std_loss_weight) * std_loss
@@ -125,7 +125,7 @@ def run_hinf_bootstrap(
 
             if step % max(int(bootstrap.log_interval), 1) == 0 or step == 1 or step == int(bootstrap.steps):
                 with torch.no_grad():
-                    actor_mean = trainer.actor(obs).mean
+                    actor_mean = trainer.actor.deterministic(obs)
                     abs_error = torch.mean(torch.abs(actor_mean - teacher_action))
                     now = time.monotonic()
                     interval_s = max(now - last_log_time, 1.0e-9)

@@ -122,7 +122,14 @@ class MaximumAPosterioriPolicyOptimiser:
         with torch.no_grad():
             B, T, O = batch.next_obs.shape
             next_action = self.target_actor.deterministic(batch.next_obs.reshape(B * T, O)).reshape(B, T, -1)
-            q_next, _ = self.target_critic(batch.next_obs, next_action, mask=mask)
+            q_next = self.target_critic.evaluate_query_actions_with_history(
+                history_obs=batch.obs,
+                history_action=batch.action,
+                query_obs=batch.next_obs,
+                query_action=next_action,
+                mask=mask,
+                include_current_history=True,
+            )
             target = batch.reward + batch.discount * (~batch.done).to(torch.float32) * q_next
         denom = torch.clamp(mask.sum(), min=1.0)
         loss = torch.sum(((q - target).pow(2)) * mask) / denom
@@ -144,7 +151,7 @@ class MaximumAPosterioriPolicyOptimiser:
             K = int(self.config.action_samples)
             raw = old.distribution.rsample((K,)).reshape(K, B, T, -1)
             sampled = torch.tanh(raw)
-            q_values = self._sampled_q_values(obs_seq, sampled, mask=mask).detach()
+            q_values = self._sampled_q_values(obs_seq, batch.action.detach(), sampled, mask=mask).detach()
             q_centered = q_values - torch.max(q_values, dim=0, keepdim=True).values
             eta = self._solve_e_step_temperature(q_centered, mask=mask, epsilon=float(self.config.mpo_epsilon))
             weights = torch.softmax(q_centered / eta, dim=0).detach()
@@ -191,7 +198,7 @@ class MaximumAPosterioriPolicyOptimiser:
                 delta_sq = delta_sq + torch.sum((current.detach() - previous).pow(2))
             weight_entropy = -torch.sum(weights * torch.log(torch.clamp(weights, min=1.0e-12)) * masked) / denom
             sampled_q_spread = torch.sum(torch.std(q_values, dim=0, unbiased=False) * mask) / denom
-            action_mean_abs = torch.sum(torch.mean(torch.abs(new_mean.detach()), dim=-1) * mask) / denom
+            action_mean_abs = torch.sum(torch.mean(torch.abs(torch.tanh(new_mean.detach())), dim=-1) * mask) / denom
             action_std_mean = torch.sum(torch.mean(new_std.detach(), dim=-1) * mask) / denom
             weight_max = torch.sum(torch.max(weights, dim=0).values * mask) / denom
             mean_penalty_after = F.softplus(self.log_mean_kl_penalty).clamp_min(1.0e-8)
@@ -257,16 +264,20 @@ class MaximumAPosterioriPolicyOptimiser:
         self.last_temperature.copy_(eta.to(dtype=self.last_temperature.dtype))
         return eta
 
-    def _sampled_q_values(self, obs: Tensor, sampled_actions: Tensor, *, mask: Tensor | None = None) -> Tensor:
-        """Evaluate sampled-action Q values over full recurrent sequences."""
+    def _sampled_q_values(self, obs: Tensor, history_action: Tensor, sampled_actions: Tensor, *, mask: Tensor | None = None) -> Tensor:
+        """Evaluate sampled-action Q values using replay history hidden states."""
         if obs.ndim != 3 or sampled_actions.ndim != 4:
             raise ValueError("_sampled_q_values expects obs [B,T,O] and sampled_actions [K,B,T,A]")
-        K = int(sampled_actions.shape[0])
-        out = torch.empty((K, int(obs.shape[0]), int(obs.shape[1])), dtype=obs.dtype, device=obs.device)
-        for k in range(K):
-            q, _ = self.critic(obs, sampled_actions[k], mask=mask)
-            out[k] = q
-        return out
+        if history_action.shape[:2] != obs.shape[:2]:
+            raise ValueError("history_action must have shape [B,T,A] matching obs")
+        return self.critic.evaluate_query_actions_with_history(
+            history_obs=obs,
+            history_action=history_action,
+            query_obs=obs,
+            query_action=sampled_actions,
+            mask=mask,
+            include_current_history=False,
+        )
 
     def _soft_sync(self, tau: float) -> None:
         with torch.no_grad():
