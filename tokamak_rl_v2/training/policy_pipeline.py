@@ -88,8 +88,6 @@ def main(argv: list[str] | None = None) -> int:
             min_action_rms=float(args.min_action_rms),
             max_action_rms=float(args.max_action_rms),
             min_episode_completion=float(args.min_episode_completion),
-            max_action_projection_violation_fraction=float(args.max_action_projection_violation_fraction),
-            max_action_projection_delta_rms=float(args.max_action_projection_delta_rms),
             min_policy_weight_extra=float(args.min_policy_weight_extra),
             min_sampled_q_spread=float(args.min_sampled_q_spread),
             require_controller_rollout=not bool(args.skip_controller_rollout_gate),
@@ -215,8 +213,6 @@ def evaluate_policy_gates(
     min_action_rms: float,
     max_action_rms: float,
     min_episode_completion: float,
-    max_action_projection_violation_fraction: float,
-    max_action_projection_delta_rms: float,
     min_policy_weight_extra: float,
     min_sampled_q_spread: float,
     require_controller_rollout: bool,
@@ -296,31 +292,6 @@ def evaluate_policy_gates(
         _finite(min_completion) and min_completion >= min_episode_completion,
         value={"mean": mean_completion, "min": min_completion, "mean_steps": _metric(actor_eval, "mean_episode_steps"), "min_steps": _metric(actor_eval, "min_episode_steps")},
         threshold=f"min >= {min_episode_completion:g}",
-    )
-
-    projection_delta = _metric(actor_eval, "action_projection_delta_rms")
-    projection_delta_max = _metric(actor_eval, "action_projection_delta_rms_max", default=projection_delta)
-    add(
-        "action_projection_delta",
-        _finite(projection_delta) and projection_delta <= max_action_projection_delta_rms,
-        value={"mean_rms": projection_delta, "max_rms": projection_delta_max},
-        threshold=f"mean RMS <= {max_action_projection_delta_rms:g}",
-    )
-    projection_violation = _metric(actor_eval, "action_projection_violation", default=_metric(actor_eval, "terminated_action_projection", default=0.0))
-    projection_violation_max = _metric(actor_eval, "action_projection_violation_max", default=_metric(actor_eval, "terminated_action_projection_max", default=projection_violation))
-    add(
-        "action_projection_violation",
-        _finite(projection_violation) and projection_violation <= max_action_projection_violation_fraction and (max_action_projection_violation_fraction > 0.0 or projection_violation_max <= 0.0),
-        value={"fraction": projection_violation, "max": projection_violation_max},
-        threshold=f"fraction <= {max_action_projection_violation_fraction:g}",
-    )
-    projection_terminated = _metric(actor_eval, "terminated_action_projection", default=0.0)
-    projection_terminated_max = _metric(actor_eval, "terminated_action_projection_max", default=projection_terminated)
-    add(
-        "action_projection_termination",
-        _finite(projection_terminated) and projection_terminated <= 0.0 and projection_terminated_max <= 0.0,
-        value={"fraction": projection_terminated, "max": projection_terminated_max},
-        threshold="0",
     )
 
     policy_weight_max = _metric(tail_losses, "tail100.policy_weight_max")
@@ -584,8 +555,6 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--min-action-rms", type=float, default=0.005)
     ap.add_argument("--max-action-rms", type=float, default=0.5)
     ap.add_argument("--min-episode-completion", type=float, default=0.95)
-    ap.add_argument("--max-action-projection-violation-fraction", type=float, default=0.0)
-    ap.add_argument("--max-action-projection-delta-rms", type=float, default=0.05)
     ap.add_argument("--max-controller-shape-error-m", type=float, default=0.03)
     ap.add_argument("--max-controller-ip-error-a", type=float, default=40000.0)
     ap.add_argument("--min-policy-weight-extra", type=float, default=1.0e-4)

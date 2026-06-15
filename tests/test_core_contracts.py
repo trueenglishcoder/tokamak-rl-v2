@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -18,7 +19,7 @@ from tokamak_rl_v2.export.cli import main as export_cli_main
 from tokamak_rl_v2.training.mpo import MaximumAPosterioriPolicyOptimiser
 from tokamak_rl_v2.training.policy_pipeline import _ArrayReferenceScenario, _write_baseline_report, evaluate_policy_gates, run_reset_sanity
 from tokamak_rl_v2.training.replay import FIFOSequenceReplay, SequenceBatch
-from tokamak_rl_v2.training.trainer import Trainer
+from tokamak_rl_v2.training.trainer import Trainer, _append_csv_row
 from tokamak_rl_v2.env.references import _segmented_ip, _segment_lengths, generate_reference_batch
 from tokamak_rl_v2.training.cli import _device_list
 
@@ -200,8 +201,6 @@ def test_physical_reward_keeps_actuator_terms_as_diagnostics_only() -> None:
     ref = torch.zeros((2, 32, 2), dtype=torch.float32)
     action = torch.zeros((2, 9), dtype=torch.float32)
     action[1] = 0.95
-    projection_delta = torch.zeros((2, 9), dtype=torch.float32)
-    projection_delta[1] = 0.15
     rb = reward_fn(
         ip=torch.full((2,), 200000.0),
         ip_ref=torch.full((2,), 200000.0),
@@ -215,14 +214,12 @@ def test_physical_reward_keeps_actuator_terms_as_diagnostics_only() -> None:
         derivative_usage=torch.tensor([0.10, 0.95], dtype=torch.float32),
         boundary_found=torch.ones((2,), dtype=torch.bool),
         terminated=torch.zeros((2,), dtype=torch.bool),
-        action_projection_delta=projection_delta,
     )
     assert float(rb.reward[0].item()) == pytest.approx(float(rb.reward[1].item()))
     assert rb.components["current_over_limit_a"][1] > rb.components["current_over_limit_a"][0]
     assert rb.components["derivative_usage"][1] > rb.components["derivative_usage"][0]
     assert rb.components["max_abs_action"][1] > rb.components["max_abs_action"][0]
-    assert rb.components["action_projection_delta_rms"][1] > rb.components["action_projection_delta_rms"][0]
-    for removed in ("current_margin_loss", "derivative_loss", "action_saturation_loss", "delta_action_loss", "action_projection_loss", "time_weight"):
+    for removed in ("current_margin_loss", "derivative_loss", "action_saturation_loss", "delta_action_loss", "time_weight"):
         assert removed not in rb.components
 
 
@@ -261,35 +258,21 @@ def test_action_scale_caps_physical_derivative_usage() -> None:
     assert np.allclose(np.asarray(env.normalization()["derivative_scale"]), env.raw_derivative_limits.detach().cpu().numpy() * 0.25)
 
 
-def test_current_safety_projection_prevents_next_step_over_limit() -> None:
+def test_current_limit_violation_is_reported_and_terminates() -> None:
     cfg = load_experiment_config(CONFIG)
-    cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=4, project_actions_to_current_limits=True, current_projection_margin_fraction=0.02))
+    cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=4, terminate_on_current_limit=True))
     env = TokamakMagneticControlEnv(cfg, batch_size=1, device="cpu", seed=12)
     env.reset()
     limit = float(env.current_limits[0].item())
-    env._cpu_models[0].state.pfc_currents[0] = 0.979 * limit
+    env._cpu_models[0].state.pfc_currents[0] = 1.01 * limit
     result = env.step(torch.ones((1, env.action_dim), dtype=torch.float32))
     comps = result.info["reward_components"]
-    assert float(np.nanmax(comps["current_over_limit_a"])) == pytest.approx(0.0)
-    assert float(np.nanmax(comps["current_usage_fraction"])) <= 0.9801
-    assert float(np.nanmax(comps["action_projection_delta_rms"])) > 0.0
-    assert bool(result.terminated[0].item()) is False
-    assert float(np.nanmax(comps["action_projection_violation"])) == pytest.approx(1.0)
-    assert float(np.nanmax(comps["terminated_action_projection"])) == pytest.approx(0.0)
-    assert not torch.allclose(result.applied_action, torch.ones_like(result.applied_action))
+    assert float(np.nanmax(comps["current_over_limit_a"])) > 0.0
+    assert float(np.nanmax(comps["current_usage_fraction"])) > 1.0
+    assert bool(result.terminated[0].item()) is True
+    assert float(np.nanmax(comps["terminated_current"])) == pytest.approx(1.0)
+    assert torch.allclose(result.applied_action, torch.ones_like(result.applied_action))
     assert torch.allclose(env.previous_action, result.applied_action)
-    assert env.normalization()["current_projection_enabled"] is True
-    assert env.normalization()["action_projection_termination_rms"] == pytest.approx(0.05)
-    assert env.normalization()["terminate_on_action_projection"] is False
-
-    terminating_cfg = replace(cfg, sim=replace(cfg.sim, terminate_on_action_projection=True))
-    terminating_env = TokamakMagneticControlEnv(terminating_cfg, batch_size=1, device="cpu", seed=12)
-    terminating_env.reset()
-    terminating_env._cpu_models[0].state.pfc_currents[0] = 0.979 * float(terminating_env.current_limits[0].item())
-    terminating_result = terminating_env.step(torch.ones((1, terminating_env.action_dim), dtype=torch.float32))
-    terminating_comps = terminating_result.info["reward_components"]
-    assert bool(terminating_result.terminated[0].item()) is True
-    assert float(np.nanmax(terminating_comps["terminated_action_projection"])) == pytest.approx(1.0)
 
 
 def test_hold_reset_boundary_uses_observed_reset_boundary() -> None:
@@ -790,18 +773,11 @@ def test_config_loader_rejects_invalid_values(tmp_path: Path) -> None:
         load_experiment_config(bad_ip_kind)
 
     data = json.loads(CONFIG.read_text())
-    data["sim"]["current_projection_margin_fraction"] = 1.0
-    bad_projection_margin = tmp_path / "bad_projection_margin.json"
-    bad_projection_margin.write_text(json.dumps(data), encoding="utf-8")
-    with pytest.raises(ValueError, match="current_projection_margin_fraction"):
-        load_experiment_config(bad_projection_margin)
-
-    data = json.loads(CONFIG.read_text())
-    data["sim"]["action_projection_termination_rms"] = 0.0
-    bad_projection_termination = tmp_path / "bad_projection_termination.json"
-    bad_projection_termination.write_text(json.dumps(data), encoding="utf-8")
-    with pytest.raises(ValueError, match="action_projection_termination_rms"):
-        load_experiment_config(bad_projection_termination)
+    data["sim"]["project_actions_to_current_limits"] = True
+    bad_projection = tmp_path / "bad_projection.json"
+    bad_projection.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="stale keys.*project_actions_to_current_limits"):
+        load_experiment_config(bad_projection)
 
 
 def test_policy_pipeline_gates_require_learning_signals() -> None:
@@ -820,12 +796,6 @@ def test_policy_pipeline_gates_require_learning_signals() -> None:
         "min_episode_completion": 1.0,
         "mean_episode_steps": 500.0,
         "min_episode_steps": 500.0,
-        "action_projection_delta_rms": 0.0,
-        "action_projection_delta_rms_max": 0.0,
-        "action_projection_violation": 0.0,
-        "action_projection_violation_max": 0.0,
-        "terminated_action_projection": 0.0,
-        "terminated_action_projection_max": 0.0,
     }
     no_control = {"ip_error_a": 100000.0, "ip_error_a_late": 100000.0}
     tail_losses = {"tail100.policy_weight_max": 0.06, "tail100.sampled_q_spread": 1.0e-4}
@@ -848,8 +818,6 @@ def test_policy_pipeline_gates_require_learning_signals() -> None:
         "min_action_rms": 0.005,
         "max_action_rms": 0.5,
         "min_episode_completion": 0.95,
-        "max_action_projection_violation_fraction": 0.0,
-        "max_action_projection_delta_rms": 0.05,
         "min_policy_weight_extra": 1.0e-4,
         "min_sampled_q_spread": 1.0e-8,
         "require_controller_rollout": True,
@@ -897,7 +865,7 @@ def test_policy_pipeline_gates_require_learning_signals() -> None:
     assert late_reasons["ip_improvement_late"] is False
 
     fake_short_eval = evaluate_policy_gates(
-        actor_eval=dict(actor_eval, mean_episode_completion=0.003, min_episode_completion=0.002, action_projection_violation=0.3, action_projection_violation_max=1.0, terminated_action_projection=0.3, terminated_action_projection_max=1.0),
+        actor_eval=dict(actor_eval, mean_episode_completion=0.003, min_episode_completion=0.002),
         no_control=no_control,
         tail_losses=tail_losses,
         **gate_kwargs,
@@ -905,8 +873,6 @@ def test_policy_pipeline_gates_require_learning_signals() -> None:
     fake_reasons = {check["name"]: check["passed"] for check in fake_short_eval["checks"]}
     assert fake_short_eval["passed"] is False
     assert fake_reasons["episode_completion"] is False
-    assert fake_reasons["action_projection_violation"] is False
-    assert fake_reasons["action_projection_termination"] is False
 
     bad_controller = evaluate_policy_gates(
         actor_eval=actor_eval,
@@ -1069,11 +1035,26 @@ def test_evaluate_detailed_reports_physical_metrics(tmp_path: Path) -> None:
     assert "boundary_found" in metrics
     assert "boundary_found_late_min" in metrics
     assert "boundary_found_min" in metrics
-    assert "action_projection_violation" in metrics
     assert np.isfinite(metrics["mean_return"])
     assert 0.0 < metrics["mean_episode_completion"] <= 1.0
     assert repeat["mean_return"] == pytest.approx(metrics["mean_return"])
     assert np.isfinite(holdout["mean_return"])
+
+
+def test_append_csv_row_preserves_header_when_metric_sets_change(tmp_path: Path) -> None:
+    path = tmp_path / "eval_history.csv"
+    _append_csv_row(path, {"step": 1, "mean_return": -1.0, "late_metric": 3.0, "selection_score": -10.0})
+    _append_csv_row(path, {"step": 2, "mean_return": -2.0, "selection_score": -20.0})
+    _append_csv_row(path, {"step": 3, "mean_return": -3.0, "new_metric": 7.0, "selection_score": -30.0})
+
+    with path.open(newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+
+    assert [row["step"] for row in rows] == ["1", "2", "3"]
+    assert [row["selection_score"] for row in rows] == ["-10.0", "-20.0", "-30.0"]
+    assert rows[1]["late_metric"] == ""
+    assert rows[0]["new_metric"] == ""
+    assert rows[2]["new_metric"] == "7.0"
 
 
 def test_mpo_e_step_keeps_uniform_weights_when_sampled_q_is_uniform() -> None:

@@ -37,7 +37,6 @@ class T15PhysicalReward:
         boundary_found: Tensor,
         terminated: Tensor,
         episode_progress: Tensor | None = None,
-        action_projection_delta: Tensor | None = None,
     ) -> RewardBatch:
         c = self.config
 
@@ -56,12 +55,6 @@ class T15PhysicalReward:
         action_rms = torch.sqrt(torch.mean(action.pow(2), dim=-1))
         delta_action_rms = torch.sqrt(torch.mean(delta_action.pow(2), dim=-1))
         max_abs_action = torch.max(torch.abs(action), dim=-1).values
-        if action_projection_delta is None:
-            projection_delta = torch.zeros_like(action)
-        else:
-            projection_delta = action_projection_delta.to(dtype=action.dtype, device=action.device).reshape_as(action)
-        action_projection_delta_rms = torch.sqrt(torch.mean(projection_delta.pow(2), dim=-1))
-        action_projection_delta_max = torch.max(torch.abs(projection_delta), dim=-1).values
 
         shape_loss = _huber01(shape_error_mean / max(float(c.shape_bad_m), 1.0e-12)) + 0.25 * _huber01(shape_error_max / max(float(c.shape_max_bad_m), 1.0e-12))
         ip_loss = _huber01(ip_error / max(float(c.ip_bad_a), 1.0e-12))
@@ -88,8 +81,6 @@ class T15PhysicalReward:
                 "max_abs_action": max_abs_action,
                 "action_rms": action_rms,
                 "delta_action_rms": delta_action_rms,
-                "action_projection_delta_rms": action_projection_delta_rms,
-                "action_projection_delta_max": action_projection_delta_max,
                 "episode_progress": progress,
                 "base_physical_cost": physical_cost,
                 "physical_cost": physical_cost,

@@ -133,10 +133,6 @@ class SimConfig:
     terminate_on_boundary_loss: bool = True
     terminate_on_current_limit: bool = True
     current_termination_over_limit_a: float = 0.0
-    project_actions_to_current_limits: bool = False
-    current_projection_margin_fraction: float = 0.0
-    action_projection_termination_rms: float = 0.05
-    terminate_on_action_projection: bool = False
 
 
 @dataclass(frozen=True, slots=True)

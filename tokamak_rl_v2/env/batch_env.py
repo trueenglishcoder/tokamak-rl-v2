@@ -249,7 +249,7 @@ class TokamakMagneticControlEnv:
             torch.ones_like(self.derivative_limits),
         )
         normalized = torch.clamp(torch.nan_to_num(physical / deriv_scale[None, :], nan=0.0, posinf=1.0, neginf=-1.0), -1.0, 1.0)
-        return self._project_action_to_current_safety(normalized).detach()
+        return normalized.detach()
 
     def _write_reference_indices(self, indices_t: Tensor, reference: ReferenceBatch) -> None:
         assert self.reference is not None
@@ -274,61 +274,23 @@ class TokamakMagneticControlEnv:
     def step(self, action: Tensor) -> BatchStep:
         action = torch.as_tensor(action, dtype=torch.float32, device=self.device).reshape(self.batch_size, self.action_dim)
         commanded = torch.clamp(action, -1.0, 1.0)
-        pre_projection = torch.clamp(commanded + self.action_offset, -1.0, 1.0)
-        clipped = self._project_action_to_current_safety(pre_projection)
-        projection_delta = clipped - pre_projection
+        clipped = torch.clamp(commanded + self.action_offset, -1.0, 1.0)
         physical = clipped * self.derivative_limits[None, :]
         if self.config.sim.compute_backend == "gpu":
             assert self._gpu_sim is not None
             result = self._gpu_sim.step(physical.to(dtype=torch.float64, device=self._gpu_sim.device))
             self.step_index += 1
             obs = self._obs_gpu(result=result)
-            reward, terminated, info = self._reward_gpu(result, clipped, projection_delta)
+            reward, terminated, info = self._reward_gpu(result, clipped)
         else:
             self._step_cpu(physical)
             self.step_index += 1
             obs = self._obs_cpu()
-            reward, terminated, info = self._reward_cpu(clipped, projection_delta)
+            reward, terminated, info = self._reward_cpu(clipped)
         self.previous_action = clipped.detach().clone()
         truncated = self.step_index >= int(self.config.sim.max_episode_steps)
         self.done = terminated | truncated
         return BatchStep(obs=obs, applied_action=clipped.detach().clone(), reward=reward, terminated=terminated, truncated=truncated, info=info)
-
-    def _project_action_to_current_safety(self, normalized_action: Tensor) -> Tensor:
-        if not self.config.sim.project_actions_to_current_limits:
-            return normalized_action
-        current, previous_derivative = self._pre_step_current_and_derivative()
-        dt = max(float(self.cfg.physics.t_step), 1.0e-12)
-        alpha = self._actuator_alpha()
-        beta = max(1.0 - alpha, 1.0e-12)
-        margin = float(self.config.sim.current_projection_margin_fraction)
-        usable_limits = torch.clamp(self.current_limits * (1.0 - margin), min=1.0e-12)
-        lower_applied = (-usable_limits[None, :] - current) / dt
-        upper_applied = (usable_limits[None, :] - current) / dt
-        lower_command = (lower_applied - alpha * previous_derivative) / beta
-        upper_command = (upper_applied - alpha * previous_derivative) / beta
-        deriv_scale = torch.where(torch.isfinite(self.derivative_limits) & (self.derivative_limits > 0.0), self.derivative_limits, torch.ones_like(self.derivative_limits))
-        lower_norm = torch.minimum(lower_command, upper_command) / deriv_scale[None, :]
-        upper_norm = torch.maximum(lower_command, upper_command) / deriv_scale[None, :]
-        lower_norm = torch.clamp(lower_norm, -1.0, 1.0)
-        upper_norm = torch.clamp(upper_norm, -1.0, 1.0)
-        return torch.minimum(torch.maximum(normalized_action, lower_norm), upper_norm)
-
-    def _pre_step_current_and_derivative(self) -> tuple[Tensor, Tensor]:
-        if self.config.sim.compute_backend == "gpu":
-            assert self._gpu_sim is not None
-            current = torch.cat([self._gpu_sim.pfc_currents, self._gpu_sim.sol_currents], dim=1).to(dtype=torch.float32, device=self.device)
-            derivative = torch.cat([self._gpu_sim.pfc_derivs, self._gpu_sim.sol_derivs], dim=1).to(dtype=torch.float32, device=self.device)
-            return current, derivative
-        currents = []
-        derivatives = []
-        for model in self._cpu_models:
-            currents.append(np.concatenate([model.state.pfc_currents, model.state.sol_currents]))
-            derivatives.append(np.concatenate([model.state.pfc_current_derivs, model.state.sol_current_derivs]))
-        return (
-            torch.as_tensor(np.stack(currents), dtype=torch.float32, device=self.device),
-            torch.as_tensor(np.stack(derivatives), dtype=torch.float32, device=self.device),
-        )
 
     def _pre_step_bank_currents(self) -> tuple[Tensor, Tensor]:
         if self.config.sim.compute_backend == "gpu":
@@ -505,7 +467,7 @@ class TokamakMagneticControlEnv:
         for b, model in enumerate(self._cpu_models):
             model.step(pfc_current_derivs=arr[b, : self.cfg.pfc.n_coils], sol_current_derivs=arr[b, self.cfg.pfc.n_coils :])
 
-    def _reward_gpu(self, result, action: Tensor, projection_delta: Tensor) -> tuple[Tensor, Tensor, dict[str, object]]:
+    def _reward_gpu(self, result, action: Tensor) -> tuple[Tensor, Tensor, dict[str, object]]:
         ip_ref, ref_points, _ref_radii = self._reference_at()
         current = torch.cat([result.state.pfc_currents, result.state.sol_currents], dim=1).to(torch.float32)
         deriv = torch.cat([result.state.pfc_current_derivs, result.state.sol_current_derivs], dim=1).to(torch.float32)
@@ -523,24 +485,15 @@ class TokamakMagneticControlEnv:
         current_terminated = torch.zeros_like(found, dtype=torch.bool)
         if self.config.sim.terminate_on_current_limit:
             current_terminated = current_over_limit > float(self.config.sim.current_termination_over_limit_a)
-        projection_delta_rms = torch.sqrt(torch.mean(projection_delta.pow(2), dim=-1))
-        projection_violation = torch.zeros_like(found, dtype=torch.bool)
-        projection_terminated = torch.zeros_like(found, dtype=torch.bool)
-        if self.config.sim.project_actions_to_current_limits:
-            projection_violation = projection_delta_rms > float(self.config.sim.action_projection_termination_rms)
-            if self.config.sim.terminate_on_action_projection:
-                projection_terminated = projection_violation
-        terminated = boundary_terminated | current_terminated | projection_terminated
+        terminated = boundary_terminated | current_terminated
         episode_progress = self.step_index.to(torch.float32) / max(float(self.config.sim.max_episode_steps), 1.0)
-        rb = self.reward_fn(ip=result.state.Ip.to(torch.float32), ip_ref=ip_ref, boundary_points=boundary_points, reference_points=ref, action=action, previous_action=self.previous_action, current_over_limit_a=current_over_limit, current_usage_fraction=current_usage_fraction, current_margin_fraction=current_margin_fraction, derivative_usage=derivative_usage, boundary_found=found, terminated=terminated, episode_progress=episode_progress, action_projection_delta=projection_delta)
+        rb = self.reward_fn(ip=result.state.Ip.to(torch.float32), ip_ref=ip_ref, boundary_points=boundary_points, reference_points=ref, action=action, previous_action=self.previous_action, current_over_limit_a=current_over_limit, current_usage_fraction=current_usage_fraction, current_margin_fraction=current_margin_fraction, derivative_usage=derivative_usage, boundary_found=found, terminated=terminated, episode_progress=episode_progress)
         components = dict(rb.components)
         components["terminated_boundary"] = boundary_terminated.to(dtype=rb.reward.dtype)
         components["terminated_current"] = current_terminated.to(dtype=rb.reward.dtype)
-        components["action_projection_violation"] = projection_violation.to(dtype=rb.reward.dtype)
-        components["terminated_action_projection"] = projection_terminated.to(dtype=rb.reward.dtype)
         return rb.reward, terminated, {"reward_components": {k: v.detach().cpu().numpy() for k, v in components.items()}}
 
-    def _reward_cpu(self, action: Tensor, projection_delta: Tensor) -> tuple[Tensor, Tensor, dict[str, object]]:
+    def _reward_cpu(self, action: Tensor) -> tuple[Tensor, Tensor, dict[str, object]]:
         ip_ref, ref_points, _ref_radii = self._reference_at()
         boundary_points = []
         found = []
@@ -574,21 +527,12 @@ class TokamakMagneticControlEnv:
         current_terminated = torch.zeros_like(found_t, dtype=torch.bool)
         if self.config.sim.terminate_on_current_limit:
             current_terminated = current_over_limit > float(self.config.sim.current_termination_over_limit_a)
-        projection_delta_rms = torch.sqrt(torch.mean(projection_delta.pow(2), dim=-1))
-        projection_violation = torch.zeros_like(found_t, dtype=torch.bool)
-        projection_terminated = torch.zeros_like(found_t, dtype=torch.bool)
-        if self.config.sim.project_actions_to_current_limits:
-            projection_violation = projection_delta_rms > float(self.config.sim.action_projection_termination_rms)
-            if self.config.sim.terminate_on_action_projection:
-                projection_terminated = projection_violation
-        terminated = boundary_terminated | current_terminated | projection_terminated
+        terminated = boundary_terminated | current_terminated
         episode_progress = self.step_index.to(torch.float32) / max(float(self.config.sim.max_episode_steps), 1.0)
-        rb = self.reward_fn(ip=torch.as_tensor(ips, dtype=torch.float32, device=self.device), ip_ref=ip_ref, boundary_points=torch.nan_to_num(torch.as_tensor(np.stack(boundary_points), dtype=torch.float32, device=self.device)), reference_points=ref_points[:, : int(self.config.sim.angles)].to(torch.float32), action=action, previous_action=self.previous_action, current_over_limit_a=current_over_limit, current_usage_fraction=current_usage_fraction, current_margin_fraction=current_margin_fraction, derivative_usage=derivative_usage, boundary_found=found_t, terminated=terminated, episode_progress=episode_progress, action_projection_delta=projection_delta)
+        rb = self.reward_fn(ip=torch.as_tensor(ips, dtype=torch.float32, device=self.device), ip_ref=ip_ref, boundary_points=torch.nan_to_num(torch.as_tensor(np.stack(boundary_points), dtype=torch.float32, device=self.device)), reference_points=ref_points[:, : int(self.config.sim.angles)].to(torch.float32), action=action, previous_action=self.previous_action, current_over_limit_a=current_over_limit, current_usage_fraction=current_usage_fraction, current_margin_fraction=current_margin_fraction, derivative_usage=derivative_usage, boundary_found=found_t, terminated=terminated, episode_progress=episode_progress)
         components = dict(rb.components)
         components["terminated_boundary"] = boundary_terminated.to(dtype=rb.reward.dtype)
         components["terminated_current"] = current_terminated.to(dtype=rb.reward.dtype)
-        components["action_projection_violation"] = projection_violation.to(dtype=rb.reward.dtype)
-        components["terminated_action_projection"] = projection_terminated.to(dtype=rb.reward.dtype)
         return rb.reward, terminated, {"reward_components": {k: v.detach().cpu().numpy() for k, v in components.items()}}
 
     def export_schema(self) -> dict[str, object]:
@@ -616,10 +560,6 @@ class TokamakMagneticControlEnv:
             "psi_scale": 1.0,
             "current_scale": self.current_limits.detach().cpu().numpy().astype(float).tolist(),
             "derivative_scale": self.derivative_limits.detach().cpu().numpy().astype(float).tolist(),
-            "current_projection_enabled": bool(self.config.sim.project_actions_to_current_limits),
-            "current_projection_margin_fraction": float(self.config.sim.current_projection_margin_fraction),
-            "action_projection_termination_rms": float(self.config.sim.action_projection_termination_rms),
-            "terminate_on_action_projection": bool(self.config.sim.terminate_on_action_projection),
             "t_step": float(self.cfg.physics.t_step),
             "actuator_tau": float(self.cfg.physics.actuator_tau),
         }

@@ -425,12 +425,8 @@ class Trainer:
             "physical_cost",
             "shape_loss",
             "ip_loss",
-            "action_projection_delta_rms",
-            "action_projection_delta_max",
-            "action_projection_violation",
             "terminated_boundary",
             "terminated_current",
-            "terminated_action_projection",
         }
         min_metrics = {"current_margin_fraction", "boundary_found"}
         for name, values in component_values.items():
@@ -468,7 +464,6 @@ class Trainer:
         current_over = float(metrics.get("current_over_limit_a_late_max", metrics.get("current_over_limit_a_max", metrics.get("current_over_limit_a", 0.0))))
         boundary_found = float(metrics.get("boundary_found_late_min", metrics.get("boundary_found_min", metrics.get("boundary_found", 1.0))))
         episode_completion = float(metrics.get("min_episode_completion", metrics.get("mean_episode_completion", 1.0)))
-        projection_violation = float(metrics.get("action_projection_violation_max", metrics.get("terminated_action_projection_max", 0.0)))
         shape_drift = float(metrics.get("shape_error_mean_m_late_minus_early", 0.0))
         ip_drift = float(metrics.get("ip_error_a_late_minus_early", 0.0))
         if np.isfinite(current_over) and current_over > 0.0:
@@ -477,8 +472,6 @@ class Trainer:
             score -= 1.0e6 * (0.999 - boundary_found)
         if np.isfinite(episode_completion) and episode_completion < 0.95:
             score -= 1.0e6 * (0.95 - episode_completion)
-        if np.isfinite(projection_violation) and projection_violation > 0.0:
-            score -= 1.0e6 * projection_violation
         if np.isfinite(shape_drift) and shape_drift > 0.0:
             score -= 1000.0 * shape_drift
         if np.isfinite(ip_drift) and ip_drift > 0.0:
@@ -670,9 +663,23 @@ def _resolve_device(value: str) -> torch.device:
 def _append_csv_row(path: Path, row: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     exists = path.exists() and path.stat().st_size > 0
-    fields = list(row.keys())
+    if exists:
+        with path.open(newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            fields = list(reader.fieldnames or [])
+            rows = list(reader)
+        extra_fields = [key for key in row if key not in fields]
+        if extra_fields:
+            fields.extend(extra_fields)
+            with path.open("w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fields)
+                writer.writeheader()
+                for old_row in rows:
+                    writer.writerow(old_row)
+    else:
+        fields = list(row.keys())
     with path.open("a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fields)
+        writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         if not exists:
             writer.writeheader()
         writer.writerow(row)

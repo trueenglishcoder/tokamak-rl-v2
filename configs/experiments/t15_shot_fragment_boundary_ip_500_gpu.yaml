@@ -154,10 +154,6 @@
         "sol2": 3408556.22
       }
     },
-    "project_actions_to_current_limits": true,
-    "current_projection_margin_fraction": 0.02,
-    "action_projection_termination_rms": 0.05,
-    "terminate_on_action_projection": false,
     "terminate_on_boundary_loss": true
   },
   "reference": {

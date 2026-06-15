@@ -61,6 +61,12 @@ def _mapping(raw: object, name: str) -> Mapping[str, Any]:
     return raw
 
 
+def _reject_stale_keys(raw: Mapping[str, Any], stale_keys: set[str], *, prefix: str) -> None:
+    stale = sorted(set(raw) & stale_keys)
+    if stale:
+        raise ValueError(f"{prefix} contains stale keys from the removed projection layer: " + ", ".join(stale))
+
+
 def _range(raw: Mapping[str, Any], name: str) -> Range:
     out = Range(min=float(raw["min"]), max=float(raw["max"]))
     out.validate(name)
@@ -157,6 +163,7 @@ def _shot_fragments(raw: Mapping[str, Any] | None, base: Path) -> ShotFragmentCo
 
 
 def _sim(raw: Mapping[str, Any], base: Path) -> SimConfig:
+    _reject_stale_keys(raw, _STALE_SIM_KEYS, prefix="sim")
     config_path = _resolve(base, raw["config_path"])
     initial_raw = raw.get("initial_currents_path")
     return SimConfig(
@@ -173,10 +180,6 @@ def _sim(raw: Mapping[str, Any], base: Path) -> SimConfig:
         terminate_on_boundary_loss=bool(raw.get("terminate_on_boundary_loss", True)),
         terminate_on_current_limit=bool(raw.get("terminate_on_current_limit", True)),
         current_termination_over_limit_a=float(raw.get("current_termination_over_limit_a", 0.0)),
-        project_actions_to_current_limits=bool(raw.get("project_actions_to_current_limits", False)),
-        current_projection_margin_fraction=float(raw.get("current_projection_margin_fraction", 0.0)),
-        action_projection_termination_rms=float(raw.get("action_projection_termination_rms", 0.05)),
-        terminate_on_action_projection=bool(raw.get("terminate_on_action_projection", False)),
     )
 
 
@@ -336,12 +339,6 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
         raise ValueError("sim.action_scale must be finite and in (0, 1]")
     if not math.isfinite(float(cfg.sim.current_termination_over_limit_a)) or float(cfg.sim.current_termination_over_limit_a) < 0.0:
         raise ValueError("sim.current_termination_over_limit_a must be finite and non-negative")
-    if not math.isfinite(float(cfg.sim.current_projection_margin_fraction)) or not 0.0 <= float(cfg.sim.current_projection_margin_fraction) < 1.0:
-        raise ValueError("sim.current_projection_margin_fraction must be finite and in [0, 1)")
-    if not math.isfinite(float(cfg.sim.action_projection_termination_rms)) or not 0.0 < float(cfg.sim.action_projection_termination_rms) <= 1.0:
-        raise ValueError("sim.action_projection_termination_rms must be finite and in (0, 1]")
-    if cfg.sim.project_actions_to_current_limits and cfg.sim.current_safety_limits is None:
-        raise ValueError("sim.project_actions_to_current_limits requires current_safety_limits")
     _validate_reward_config(cfg.reward, prefix="reward")
     if cfg.randomization.ip_measurement_noise_a < 0.0 or cfg.randomization.current_measurement_noise_a < 0.0:
         raise ValueError("randomization noise values must be non-negative")
@@ -419,4 +416,12 @@ _STALE_REWARD_KEYS = {
     "late_error_power",
     "_".join(("tracking", "combiner")),
     "_".join(("shape", "aggregator")),
+}
+
+
+_STALE_SIM_KEYS = {
+    "project_actions_to_current_limits",
+    "current_projection_margin_fraction",
+    "action_projection_termination_rms",
+    "terminate_on_action_projection",
 }
