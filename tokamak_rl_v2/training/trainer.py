@@ -414,13 +414,11 @@ class Trainer:
             "physical_cost",
             "shape_loss",
             "ip_loss",
-            "current_margin_loss",
-            "derivative_loss",
-            "action_saturation_loss",
-            "delta_action_loss",
-            "action_projection_loss",
             "action_projection_delta_rms",
             "action_projection_delta_max",
+            "terminated_boundary",
+            "terminated_current",
+            "terminated_action_projection",
         }
         min_metrics = {"current_margin_fraction", "boundary_found"}
         for name, values in component_values.items():
@@ -433,7 +431,7 @@ class Trainer:
                     metrics[f"{name}_min"] = float(np.nanmin(arr))
                 if name == "current_over_limit_a":
                     metrics["current_over_limit_fraction"] = float(np.nanmean(arr > 0.0))
-        profile_metrics = max_metrics | min_metrics | {"episode_progress", "time_weight"}
+        profile_metrics = max_metrics | min_metrics | {"episode_progress"}
         drift_metrics = {"shape_error_mean_m", "shape_error_max_m", "ip_error_a", "physical_cost", "base_physical_cost", "current_usage_fraction"}
         for name in profile_metrics:
             early = np.asarray(early_component_values.get(name, []), dtype=float)

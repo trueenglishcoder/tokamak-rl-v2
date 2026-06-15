@@ -83,21 +83,8 @@ class RewardConfig:
     boundary_missing_error_m: float = 0.10
     shape_weight: float = 2.0
     ip_weight: float = 2.0
-    current_weight: float = 8.0
-    derivative_weight: float = 0.1
-    action_saturation_weight: float = 0.1
-    delta_action_weight: float = 0.05
-    projection_weight: float = 0.0
-    current_margin_start_fraction: float = 0.75
-    derivative_penalty_start_fraction: float = 0.85
-    action_penalty_start_fraction: float = 0.85
-    delta_action_penalty_start: float = 0.25
-    delta_action_bad: float = 1.0
-    projection_bad: float = 0.05
     terminal_reward: float = -20.0
     reward_scale: float = 1.0
-    late_error_weight: float = 0.0
-    late_error_power: float = 2.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,10 +131,11 @@ class SimConfig:
     action_scale: float = 1.0
     shot_fragments: ShotFragmentConfig | None = None
     terminate_on_boundary_loss: bool = True
-    terminate_on_current_limit: bool = False
+    terminate_on_current_limit: bool = True
     current_termination_over_limit_a: float = 0.0
     project_actions_to_current_limits: bool = False
     current_projection_margin_fraction: float = 0.0
+    action_projection_termination_rms: float = 0.05
 
 
 @dataclass(frozen=True, slots=True)

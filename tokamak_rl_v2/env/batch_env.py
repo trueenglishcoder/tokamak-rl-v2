@@ -523,10 +523,18 @@ class TokamakMagneticControlEnv:
         current_terminated = torch.zeros_like(found, dtype=torch.bool)
         if self.config.sim.terminate_on_current_limit:
             current_terminated = current_over_limit > float(self.config.sim.current_termination_over_limit_a)
-        terminated = boundary_terminated | current_terminated
+        projection_delta_rms = torch.sqrt(torch.mean(projection_delta.pow(2), dim=-1))
+        projection_terminated = torch.zeros_like(found, dtype=torch.bool)
+        if self.config.sim.project_actions_to_current_limits:
+            projection_terminated = projection_delta_rms > float(self.config.sim.action_projection_termination_rms)
+        terminated = boundary_terminated | current_terminated | projection_terminated
         episode_progress = self.step_index.to(torch.float32) / max(float(self.config.sim.max_episode_steps), 1.0)
         rb = self.reward_fn(ip=result.state.Ip.to(torch.float32), ip_ref=ip_ref, boundary_points=boundary_points, reference_points=ref, action=action, previous_action=self.previous_action, current_over_limit_a=current_over_limit, current_usage_fraction=current_usage_fraction, current_margin_fraction=current_margin_fraction, derivative_usage=derivative_usage, boundary_found=found, terminated=terminated, episode_progress=episode_progress, action_projection_delta=projection_delta)
-        return rb.reward, terminated, {"reward_components": {k: v.detach().cpu().numpy() for k, v in rb.components.items()}}
+        components = dict(rb.components)
+        components["terminated_boundary"] = boundary_terminated.to(dtype=rb.reward.dtype)
+        components["terminated_current"] = current_terminated.to(dtype=rb.reward.dtype)
+        components["terminated_action_projection"] = projection_terminated.to(dtype=rb.reward.dtype)
+        return rb.reward, terminated, {"reward_components": {k: v.detach().cpu().numpy() for k, v in components.items()}}
 
     def _reward_cpu(self, action: Tensor, projection_delta: Tensor) -> tuple[Tensor, Tensor, dict[str, object]]:
         ip_ref, ref_points, _ref_radii = self._reference_at()
@@ -562,10 +570,18 @@ class TokamakMagneticControlEnv:
         current_terminated = torch.zeros_like(found_t, dtype=torch.bool)
         if self.config.sim.terminate_on_current_limit:
             current_terminated = current_over_limit > float(self.config.sim.current_termination_over_limit_a)
-        terminated = boundary_terminated | current_terminated
+        projection_delta_rms = torch.sqrt(torch.mean(projection_delta.pow(2), dim=-1))
+        projection_terminated = torch.zeros_like(found_t, dtype=torch.bool)
+        if self.config.sim.project_actions_to_current_limits:
+            projection_terminated = projection_delta_rms > float(self.config.sim.action_projection_termination_rms)
+        terminated = boundary_terminated | current_terminated | projection_terminated
         episode_progress = self.step_index.to(torch.float32) / max(float(self.config.sim.max_episode_steps), 1.0)
         rb = self.reward_fn(ip=torch.as_tensor(ips, dtype=torch.float32, device=self.device), ip_ref=ip_ref, boundary_points=torch.nan_to_num(torch.as_tensor(np.stack(boundary_points), dtype=torch.float32, device=self.device)), reference_points=ref_points[:, : int(self.config.sim.angles)].to(torch.float32), action=action, previous_action=self.previous_action, current_over_limit_a=current_over_limit, current_usage_fraction=current_usage_fraction, current_margin_fraction=current_margin_fraction, derivative_usage=derivative_usage, boundary_found=found_t, terminated=terminated, episode_progress=episode_progress, action_projection_delta=projection_delta)
-        return rb.reward, terminated, {"reward_components": {k: v.detach().cpu().numpy() for k, v in rb.components.items()}}
+        components = dict(rb.components)
+        components["terminated_boundary"] = boundary_terminated.to(dtype=rb.reward.dtype)
+        components["terminated_current"] = current_terminated.to(dtype=rb.reward.dtype)
+        components["terminated_action_projection"] = projection_terminated.to(dtype=rb.reward.dtype)
+        return rb.reward, terminated, {"reward_components": {k: v.detach().cpu().numpy() for k, v in components.items()}}
 
     def export_schema(self) -> dict[str, object]:
         return {
@@ -594,6 +610,7 @@ class TokamakMagneticControlEnv:
             "derivative_scale": self.derivative_limits.detach().cpu().numpy().astype(float).tolist(),
             "current_projection_enabled": bool(self.config.sim.project_actions_to_current_limits),
             "current_projection_margin_fraction": float(self.config.sim.current_projection_margin_fraction),
+            "action_projection_termination_rms": float(self.config.sim.action_projection_termination_rms),
             "t_step": float(self.cfg.physics.t_step),
             "actuator_tau": float(self.cfg.physics.actuator_tau),
         }

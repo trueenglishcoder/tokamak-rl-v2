@@ -16,7 +16,6 @@ from tokamak_rl_v2.networks import FeedForwardGaussianActor, RecurrentQCritic
 from tokamak_rl_v2.rewards import T15PhysicalReward
 from tokamak_rl_v2.export.cli import main as export_cli_main
 from tokamak_rl_v2.training.mpo import MaximumAPosterioriPolicyOptimiser
-from scripts.calibrate_physical_reward import Candidate, _write_candidate_config
 from tokamak_rl_v2.training.policy_pipeline import _ArrayReferenceScenario, _write_baseline_report, evaluate_policy_gates, run_reset_sanity
 from tokamak_rl_v2.training.replay import FIFOSequenceReplay, SequenceBatch
 from tokamak_rl_v2.training.trainer import Trainer
@@ -76,7 +75,7 @@ def test_critic_reads_normalized_env_actions_without_extra_squash() -> None:
     assert not torch.allclose(lstm_input[3:], torch.tanh(action[0]))
 
 
-def test_physical_reward_cannot_replace_tracking_with_low_action() -> None:
+def test_physical_reward_tracks_errors_without_action_cost() -> None:
     reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0), control_rate_hz=1000.0)
     ref = torch.zeros((2, 32, 2), dtype=torch.float32)
     boundary = ref.clone()
@@ -100,7 +99,8 @@ def test_physical_reward_cannot_replace_tracking_with_low_action() -> None:
     active = reward_fn(action=active_action, **common)
     assert zero.reward[0] > zero.reward[1]
     assert active.reward[0] > zero.reward[1]
-    assert active.reward[0] < zero.reward[0]
+    assert float(active.reward[0].item()) == pytest.approx(float(zero.reward[0].item()))
+    assert float(active.components["action_rms"][0].item()) > float(zero.components["action_rms"][0].item())
 
 
 def test_reward_components_remain_finite_when_boundary_is_missing() -> None:
@@ -173,16 +173,14 @@ def test_physical_reward_improves_when_tracking_errors_improve() -> None:
     assert rb.components["ip_loss"][0] < rb.components["ip_loss"][1]
 
 
-def test_physical_reward_weights_late_episode_errors_more() -> None:
-    reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0, late_error_weight=4.0, late_error_power=2.0), control_rate_hz=1000.0)
+def test_physical_reward_terminal_penalty_applies_to_hard_failures() -> None:
+    reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0, terminal_reward=-20.0), control_rate_hz=1000.0)
     ref = torch.zeros((2, 32, 2), dtype=torch.float32)
-    boundary = ref.clone()
-    boundary[:, :, 0] = 0.03
     action = torch.zeros((2, 9), dtype=torch.float32)
     rb = reward_fn(
-        ip=torch.tensor([240000.0, 240000.0]),
+        ip=torch.tensor([200000.0, 200000.0]),
         ip_ref=torch.tensor([200000.0, 200000.0]),
-        boundary_points=boundary,
+        boundary_points=ref,
         reference_points=ref,
         action=action,
         previous_action=action,
@@ -191,19 +189,17 @@ def test_physical_reward_weights_late_episode_errors_more() -> None:
         current_margin_fraction=torch.full((2,), 0.5, dtype=torch.float32),
         derivative_usage=torch.zeros((2,), dtype=torch.float32),
         boundary_found=torch.ones((2,), dtype=torch.bool),
-        terminated=torch.zeros((2,), dtype=torch.bool),
-        episode_progress=torch.tensor([0.0, 1.0], dtype=torch.float32),
+        terminated=torch.tensor([False, True], dtype=torch.bool),
     )
-    assert float(rb.components["base_physical_cost"][0].item()) == pytest.approx(float(rb.components["base_physical_cost"][1].item()))
-    assert float(rb.components["time_weight"][1].item()) == pytest.approx(5.0)
-    assert rb.components["physical_cost"][1] > rb.components["physical_cost"][0]
     assert rb.reward[1] < rb.reward[0]
+    assert float((rb.reward[0] - rb.reward[1]).item()) == pytest.approx(20.0)
 
 
-def test_physical_reward_penalizes_current_projection_reliance() -> None:
-    reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0, projection_weight=8.0, projection_bad=0.05), control_rate_hz=1000.0)
+def test_physical_reward_keeps_actuator_terms_as_diagnostics_only() -> None:
+    reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0), control_rate_hz=1000.0)
     ref = torch.zeros((2, 32, 2), dtype=torch.float32)
-    action = torch.full((2, 9), 0.25, dtype=torch.float32)
+    action = torch.zeros((2, 9), dtype=torch.float32)
+    action[1] = 0.95
     projection_delta = torch.zeros((2, 9), dtype=torch.float32)
     projection_delta[1] = 0.15
     rb = reward_fn(
@@ -212,70 +208,22 @@ def test_physical_reward_penalizes_current_projection_reliance() -> None:
         boundary_points=ref,
         reference_points=ref,
         action=action,
-        previous_action=action,
-        current_over_limit_a=torch.zeros((2,), dtype=torch.float32),
-        current_usage_fraction=torch.full((2,), 0.5, dtype=torch.float32),
-        current_margin_fraction=torch.full((2,), 0.5, dtype=torch.float32),
-        derivative_usage=torch.zeros((2,), dtype=torch.float32),
+        previous_action=torch.zeros((2, 9), dtype=torch.float32),
+        current_over_limit_a=torch.tensor([0.0, 1000.0], dtype=torch.float32),
+        current_usage_fraction=torch.tensor([0.50, 1.20], dtype=torch.float32),
+        current_margin_fraction=torch.tensor([0.50, -0.20], dtype=torch.float32),
+        derivative_usage=torch.tensor([0.10, 0.95], dtype=torch.float32),
         boundary_found=torch.ones((2,), dtype=torch.bool),
         terminated=torch.zeros((2,), dtype=torch.bool),
         action_projection_delta=projection_delta,
     )
-    assert float(rb.components["action_projection_loss"][0].item()) == pytest.approx(0.0)
-    assert rb.components["action_projection_loss"][1] > 0.0
-    assert rb.reward[0] > rb.reward[1]
-
-
-def test_physical_reward_current_margin_warns_before_limit() -> None:
-    reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0), control_rate_hz=1000.0)
-    ref = torch.zeros((3, 32, 2), dtype=torch.float32)
-    action = torch.zeros((3, 9), dtype=torch.float32)
-    rb = reward_fn(
-        ip=torch.full((3,), 200000.0),
-        ip_ref=torch.full((3,), 200000.0),
-        boundary_points=ref,
-        reference_points=ref,
-        action=action,
-        previous_action=action,
-        current_over_limit_a=torch.tensor([0.0, 0.0, 1000.0], dtype=torch.float32),
-        current_usage_fraction=torch.tensor([0.50, 0.95, 1.20], dtype=torch.float32),
-        current_margin_fraction=torch.tensor([0.50, 0.05, -0.20], dtype=torch.float32),
-        derivative_usage=torch.zeros((3,), dtype=torch.float32),
-        boundary_found=torch.ones((3,), dtype=torch.bool),
-        terminated=torch.zeros((3,), dtype=torch.bool),
-    )
-    assert float(rb.components["current_margin_loss"][0].item()) == pytest.approx(0.0)
-    assert float(rb.components["current_margin_loss"][1].item()) > 0.0
-    assert rb.components["current_margin_loss"][2] > rb.components["current_margin_loss"][1]
-    assert rb.reward[0] > rb.reward[1] > rb.reward[2]
-
-
-def test_physical_reward_actuator_penalties_start_near_saturation() -> None:
-    reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0), control_rate_hz=1000.0)
-    ref = torch.zeros((2, 32, 2), dtype=torch.float32)
-    low_action = torch.full((1, 9), 0.5, dtype=torch.float32)
-    high_action = torch.full((1, 9), 0.95, dtype=torch.float32)
-    action = torch.cat([low_action, high_action], dim=0)
-    previous = torch.zeros((2, 9), dtype=torch.float32)
-    rb = reward_fn(
-        ip=torch.full((2,), 200000.0),
-        ip_ref=torch.full((2,), 200000.0),
-        boundary_points=ref,
-        reference_points=ref,
-        action=action,
-        previous_action=previous,
-        current_over_limit_a=torch.zeros((2,), dtype=torch.float32),
-        current_usage_fraction=torch.full((2,), 0.5, dtype=torch.float32),
-        current_margin_fraction=torch.full((2,), 0.5, dtype=torch.float32),
-        derivative_usage=torch.tensor([0.5, 0.95], dtype=torch.float32),
-        boundary_found=torch.ones((2,), dtype=torch.bool),
-        terminated=torch.zeros((2,), dtype=torch.bool),
-    )
-    assert float(rb.components["derivative_loss"][0].item()) == pytest.approx(0.0)
-    assert float(rb.components["action_saturation_loss"][0].item()) == pytest.approx(0.0)
-    assert rb.components["derivative_loss"][1] > 0.0
-    assert rb.components["action_saturation_loss"][1] > 0.0
-    assert rb.components["delta_action_loss"][1] > rb.components["delta_action_loss"][0]
+    assert float(rb.reward[0].item()) == pytest.approx(float(rb.reward[1].item()))
+    assert rb.components["current_over_limit_a"][1] > rb.components["current_over_limit_a"][0]
+    assert rb.components["derivative_usage"][1] > rb.components["derivative_usage"][0]
+    assert rb.components["max_abs_action"][1] > rb.components["max_abs_action"][0]
+    assert rb.components["action_projection_delta_rms"][1] > rb.components["action_projection_delta_rms"][0]
+    for removed in ("current_margin_loss", "derivative_loss", "action_saturation_loss", "delta_action_loss", "action_projection_loss", "time_weight"):
+        assert removed not in rb.components
 
 
 def test_environment_reset_step_contract() -> None:
@@ -325,9 +273,12 @@ def test_current_safety_projection_prevents_next_step_over_limit() -> None:
     assert float(np.nanmax(comps["current_over_limit_a"])) == pytest.approx(0.0)
     assert float(np.nanmax(comps["current_usage_fraction"])) <= 0.9801
     assert float(np.nanmax(comps["action_projection_delta_rms"])) > 0.0
+    assert bool(result.terminated[0].item()) is True
+    assert float(np.nanmax(comps["terminated_action_projection"])) == pytest.approx(1.0)
     assert not torch.allclose(result.applied_action, torch.ones_like(result.applied_action))
     assert torch.allclose(env.previous_action, result.applied_action)
     assert env.normalization()["current_projection_enabled"] is True
+    assert env.normalization()["action_projection_termination_rms"] == pytest.approx(0.05)
 
 
 def test_hold_reset_boundary_uses_observed_reset_boundary() -> None:
@@ -765,17 +716,17 @@ def test_config_loader_rejects_invalid_values(tmp_path: Path) -> None:
         load_experiment_config(bad_mode)
 
     data = json.loads(CONFIG.read_text())
-    data["reward"]["current_margin_start_fraction"] = 1.0
+    data["reward"]["current_margin_start_fraction"] = 0.75
     bad_current_margin = tmp_path / "bad_current_margin.json"
     bad_current_margin.write_text(json.dumps(data), encoding="utf-8")
-    with pytest.raises(ValueError, match="current_margin_start_fraction"):
+    with pytest.raises(ValueError, match="stale keys.*current_margin_start_fraction"):
         load_experiment_config(bad_current_margin)
 
     data = json.loads(CONFIG.read_text())
-    data["reward"]["delta_action_bad"] = data["reward"]["delta_action_penalty_start"]
+    data["reward"]["delta_action_bad"] = 1.0
     bad_delta = tmp_path / "bad_delta.json"
     bad_delta.write_text(json.dumps(data), encoding="utf-8")
-    with pytest.raises(ValueError, match="delta_action_bad"):
+    with pytest.raises(ValueError, match="stale keys.*delta_action_bad"):
         load_experiment_config(bad_delta)
 
     data = json.loads(CONFIG.read_text())
@@ -800,24 +751,24 @@ def test_config_loader_rejects_invalid_values(tmp_path: Path) -> None:
         load_experiment_config(bad_missing_boundary)
 
     data = json.loads(CONFIG.read_text())
-    data["reward"]["late_error_weight"] = -1.0
+    data["reward"]["late_error_weight"] = 1.0
     bad_late_weight = tmp_path / "bad_late_weight.json"
     bad_late_weight.write_text(json.dumps(data), encoding="utf-8")
-    with pytest.raises(ValueError, match="late_error_weight"):
+    with pytest.raises(ValueError, match="stale keys.*late_error_weight"):
         load_experiment_config(bad_late_weight)
 
     data = json.loads(CONFIG.read_text())
-    data["reward"]["projection_bad"] = 0.0
+    data["reward"]["projection_bad"] = 0.05
     bad_projection_bad = tmp_path / "bad_projection_bad.json"
     bad_projection_bad.write_text(json.dumps(data), encoding="utf-8")
-    with pytest.raises(ValueError, match="projection_bad"):
+    with pytest.raises(ValueError, match="stale keys.*projection_bad"):
         load_experiment_config(bad_projection_bad)
 
     data = json.loads(CONFIG.read_text())
-    data["reward"]["projection_weight"] = -1.0
+    data["reward"]["projection_weight"] = 1.0
     bad_projection_weight = tmp_path / "bad_projection_weight.json"
     bad_projection_weight.write_text(json.dumps(data), encoding="utf-8")
-    with pytest.raises(ValueError, match="projection_weight"):
+    with pytest.raises(ValueError, match="stale keys.*projection_weight"):
         load_experiment_config(bad_projection_weight)
 
     data = json.loads(CONFIG.read_text())
@@ -833,6 +784,13 @@ def test_config_loader_rejects_invalid_values(tmp_path: Path) -> None:
     bad_projection_margin.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(ValueError, match="current_projection_margin_fraction"):
         load_experiment_config(bad_projection_margin)
+
+    data = json.loads(CONFIG.read_text())
+    data["sim"]["action_projection_termination_rms"] = 0.0
+    bad_projection_termination = tmp_path / "bad_projection_termination.json"
+    bad_projection_termination.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="action_projection_termination_rms"):
+        load_experiment_config(bad_projection_termination)
 
 
 def test_policy_pipeline_gates_require_learning_signals() -> None:
@@ -1282,13 +1240,3 @@ def test_actor_update_changes_policy_parameters_on_sequence_batch() -> None:
     assert np.isfinite(metrics.sampled_q_spread)
     assert np.isfinite(metrics.policy_weight_entropy)
 
-
-def test_reward_calibration_candidate_config_keeps_sim_paths_valid(tmp_path: Path) -> None:
-    candidate_path = tmp_path / "generated" / "candidate.json"
-    candidate_path.parent.mkdir(parents=True)
-    _write_candidate_config(CONFIG, candidate_path, Candidate("test", {"shape_weight": 3.0}))
-    data = json.loads(candidate_path.read_text(encoding="utf-8"))
-    sim_config = Path(data["sim"]["config_path"])
-    assert sim_config.is_absolute()
-    assert sim_config.exists()
-    assert data["reward"]["shape_weight"] == pytest.approx(3.0)
