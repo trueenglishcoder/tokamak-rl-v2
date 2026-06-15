@@ -92,7 +92,7 @@
     },
     "project_actions_to_current_limits": true,
     "current_projection_margin_fraction": 0.02,
-    "terminate_on_boundary_loss": false
+    "terminate_on_boundary_loss": true
   },
   "reference": {
     "duration_s": 1.0,

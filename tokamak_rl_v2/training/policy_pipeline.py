@@ -16,7 +16,6 @@ from tokamak_rl_v2.config import load_experiment_config
 from tokamak_rl_v2.config.loader import _validate_experiment_config
 from tokamak_rl_v2.config.schema import ExperimentConfig
 from tokamak_rl_v2.env import TokamakMagneticControlEnv
-from tokamak_rl_v2.env.references import sample_initial_conditions
 from tokamak_rl_v2.training.cli import _device_list
 from tokamak_rl_v2.training.trainer import Trainer
 
@@ -52,6 +51,14 @@ def main(argv: list[str] | None = None) -> int:
         holdout_seed_offset = int(args.holdout_eval_seed_offset)
         baseline = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=int(cfg.training.eval_max_steps), policy="no_control", seed_offset=selection_seed_offset)
         holdout_baseline = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=int(cfg.training.eval_max_steps), policy="no_control", seed_offset=holdout_seed_offset)
+        _write_baseline_report(
+            output_dir,
+            reset_sanity=reset_report,
+            no_control_selection=baseline,
+            no_control=holdout_baseline,
+            selection_seed_offset=selection_seed_offset,
+            holdout_seed_offset=holdout_seed_offset,
+        )
         _wandb_log(wandb_run, "pipeline/no_control_selection", baseline, step=0)
         _wandb_log(wandb_run, "pipeline/no_control_holdout", holdout_baseline, step=0)
         train_result = trainer.train()
@@ -145,6 +152,30 @@ def run_reset_sanity(config: ExperimentConfig, *, device: str | None = None, num
         "boundary_found_mean": float(np.nanmean(found)) if found.size else float("nan"),
         "boundary_found_min": float(np.nanmin(found)) if found.size else float("nan"),
     }
+
+
+def _write_baseline_report(
+    output_dir: Path,
+    *,
+    reset_sanity: Mapping[str, float],
+    no_control_selection: Mapping[str, float],
+    no_control: Mapping[str, float],
+    selection_seed_offset: int,
+    holdout_seed_offset: int,
+) -> None:
+    _write_json(
+        output_dir / "no_control_baseline.json",
+        {
+            "status": "ready_for_training",
+            "evaluation_seed_offsets": {
+                "selection": int(selection_seed_offset),
+                "holdout": int(holdout_seed_offset),
+            },
+            "reset_sanity": dict(reset_sanity),
+            "no_control_selection": dict(no_control_selection),
+            "no_control": dict(no_control),
+        },
+    )
 
 
 def _install_shutdown_signal_handlers() -> dict[signal.Signals, signal.Handlers]:
@@ -291,54 +322,66 @@ def summarize_training_losses(path: Path, *, tail_rows: int = 100) -> dict[str, 
     return out
 
 
+class _ArrayReferenceScenario:
+    def __init__(self, *, ip: np.ndarray, radii: np.ndarray, dt: float) -> None:
+        self.ip = np.asarray(ip, dtype=float).reshape(-1)
+        self.radii = np.asarray(radii, dtype=float)
+        self.dt = max(float(dt), 1.0e-12)
+        if self.radii.ndim != 2 or self.radii.shape[0] != self.ip.shape[0]:
+            raise ValueError("reference scenario expects radii [steps, angles] aligned with Ip")
+
+    def _index(self, t: float) -> int:
+        idx = int(round(float(t) / self.dt))
+        return int(np.clip(idx, 0, self.ip.shape[0] - 1))
+
+    def Ip_ref(self, t: float) -> float:
+        return float(self.ip[self._index(t)])
+
+    def ref_radii(self, angles: np.ndarray, t: float) -> np.ndarray:
+        ref = self.radii[self._index(t)]
+        if ref.shape != np.asarray(angles).reshape(-1).shape:
+            raise ValueError("reference scenario angle count does not match exported controller request")
+        return np.nan_to_num(ref, nan=0.0, posinf=0.0, neginf=0.0)
+
+
 def validate_exported_controller(export_dir: Path | None, config: ExperimentConfig, *, steps: int) -> dict[str, object]:
     if export_dir is None:
         return {"status": "missing_export"}
     try:
-        from dataclasses import replace as dc_replace
-
-        from tokamak_control.config.scenarios import make_scenario
         from tokamak_control.control.learned_magnetic_controller import LearnedMagneticController
-        from tokamak_control.core.plasma_model import PlasmaModel
         from tokamak_control.geometry.boundary import BoundaryNotFoundError, find_plasma_boundary_with_status
         from tokamak_control.geometry.coordinates import radii_from_polyline_ray_intersections
-        from tokamak_control.io.config_io import load_config
 
-        loaded = load_config(config.sim.config_path, initial_currents_path=config.sim.initial_currents_path)
-        if config.sim.initial_ranges is None:
-            raise ValueError("controller validation requires sim.initial_ranges")
-        rng = np.random.default_rng(int(config.training.seed) + 910000)
-        ip0, pfc0, sol0, _params0 = sample_initial_conditions(rng, config.sim.initial_ranges, 1)
-        pfc = loaded.pfc.__class__(name=loaded.pfc.name, coils=list(loaded.pfc.coils), currents=pfc0[0])
-        sol = loaded.sol.__class__(name=loaded.sol.name, coils=list(loaded.sol.coils), currents=sol0[0])
-        model = PlasmaModel.from_settings(grid=loaded.grid, pfc=pfc, sol=sol, settings=dc_replace(loaded.physics, Ip0=float(ip0[0])))
+        rollout_config = replace(config, sim=replace(config.sim, compute_backend="cpu", gpu_device="cuda:0"))
+        env = TokamakMagneticControlEnv(rollout_config, batch_size=1, device="cpu", seed=int(config.training.seed) + 910000)
+        env.reset()
+        if env.reference is None:
+            raise RuntimeError("controller validation environment did not create references")
+        model = env._cpu_models[0]
         controller = LearnedMagneticController(export_dir=export_dir)
-        angles = np.linspace(-np.pi, np.pi, int(config.sim.angles), endpoint=False, dtype=float)
+        angles = np.asarray(env.angles, dtype=float)
         center = (model.R0, model.Z0)
+        ref_ip = env.reference.ip[0].detach().cpu().numpy().astype(float)
+        ref_radii_series = env.reference.radii[0, :, : int(config.sim.angles)].detach().cpu().numpy().astype(float)
+        scenario = _ArrayReferenceScenario(
+            ip=ref_ip,
+            radii=ref_radii_series,
+            dt=float(model.t_step),
+        )
 
-        try:
-            poly0, _level0, _status0 = find_plasma_boundary_with_status(model.state.psi, model.grid, center, n_levels=80, limiter_shape=loaded.limiter_shape, boundary_mode=loaded.boundary_mode)
-            ref_radii = radii_from_polyline_ray_intersections(poly0, center, angles)
-        except BoundaryNotFoundError:
-            poly0 = None
-            ref_radii = np.zeros((int(config.sim.angles),), dtype=float)
-        ref_radii = np.nan_to_num(ref_radii, nan=0.0, posinf=0.0, neginf=0.0)
-        scenario = make_scenario("nominal", ref_radii, float(ip0[0]), params={}, center=center)
         action_rms: list[float] = []
         boundary_found: list[float] = []
         shape_error: list[float] = []
         ip_error: list[float] = []
         current_over: list[float] = []
-        current_limits = None
-        if config.sim.current_safety_limits is not None:
-            current_limits = np.concatenate([
-                np.asarray(config.sim.current_safety_limits.pfc_currents, dtype=float),
-                np.asarray(config.sim.current_safety_limits.sol_currents, dtype=float),
-            ])
+        current_limits = env.current_limits.detach().cpu().numpy().astype(float)
         for _step in range(max(1, int(steps))):
+            ref_index = min(int(env.step_index[0].item()), ref_ip.shape[0] - 1)
+            ref_radii = np.nan_to_num(ref_radii_series[ref_index], nan=0.0, posinf=0.0, neginf=0.0)
+            ip_target = float(ref_ip[ref_index])
             psi = model.compute_psi()
             try:
-                poly, _level, _status = find_plasma_boundary_with_status(psi, model.grid, center, n_levels=80, limiter_shape=loaded.limiter_shape, boundary_mode=loaded.boundary_mode)
+                poly, _level, _status = find_plasma_boundary_with_status(psi, model.grid, center, n_levels=80, limiter_shape=env.cfg.limiter_shape, boundary_mode=env.cfg.boundary_mode)
                 found = 1.0
                 radii = radii_from_polyline_ray_intersections(poly, center, angles)
                 shape_error.append(float(np.nanmean(np.abs(np.nan_to_num(radii) - ref_radii))))
@@ -346,7 +389,7 @@ def validate_exported_controller(export_dir: Path | None, config: ExperimentConf
                 poly = None
                 found = 0.0
                 shape_error.append(float(config.reward.boundary_missing_error_m))
-            ip_error.append(abs(float(model.state.Ip) - float(ip0[0])))
+            ip_error.append(abs(float(model.state.Ip) - ip_target))
             action = controller.compute_control(
                 model=model,
                 psi=psi,
@@ -354,7 +397,7 @@ def validate_exported_controller(export_dir: Path | None, config: ExperimentConf
                 center=center,
                 measure_angles=angles,
                 ref_radii=ref_radii,
-                Ip_ref=float(ip0[0]),
+                Ip_ref=ip_target,
                 scenario=scenario,
                 max_episode_steps=int(config.sim.max_episode_steps),
             )
@@ -366,13 +409,17 @@ def validate_exported_controller(export_dir: Path | None, config: ExperimentConf
             action_rms.append(float(np.sqrt(np.mean(np.square(deriv)))) if deriv.size else 0.0)
             boundary_found.append(found)
             model.step(pfc_derivs, sol_derivs)
-            if current_limits is not None:
-                currents = np.concatenate([np.asarray(model.state.pfc_currents, dtype=float), np.asarray(model.state.sol_currents, dtype=float)])
-                current_over.append(float(np.nanmax(np.maximum(np.abs(currents) - current_limits, 0.0))))
+            env.step_index += 1
+            currents = np.concatenate([np.asarray(model.state.pfc_currents, dtype=float), np.asarray(model.state.sol_currents, dtype=float)])
+            current_over.append(float(np.nanmax(np.maximum(np.abs(currents) - current_limits, 0.0))))
         return {
             "status": "ok",
             "export_dir": str(export_dir),
             "steps": int(max(1, int(steps))),
+            "reference_kind": {
+                "boundary": str(config.reference.boundary.kind),
+                "ip": str(config.reference.ip.kind),
+            },
             "physical_derivative_rms": float(np.nanmean(np.asarray(action_rms, dtype=float))),
             "boundary_found_mean": float(np.nanmean(np.asarray(boundary_found, dtype=float))),
             "shape_error_mean_m": float(np.nanmean(np.asarray(shape_error, dtype=float))),

@@ -10,14 +10,14 @@ import torch
 
 from tokamak_rl_v2.config import load_experiment_config
 from tokamak_rl_v2.config.schema import IpReferenceConfig, LearnerConfig, RewardConfig
-from tokamak_rl_v2.env import TokamakMagneticControlEnv
+from tokamak_rl_v2.env import BatchStep, TokamakMagneticControlEnv
 from tokamak_rl_v2.env.shot_fragments import ShotFragmentLibrary
 from tokamak_rl_v2.networks import FeedForwardGaussianActor, RecurrentQCritic
 from tokamak_rl_v2.rewards import T15PhysicalReward
 from tokamak_rl_v2.export.cli import main as export_cli_main
 from tokamak_rl_v2.training.mpo import MaximumAPosterioriPolicyOptimiser
 from scripts.calibrate_physical_reward import Candidate, _write_candidate_config
-from tokamak_rl_v2.training.policy_pipeline import evaluate_policy_gates, run_reset_sanity
+from tokamak_rl_v2.training.policy_pipeline import _ArrayReferenceScenario, _write_baseline_report, evaluate_policy_gates, run_reset_sanity
 from tokamak_rl_v2.training.replay import FIFOSequenceReplay, SequenceBatch
 from tokamak_rl_v2.training.trainer import Trainer
 from tokamak_rl_v2.env.references import _segmented_ip, _segment_lengths, generate_reference_batch
@@ -296,8 +296,10 @@ def test_environment_reset_step_contract() -> None:
     assert obs.shape == (2, env.obs_dim)
     result = env.step(torch.zeros((2, env.action_dim)))
     assert result.obs.shape == (2, env.obs_dim)
+    assert result.applied_action.shape == (2, env.action_dim)
     assert result.reward.shape == (2,)
     assert torch.isfinite(result.reward).all()
+    assert torch.isfinite(result.applied_action).all()
 
 
 def test_action_scale_caps_physical_derivative_usage() -> None:
@@ -323,6 +325,8 @@ def test_current_safety_projection_prevents_next_step_over_limit() -> None:
     assert float(np.nanmax(comps["current_over_limit_a"])) == pytest.approx(0.0)
     assert float(np.nanmax(comps["current_usage_fraction"])) <= 0.9801
     assert float(np.nanmax(comps["action_projection_delta_rms"])) > 0.0
+    assert not torch.allclose(result.applied_action, torch.ones_like(result.applied_action))
+    assert torch.allclose(env.previous_action, result.applied_action)
     assert env.normalization()["current_projection_enabled"] is True
 
 
@@ -359,6 +363,35 @@ def test_policy_pipeline_reset_sanity_uses_hold_boundary() -> None:
     report = run_reset_sanity(cfg, device="cpu", num_envs=2)
     assert report["max_abs_boundary_radii_error_m"] == pytest.approx(0.0, abs=1.0e-6)
     assert report["boundary_found_mean"] == pytest.approx(1.0)
+
+
+def test_policy_pipeline_writes_no_control_baseline_before_training(tmp_path: Path) -> None:
+    _write_baseline_report(
+        tmp_path,
+        reset_sanity={"boundary_found_mean": 1.0},
+        no_control_selection={"ip_error_a": 10.0},
+        no_control={"ip_error_a": 20.0},
+        selection_seed_offset=100000,
+        holdout_seed_offset=200000,
+    )
+    data = json.loads((tmp_path / "no_control_baseline.json").read_text(encoding="utf-8"))
+    assert data["status"] == "ready_for_training"
+    assert data["evaluation_seed_offsets"] == {"selection": 100000, "holdout": 200000}
+    assert data["no_control_selection"]["ip_error_a"] == pytest.approx(10.0)
+    assert data["no_control"]["ip_error_a"] == pytest.approx(20.0)
+
+
+def test_array_reference_scenario_preserves_changing_ip_and_radii() -> None:
+    scenario = _ArrayReferenceScenario(
+        ip=np.array([100000.0, 150000.0, 200000.0], dtype=float),
+        radii=np.array([[0.30, 0.31], [0.32, 0.33], [0.34, 0.35]], dtype=float),
+        dt=0.01,
+    )
+    angles = np.array([0.0, 1.0], dtype=float)
+    assert scenario.Ip_ref(0.0) == pytest.approx(100000.0)
+    assert scenario.Ip_ref(0.01) == pytest.approx(150000.0)
+    assert scenario.Ip_ref(0.02) == pytest.approx(200000.0)
+    assert np.allclose(scenario.ref_radii(angles, 0.01), np.array([0.32, 0.33]))
 
 
 def test_episode_replay_never_crosses_env_or_done_boundaries() -> None:
@@ -422,6 +455,39 @@ def test_environment_reset_indices_only_resets_done_slot() -> None:
     assert torch.allclose(env.reference.ip[1], ref_before[1])
     assert torch.allclose(env.previous_action[1], action[1])
     assert torch.allclose(env.previous_action[0], torch.zeros_like(env.previous_action[0]))
+
+
+def test_trainer_replay_stores_applied_env_action(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _small_config(tmp_path)
+    cfg = replace(cfg, training=replace(cfg.training, steps=1, eval_interval_steps=99))
+    trainer = Trainer(cfg)
+    raw_action = torch.ones((trainer.num_envs, trainer.env.action_dim), dtype=torch.float32, device=trainer.device)
+    applied_action = torch.full_like(raw_action, 0.25)
+    obs0 = torch.zeros((trainer.num_envs, trainer.env.obs_dim), dtype=torch.float32, device=trainer.device)
+    obs1 = torch.ones_like(obs0)
+
+    def fake_sample(_obs):
+        return raw_action.clone(), None, None
+
+    def fake_step(_action):
+        return BatchStep(
+            obs=obs1.clone(),
+            applied_action=applied_action.clone(),
+            reward=torch.zeros((trainer.num_envs,), dtype=torch.float32, device=trainer.device),
+            terminated=torch.zeros((trainer.num_envs,), dtype=torch.bool, device=trainer.device),
+            truncated=torch.zeros((trainer.num_envs,), dtype=torch.bool, device=trainer.device),
+            info={},
+        )
+
+    monkeypatch.setattr(trainer.actor, "sample", fake_sample)
+    monkeypatch.setattr(trainer.env, "reset", lambda: obs0.clone())
+    monkeypatch.setattr(trainer.env, "step", fake_step)
+    monkeypatch.setattr(trainer, "_export", lambda *args, **kwargs: None)
+
+    trainer.train()
+
+    for slot in trainer.replay.active_slots.detach().cpu().tolist():
+        assert torch.allclose(trainer.replay.action[int(slot), 0], applied_action[0])
 
 
 def test_environment_step_uses_post_step_reference_index() -> None:
@@ -1088,6 +1154,49 @@ def test_mpo_e_step_solves_batch_dual_for_distinct_sampled_q() -> None:
     assert metrics[10] < 1.0
     assert metrics[11] > 0.0
     assert metrics[12] > 0.0
+
+
+def test_mpo_actor_update_honors_chunk_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    torch.manual_seed(779)
+    obs_dim = 5
+    action_dim = 2
+    actor = FeedForwardGaussianActor(obs_dim=obs_dim, action_dim=action_dim, hidden_dim=8)
+    critic = RecurrentQCritic(obs_dim=obs_dim, action_dim=action_dim, lstm_hidden_dim=8, mlp_hidden_dim=8)
+    target_actor = FeedForwardGaussianActor(obs_dim=obs_dim, action_dim=action_dim, hidden_dim=8)
+    target_critic = RecurrentQCritic(obs_dim=obs_dim, action_dim=action_dim, lstm_hidden_dim=8, mlp_hidden_dim=8)
+    learner = MaximumAPosterioriPolicyOptimiser(
+        actor=actor,
+        critic=critic,
+        target_actor=target_actor,
+        target_critic=target_critic,
+        config=LearnerConfig(batch_size=2, unroll_length=3, action_samples=4, actor_update_chunk_size=2),
+        device="cpu",
+    )
+    batch = SequenceBatch(
+        obs=torch.randn((2, 3, obs_dim)),
+        action=torch.zeros((2, 3, action_dim)),
+        reward=torch.zeros((2, 3)),
+        discount=torch.full((2, 3), 0.99),
+        next_obs=torch.randn((2, 3, obs_dim)),
+        done=torch.zeros((2, 3), dtype=torch.bool),
+        mask=torch.ones((2, 3)),
+    )
+
+    def ranked_q(obs, history_action, sampled_actions, *, mask=None):
+        ranks = torch.linspace(0.0, 0.05, sampled_actions.shape[0], dtype=obs.dtype, device=obs.device)
+        return ranks[:, None, None].expand(-1, obs.shape[0], obs.shape[1])
+
+    calls: list[int] = []
+    original_forward = actor.forward
+
+    def tracked_forward(x):
+        calls.append(int(x.shape[0]))
+        return original_forward(x)
+
+    learner._sampled_q_values = ranked_q  # type: ignore[method-assign]
+    monkeypatch.setattr(actor, "forward", tracked_forward)
+    learner._actor_update(batch)
+    assert calls == [2, 2, 2]
 
 
 

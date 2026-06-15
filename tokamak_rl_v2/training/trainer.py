@@ -116,7 +116,7 @@ class Trainer:
                 batch_step = self.env.step(action)
                 discount = torch.full((self.num_envs,), float(self.config.learner.discount), dtype=torch.float32, device=self.device)
                 done = batch_step.terminated | batch_step.truncated
-                self.replay.add_batch(obs, action, batch_step.reward, discount, batch_step.obs, done)
+                self.replay.add_batch(obs, batch_step.applied_action, batch_step.reward, discount, batch_step.obs, done)
                 obs = self.env.reset_indices(done) if bool(torch.any(done).item()) else batch_step.obs
                 metrics = None
                 if self.replay.ready(self.config.learner.unroll_length, self.config.learner.batch_size) and step % int(self.config.learner.rollout_chunk_length) == 0:

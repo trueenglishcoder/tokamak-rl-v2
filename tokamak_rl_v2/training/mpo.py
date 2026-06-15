@@ -157,24 +157,42 @@ class MaximumAPosterioriPolicyOptimiser:
             weights = torch.softmax(q_centered / eta, dim=0).detach()
 
         before = [p.detach().clone() for p in self.actor.parameters()]
-        new = self.actor(flat_obs)
-        new_dist = new.distribution
-        log_prob = new_dist.log_prob(raw.reshape(K, B * T, -1)).sum(dim=-1).reshape(K, B, T)
-        masked = mask[None, :, :]
         denom = torch.clamp(mask.sum(), min=1.0)
-        mle_loss = -torch.sum(weights * log_prob * masked) / denom
+        flat_raw = raw.reshape(K, B * T, -1)
+        flat_weights = weights.reshape(K, B * T)
+        flat_mask = mask.reshape(B * T)
+        flat_old_mean = old.mean.detach()
+        flat_old_std = old.std.detach().clamp_min(1.0e-6)
+        chunk_size = max(1, int(self.config.actor_update_chunk_size))
+        mle_num = torch.zeros((), dtype=torch.float32, device=self.device)
+        mean_kl_num = torch.zeros((), dtype=torch.float32, device=self.device)
+        std_kl_num = torch.zeros((), dtype=torch.float32, device=self.device)
+        action_mean_abs_num = torch.zeros((), dtype=torch.float32, device=self.device)
+        action_std_num = torch.zeros((), dtype=torch.float32, device=self.device)
+        for start in range(0, B * T, chunk_size):
+            end = min(start + chunk_size, B * T)
+            new = self.actor(flat_obs[start:end])
+            log_prob = new.distribution.log_prob(flat_raw[:, start:end, :]).sum(dim=-1)
+            chunk_mask = flat_mask[start:end]
+            mle_num = mle_num + torch.sum(flat_weights[:, start:end] * log_prob * chunk_mask[None, :])
 
-        new_mean = new.mean.reshape(B, T, -1)
-        new_std = new.std.reshape(B, T, -1).clamp_min(1.0e-6)
-        old_mean = old.mean.reshape(B, T, -1).detach()
-        old_std = old.std.reshape(B, T, -1).detach().clamp_min(1.0e-6)
-        old_var = old_std.pow(2)
-        new_var = new_std.pow(2)
+            new_mean = new.mean
+            new_std = new.std.clamp_min(1.0e-6)
+            old_mean = flat_old_mean[start:end]
+            old_std = flat_old_std[start:end]
+            old_var = old_std.pow(2)
+            new_var = new_std.pow(2)
+            mean_kl_t = torch.mean((new_mean - old_mean).pow(2) / (2.0 * old_var), dim=-1)
+            std_kl_t = torch.mean(0.5 * (old_var / new_var - 1.0 + torch.log(new_var / old_var)), dim=-1)
+            mean_kl_num = mean_kl_num + torch.sum(mean_kl_t * chunk_mask)
+            std_kl_num = std_kl_num + torch.sum(std_kl_t * chunk_mask)
+            with torch.no_grad():
+                action_mean_abs_num = action_mean_abs_num + torch.sum(torch.mean(torch.abs(torch.tanh(new_mean.detach())), dim=-1) * chunk_mask)
+                action_std_num = action_std_num + torch.sum(torch.mean(new_std.detach(), dim=-1) * chunk_mask)
 
-        mean_kl_t = torch.mean((new_mean - old_mean).pow(2) / (2.0 * old_var), dim=-1)
-        std_kl_t = torch.mean(0.5 * (old_var / new_var - 1.0 + torch.log(new_var / old_var)), dim=-1)
-        mean_kl = torch.sum(mean_kl_t * mask) / denom
-        std_kl = torch.sum(std_kl_t * mask) / denom
+        mle_loss = -mle_num / denom
+        mean_kl = mean_kl_num / denom
+        std_kl = std_kl_num / denom
 
         mean_penalty = F.softplus(self.log_mean_kl_penalty).clamp_min(1.0e-8)
         std_penalty = F.softplus(self.log_std_kl_penalty).clamp_min(1.0e-8)
@@ -196,10 +214,11 @@ class MaximumAPosterioriPolicyOptimiser:
         with torch.no_grad():
             for previous, current in zip(before, self.actor.parameters(), strict=True):
                 delta_sq = delta_sq + torch.sum((current.detach() - previous).pow(2))
+            masked = mask[None, :, :]
             weight_entropy = -torch.sum(weights * torch.log(torch.clamp(weights, min=1.0e-12)) * masked) / denom
             sampled_q_spread = torch.sum(torch.std(q_values, dim=0, unbiased=False) * mask) / denom
-            action_mean_abs = torch.sum(torch.mean(torch.abs(torch.tanh(new_mean.detach())), dim=-1) * mask) / denom
-            action_std_mean = torch.sum(torch.mean(new_std.detach(), dim=-1) * mask) / denom
+            action_mean_abs = action_mean_abs_num / denom
+            action_std_mean = action_std_num / denom
             weight_max = torch.sum(torch.max(weights, dim=0).values * mask) / denom
             mean_penalty_after = F.softplus(self.log_mean_kl_penalty).clamp_min(1.0e-8)
             std_penalty_after = F.softplus(self.log_std_kl_penalty).clamp_min(1.0e-8)

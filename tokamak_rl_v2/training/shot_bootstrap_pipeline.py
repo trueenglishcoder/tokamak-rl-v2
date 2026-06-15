@@ -13,6 +13,7 @@ from tokamak_rl_v2.training.policy_pipeline import (
     _start_wandb,
     _train_env_step,
     _wandb_log,
+    _write_baseline_report,
     _write_json,
     evaluate_policy_gates,
     run_reset_sanity,
@@ -50,6 +51,14 @@ def main(argv: list[str] | None = None) -> int:
         holdout_seed_offset = int(args.holdout_eval_seed_offset)
         baseline = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=int(cfg.training.eval_max_steps), policy="no_control", seed_offset=selection_seed_offset)
         holdout_baseline = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=int(cfg.training.eval_max_steps), policy="no_control", seed_offset=holdout_seed_offset)
+        _write_baseline_report(
+            output_dir,
+            reset_sanity=reset_report,
+            no_control_selection=baseline,
+            no_control=holdout_baseline,
+            selection_seed_offset=selection_seed_offset,
+            holdout_seed_offset=holdout_seed_offset,
+        )
         _wandb_log(wandb_run, "pipeline/no_control_selection", baseline, step=0)
         _wandb_log(wandb_run, "pipeline/no_control_holdout", holdout_baseline, step=0)
 

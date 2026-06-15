@@ -23,6 +23,7 @@ from tokamak_rl_v2.rewards import T15PhysicalReward
 @dataclass(slots=True)
 class BatchStep:
     obs: Tensor
+    applied_action: Tensor
     reward: Tensor
     terminated: Tensor
     truncated: Tensor
@@ -291,7 +292,7 @@ class TokamakMagneticControlEnv:
         self.previous_action = clipped.detach().clone()
         truncated = self.step_index >= int(self.config.sim.max_episode_steps)
         self.done = terminated | truncated
-        return BatchStep(obs=obs, reward=reward, terminated=terminated, truncated=truncated, info=info)
+        return BatchStep(obs=obs, applied_action=clipped.detach().clone(), reward=reward, terminated=terminated, truncated=truncated, info=info)
 
     def _project_action_to_current_safety(self, normalized_action: Tensor) -> Tensor:
         if not self.config.sim.project_actions_to_current_limits:

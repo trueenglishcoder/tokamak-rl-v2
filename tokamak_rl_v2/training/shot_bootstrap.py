@@ -85,7 +85,7 @@ def run_shot_bootstrap(
                 batch_step = env.step(teacher_action)
                 discount = torch.full((trainer.num_envs,), float(config.learner.discount), dtype=torch.float32, device=trainer.device)
                 done = batch_step.terminated | batch_step.truncated
-                trainer.replay.add_batch(obs, teacher_action, batch_step.reward, discount, batch_step.obs, done)
+                trainer.replay.add_batch(obs, batch_step.applied_action, batch_step.reward, discount, batch_step.obs, done)
                 obs = env.reset_indices(done) if bool(torch.any(done).item()) else batch_step.obs
 
             if step % max(int(bootstrap.log_interval), 1) == 0 or step == 1 or step == int(bootstrap.steps):

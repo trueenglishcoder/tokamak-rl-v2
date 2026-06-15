@@ -108,7 +108,7 @@ def run_hinf_bootstrap(
                 discount = torch.full((trainer.num_envs,), float(config.learner.discount), dtype=torch.float32, device=trainer.device)
                 trainer.replay.add_batch(
                     obs_cpu.to(device=trainer.device, dtype=torch.float32),
-                    teacher_action,
+                    out.applied_action.to(device=trainer.device, dtype=torch.float32),
                     out.reward.to(device=trainer.device, dtype=torch.float32),
                     discount,
                     out.obs.to(device=trainer.device, dtype=torch.float32),
