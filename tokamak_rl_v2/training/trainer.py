@@ -533,18 +533,33 @@ class Trainer:
 
     @staticmethod
     def _selection_score(metrics: dict[str, float]) -> float:
-        score = -float(metrics.get("physical_cost_late", metrics.get("physical_cost", float("inf"))))
+        late_cost = float(metrics.get("physical_cost_late", metrics.get("physical_cost", float("inf"))))
         current_over = float(metrics.get("current_over_limit_a_late_max", metrics.get("current_over_limit_a_max", metrics.get("current_over_limit_a", 0.0))))
         boundary_found = float(metrics.get("boundary_found_late_min", metrics.get("boundary_found_min", metrics.get("boundary_found", 1.0))))
-        episode_completion = float(metrics.get("min_episode_completion", metrics.get("mean_episode_completion", 1.0)))
+        min_completion = float(metrics.get("min_episode_completion", metrics.get("mean_episode_completion", 1.0)))
+        mean_completion = float(metrics.get("mean_episode_completion", min_completion))
         shape_drift = float(metrics.get("shape_error_mean_m_late_minus_early", 0.0))
         ip_drift = float(metrics.get("ip_error_a_late_minus_early", 0.0))
-        if np.isfinite(current_over) and current_over > 0.0:
-            score -= 1.0e6 + min(current_over, 1.0e6)
-        if np.isfinite(boundary_found) and boundary_found < 0.999:
-            score -= 1.0e6 * (0.999 - boundary_found)
-        if np.isfinite(episode_completion) and episode_completion < 0.95:
-            score -= 1.0e6 * (0.95 - episode_completion)
+
+        current_penalty = min(max(current_over, 0.0), 1.0e6) if np.isfinite(current_over) else 1.0e6
+        boundary_gap = max(0.999 - boundary_found, 0.0) if np.isfinite(boundary_found) else 0.999
+        completion_key = min_completion if np.isfinite(min_completion) else 0.0
+        mean_completion_key = mean_completion if np.isfinite(mean_completion) else completion_key
+        if completion_key < 0.95:
+            return float(
+                -1.0e9
+                + 1.0e6 * completion_key
+                + 1.0e5 * mean_completion_key
+                - 10.0 * current_penalty
+                - 1.0e6 * boundary_gap
+                - (late_cost if np.isfinite(late_cost) else 1.0e6)
+            )
+
+        score = 1.0e6 - (late_cost if np.isfinite(late_cost) else 1.0e6)
+        if current_penalty > 0.0:
+            score -= 1.0e5 + current_penalty
+        if boundary_gap > 0.0:
+            score -= 1.0e5 * boundary_gap
         if np.isfinite(shape_drift) and shape_drift > 0.0:
             score -= 1000.0 * shape_drift
         if np.isfinite(ip_drift) and ip_drift > 0.0:

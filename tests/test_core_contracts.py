@@ -622,6 +622,19 @@ def test_shot_fragment_library_samples_coherent_reset_and_reference() -> None:
     assert max_step_delta < 15000.0
 
 
+def test_sim_limit_scales_expand_current_and_derivative_limits() -> None:
+    cfg = load_experiment_config(SHOT_FRAGMENT_CONFIG)
+    base_cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", current_limit_scale=1.0, derivative_limit_scale=1.0))
+    scaled_cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", current_limit_scale=1.2, derivative_limit_scale=1.2))
+    base_env = TokamakMagneticControlEnv(base_cfg, batch_size=1, device="cpu", seed=123)
+    scaled_env = TokamakMagneticControlEnv(scaled_cfg, batch_size=1, device="cpu", seed=123)
+    assert np.allclose(scaled_env.current_limits.cpu().numpy(), base_env.current_limits.cpu().numpy() * 1.2)
+    assert np.allclose(scaled_env.raw_derivative_limits.cpu().numpy(), base_env.raw_derivative_limits.cpu().numpy() * 1.2)
+    assert np.allclose(scaled_env.derivative_limits.cpu().numpy(), base_env.derivative_limits.cpu().numpy() * 1.2)
+    assert scaled_env.cfg.physics.pfc_deriv_limit == pytest.approx(float(base_env.cfg.physics.pfc_deriv_limit) * 1.2)
+    assert scaled_env.cfg.physics.sol_deriv_limit == pytest.approx(float(base_env.cfg.physics.sol_deriv_limit) * 1.2)
+
+
 def test_shot_fragment_reference_requires_concrete_ip_reference() -> None:
     cfg = load_experiment_config(SHOT_FRAGMENT_CONFIG)
     with pytest.raises(ValueError, match="ip_reference"):
@@ -1156,6 +1169,24 @@ def test_evaluate_detailed_reports_physical_metrics(tmp_path: Path) -> None:
     assert 0.0 < metrics["mean_episode_completion"] <= 1.0
     assert repeat["mean_return"] == pytest.approx(metrics["mean_return"])
     assert np.isfinite(holdout["mean_return"])
+
+
+def test_selection_score_prefers_survival_over_short_low_cost() -> None:
+    short_policy = {
+        "physical_cost_late": 0.10,
+        "current_over_limit_a_late_max": 0.0,
+        "boundary_found_late_min": 1.0,
+        "min_episode_completion": 0.20,
+        "mean_episode_completion": 0.25,
+    }
+    surviving_policy = {
+        "physical_cost_late": 0.90,
+        "current_over_limit_a_late_max": 0.0,
+        "boundary_found_late_min": 1.0,
+        "min_episode_completion": 1.0,
+        "mean_episode_completion": 1.0,
+    }
+    assert Trainer._selection_score(surviving_policy) > Trainer._selection_score(short_policy)
 
 
 def test_append_csv_row_preserves_header_when_metric_sets_change(tmp_path: Path) -> None:

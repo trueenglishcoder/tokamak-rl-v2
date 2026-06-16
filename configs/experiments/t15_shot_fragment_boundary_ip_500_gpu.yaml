@@ -7,6 +7,8 @@
     "gpu_device": "cuda:0",
     "angles": 32,
     "max_episode_steps": 1000,
+    "current_limit_scale": 1.2,
+    "derivative_limit_scale": 1.2,
     "shot_fragments": {
       "kind": "idealized_t15_trapezoid",
       "ip_a": {

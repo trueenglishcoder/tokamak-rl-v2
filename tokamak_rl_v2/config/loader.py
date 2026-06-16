@@ -179,6 +179,8 @@ def _sim(raw: Mapping[str, Any], base: Path) -> SimConfig:
         max_episode_steps=int(raw.get("max_episode_steps", 1000)),
         initial_ranges=_ranges(_mapping(raw.get("initial_ranges", {}), "initial_ranges")),
         current_safety_limits=_current_safety_limits(_mapping(raw.get("current_safety_limits", {}), "current_safety_limits")),
+        current_limit_scale=float(raw.get("current_limit_scale", defaults.current_limit_scale)),
+        derivative_limit_scale=float(raw.get("derivative_limit_scale", defaults.derivative_limit_scale)),
         action_scale=float(raw.get("action_scale", 1.0)),
         shot_fragments=_shot_fragments(_mapping(raw.get("shot_fragments", {}), "shot_fragments"), base),
         terminate_on_boundary_loss=bool(raw.get("terminate_on_boundary_loss", True)),
@@ -343,6 +345,10 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
         raise ValueError("observation preview settings are invalid")
     if not math.isfinite(float(cfg.sim.action_scale)) or float(cfg.sim.action_scale) <= 0.0 or float(cfg.sim.action_scale) > 1.0:
         raise ValueError("sim.action_scale must be finite and in (0, 1]")
+    for name in ("current_limit_scale", "derivative_limit_scale"):
+        value = float(getattr(cfg.sim, name))
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"sim.{name} must be finite and positive")
     if not math.isfinite(float(cfg.sim.current_termination_over_limit_a)) or float(cfg.sim.current_termination_over_limit_a) < 0.0:
         raise ValueError("sim.current_termination_over_limit_a must be finite and non-negative")
     if int(cfg.sim.current_termination_grace_steps) <= 0:

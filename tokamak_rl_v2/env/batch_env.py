@@ -56,6 +56,11 @@ class TokamakMagneticControlEnv:
         if config.sim.compute_backend == "gpu":
             self.cfg = replace(self.cfg, compute=ComputeSettings(backend="gpu", gpu_device=config.sim.gpu_device))
             self.cfg.compute.validate(require_available=True)
+        self.cfg = _scale_simulator_limits(
+            self.cfg,
+            current_scale=float(config.sim.current_limit_scale),
+            derivative_scale=float(config.sim.derivative_limit_scale),
+        )
         if self.cfg.limiter_shape is None:
             raise ValueError("T15 training requires limiter geometry")
         self.angles = np.linspace(-np.pi, np.pi, int(config.sim.angles), endpoint=False, dtype=float)
@@ -684,13 +689,14 @@ def _current_limit_vector(config: ExperimentConfig, loaded_cfg) -> np.ndarray:
     n_sol = int(loaded_cfg.sol.n_coils)
     if config.sim.current_safety_limits is not None:
         config.sim.current_safety_limits.validate(n_pfc=n_pfc, n_sol=n_sol)
-        return np.concatenate([
+        out = np.concatenate([
             np.asarray(config.sim.current_safety_limits.pfc_currents, dtype=float),
             np.asarray(config.sim.current_safety_limits.sol_currents, dtype=float),
         ])
+        return out * float(config.sim.current_limit_scale)
     pfc = _limit_vec(loaded_cfg.physics.pfc_current_limit, n_pfc)
     sol = _limit_vec(loaded_cfg.physics.sol_current_limit, n_sol)
-    out = np.concatenate([pfc, sol])
+    out = np.concatenate([pfc, sol]) * float(config.sim.current_limit_scale)
     if not np.all(np.isfinite(out)):
         raise ValueError("Training reward requires explicit finite current_safety_limits when simulator current limits are absent")
     return out
@@ -700,3 +706,23 @@ def _limit_vec(limit: float | None, n: int) -> np.ndarray:
     if limit is None or not np.isfinite(float(limit)) or float(limit) <= 0.0:
         return np.full((int(n),), np.inf, dtype=float)
     return np.full((int(n),), float(limit), dtype=float)
+
+
+def _scale_simulator_limits(loaded_cfg, *, current_scale: float, derivative_scale: float):
+    physics = loaded_cfg.physics
+    scaled = replace(
+        physics,
+        pfc_current_limit=_scale_optional_limit(physics.pfc_current_limit, current_scale),
+        sol_current_limit=_scale_optional_limit(physics.sol_current_limit, current_scale),
+        pfc_deriv_limit=_scale_optional_limit(physics.pfc_deriv_limit, derivative_scale),
+        sol_deriv_limit=_scale_optional_limit(physics.sol_deriv_limit, derivative_scale),
+    )
+    return replace(loaded_cfg, physics=scaled)
+
+
+def _scale_optional_limit(value: float | None, scale: float) -> float | None:
+    if value is None:
+        return None
+    if not np.isfinite(float(value)):
+        return value
+    return float(value) * float(scale)

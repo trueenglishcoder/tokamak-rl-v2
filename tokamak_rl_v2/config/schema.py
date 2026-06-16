@@ -133,6 +133,8 @@ class SimConfig:
     max_episode_steps: int = 1000
     initial_ranges: InitialRanges | None = None
     current_safety_limits: CurrentSafetyLimits | None = None
+    current_limit_scale: float = 1.0
+    derivative_limit_scale: float = 1.0
     action_scale: float = 1.0
     shot_fragments: ShotFragmentConfig | None = None
     terminate_on_boundary_loss: bool = True
