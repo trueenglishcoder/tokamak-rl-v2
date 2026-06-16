@@ -12,6 +12,7 @@ import torch
 from tokamak_rl_v2.config import load_experiment_config
 from tokamak_rl_v2.config.schema import IpReferenceConfig, LearnerConfig, RewardConfig
 from tokamak_rl_v2.env import BatchStep, TokamakMagneticControlEnv
+from tokamak_rl_v2.env.replay_start_states import REPLAY_START_SHOT_IDS, ReplayStartStateLibrary
 from tokamak_rl_v2.env.shot_fragments import ShotFragmentLibrary
 from tokamak_rl_v2.networks import FeedForwardGaussianActor, RecurrentQCritic
 from tokamak_rl_v2.rewards import T15PhysicalReward
@@ -611,27 +612,35 @@ def test_hold_reset_ip_reference_uses_actual_reset_ip() -> None:
     assert torch.allclose(batch.ip[1], torch.full((21,), 125100.0, dtype=torch.float64))
 
 
-def test_shot_fragment_library_samples_coherent_reset_and_reference() -> None:
+def test_replay_start_state_library_loads_expected_real_shots() -> None:
     cfg = load_experiment_config(SHOT_FRAGMENT_CONFIG)
     assert cfg.sim.shot_fragments is not None
-    library = ShotFragmentLibrary(cfg.sim.shot_fragments, n_pfc=6, n_sol=3, dt=0.001)
-    sample = library.sample(np.random.default_rng(123), count=6, steps=100)
-    assert sample.ip0.shape == (6,)
-    assert sample.pfc_currents.shape == (6, 6)
-    assert sample.sol_currents.shape == (6, 3)
+    library = ReplayStartStateLibrary(cfg.sim.config_path, n_pfc=6, n_sol=3)
+    assert tuple(row.shot_id for row in library.rows) == REPLAY_START_SHOT_IDS
+    sample = library.sample(np.random.default_rng(123), count=12)
+    assert sample.ip0.shape == (12,)
+    assert sample.pfc0.shape == (12, 6)
+    assert sample.sol0.shape == (12, 3)
+    assert sample.params0.shape == (12, 5)
+    rows_by_id = {row.shot_id: row for row in library.rows}
+    for idx, shot_id in enumerate(sample.shot_ids):
+        row = rows_by_id[shot_id]
+        assert float(sample.ip0[idx]) == pytest.approx(row.ip0)
+        assert np.allclose(sample.pfc0[idx], row.pfc0)
+        assert np.allclose(sample.sol0[idx], row.sol0)
+        assert np.allclose(sample.params0[idx], row.params0)
+
+
+def test_shot_fragment_library_anchors_ip_reference_to_reset_ip() -> None:
+    cfg = load_experiment_config(SHOT_FRAGMENT_CONFIG)
+    assert cfg.sim.shot_fragments is not None
+    library = ShotFragmentLibrary(cfg.sim.shot_fragments, dt=0.001)
+    initial_ip = np.asarray([124750.0, 125050.0, 126250.0, 127000.0, 124900.0, 125400.0], dtype=float)
+    sample = library.sample(np.random.default_rng(123), count=6, steps=100, initial_ip=initial_ip)
     assert sample.ip_reference.shape == (6, 101)
-    assert sample.pfc_current_reference.shape == (6, 101, 6)
-    assert sample.sol_current_reference.shape == (6, 101, 3)
     assert np.all(sample.ip_reference > 0.0)
-    assert np.allclose(sample.ip0, sample.ip_reference[:, 0])
-    assert np.allclose(sample.pfc_currents, sample.pfc_current_reference[:, 0])
-    assert np.allclose(sample.sol_currents, sample.sol_current_reference[:, 0])
-    assert np.all(np.isfinite(sample.pfc_currents))
-    assert np.all(np.isfinite(sample.sol_currents))
-    assert np.all(np.isfinite(sample.pfc_current_reference))
-    assert np.all(np.isfinite(sample.sol_current_reference))
-    assert len(set(sample.shot_ids)) >= 1
-    assert np.all(sample.start_times_s >= 0.0)
+    assert np.all(np.isfinite(sample.ip_reference))
+    assert np.allclose(sample.ip_reference[:, 0], initial_ip)
     max_step_delta = np.max(np.abs(np.diff(sample.ip_reference, axis=1)))
     assert max_step_delta < 15000.0
 
@@ -676,6 +685,8 @@ def test_shot_fragment_reference_requires_concrete_ip_reference() -> None:
 def test_shot_fragment_env_reset_uses_sampled_reference() -> None:
     cfg = load_experiment_config(SHOT_FRAGMENT_CONFIG)
     cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=12))
+    library = ReplayStartStateLibrary(cfg.sim.config_path, n_pfc=6, n_sol=3)
+    rows_by_id = {row.shot_id: row for row in library.rows}
     env = TokamakMagneticControlEnv(cfg, batch_size=2, device="cpu", seed=44)
     obs = env.reset()
     assert torch.all(torch.isfinite(obs))
@@ -683,46 +694,35 @@ def test_shot_fragment_env_reset_uses_sampled_reference() -> None:
     assert env.reference.ip.shape == (2, 13)
     assert torch.all(env.reference.ip > 0.0)
     assert env.reset_metadata
-    assert all("shot_id" in item and "shot_start_time_s" in item for item in env.reset_metadata)
-    assert env.shot_pfc_current_reference is not None
-    assert env.shot_sol_current_reference is not None
-    assert cfg.sim.initial_ranges is not None
-    ip_range = cfg.sim.initial_ranges.ip
+    assert all("shot_id" in item for item in env.reset_metadata)
     for b, model in enumerate(env._cpu_models):
-        ip0 = float(model.state.Ip)
-        assert float(ip_range.min) <= ip0 <= float(ip_range.max)
-        assert ip0 != pytest.approx(float(env.reference.ip[b, 0].item()), abs=1.0e-9)
-        for coil, rng in enumerate(cfg.sim.initial_ranges.pfc_currents):
-            current = float(model.state.pfc_currents[coil])
-            assert float(rng.min) <= current <= float(rng.max)
-            assert current != pytest.approx(float(env.shot_pfc_current_reference[b, 0, coil].item()), abs=1.0e-9)
-        for coil, rng in enumerate(cfg.sim.initial_ranges.sol_currents):
-            current = float(model.state.sol_currents[coil])
-            assert float(rng.min) <= current <= float(rng.max)
-            assert current != pytest.approx(float(env.shot_sol_current_reference[b, 0, coil].item()), abs=1.0e-9)
+        shot_id = str(env.reset_metadata[b]["shot_id"])
+        row = rows_by_id[shot_id]
+        assert float(model.state.Ip) == pytest.approx(row.ip0)
+        assert float(env.reference.ip[b, 0].item()) == pytest.approx(row.ip0)
+        assert np.allclose(np.asarray(model.state.pfc_currents, dtype=float), row.pfc0)
+        assert np.allclose(np.asarray(model.state.sol_currents, dtype=float), row.sol0)
 
 
-def test_shot_fragment_teacher_action_is_finite_and_tracks_current_reference() -> None:
-    cfg = load_experiment_config(SHOT_FRAGMENT_CONFIG)
-    cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=12))
-    env = TokamakMagneticControlEnv(cfg, batch_size=1, device="cpu", seed=45)
-    obs = env.reset()
-    assert torch.all(torch.isfinite(obs))
-    assert env.shot_pfc_current_reference is not None
-    assert env.shot_sol_current_reference is not None
-
-    pfc0, sol0 = env._pre_step_bank_currents()
-    target = torch.cat([env.shot_pfc_current_reference[:, 1], env.shot_sol_current_reference[:, 1]], dim=1)
-    error = target - torch.cat([pfc0, sol0], dim=1)
-    action = env.shot_fragment_teacher_action()
-    assert action.shape == (1, env.action_dim)
-    assert torch.all(torch.isfinite(action))
-    assert float(torch.max(torch.abs(action)).item()) > 0.0
-    physical_command = action * env.derivative_limits[None, :]
-    assert float(torch.sum(physical_command * error).item()) > 0.0
-
-    out = env.step(action)
-    assert torch.all(torch.isfinite(out.reward))
+def test_shot_fragment_loader_rejects_removed_fragment_fields(tmp_path: Path) -> None:
+    raw = json.loads(SHOT_FRAGMENT_CONFIG.read_text(encoding="utf-8"))
+    cases = [
+        ("pfc_currents", {"pfc0": {"start": {"min": 0.0, "max": 1.0}, "plateau": {"min": 0.0, "max": 1.0}, "end": {"min": 0.0, "max": 1.0}}}),
+        ("start_time_min_s", 0.0),
+    ]
+    for key, value in cases:
+        mutated = json.loads(json.dumps(raw))
+        mutated["sim"]["shot_fragments"][key] = value
+        path = tmp_path / f"invalid_{key}.json"
+        path.write_text(json.dumps(mutated), encoding="utf-8")
+        with pytest.raises(ValueError, match=key):
+            load_experiment_config(path)
+    mutated = json.loads(json.dumps(raw))
+    mutated["sim"]["shot_fragments"]["ip_a"]["start"] = {"min": 120000.0, "max": 130000.0}
+    path = tmp_path / "invalid_ip_start.json"
+    path.write_text(json.dumps(mutated), encoding="utf-8")
+    with pytest.raises(ValueError, match="ip_a.start"):
+        load_experiment_config(path)
 
 
 def test_ip_reference_inserts_hold_between_opposite_ramps() -> None:

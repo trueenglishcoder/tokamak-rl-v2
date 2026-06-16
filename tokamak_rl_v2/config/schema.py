@@ -102,8 +102,7 @@ class RandomizationConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class TrapezoidValueRanges:
-    start: Range
+class ShotFragmentIpRanges:
     plateau: Range
     end: Range
 
@@ -111,15 +110,10 @@ class TrapezoidValueRanges:
 @dataclass(frozen=True, slots=True)
 class ShotFragmentConfig:
     kind: Literal["idealized_t15_trapezoid"] = "idealized_t15_trapezoid"
-    ip_a: TrapezoidValueRanges | None = None
-    pfc_currents: tuple[TrapezoidValueRanges, ...] = ()
-    sol_currents: tuple[TrapezoidValueRanges, ...] = ()
+    ip_a: ShotFragmentIpRanges | None = None
     ramp_up_s: Range = field(default_factory=lambda: Range(0.25, 0.45))
     hold_s: Range = field(default_factory=lambda: Range(0.25, 0.75))
     ramp_down_s: Range = field(default_factory=lambda: Range(0.25, 0.55))
-    start_time_min_s: float = 0.0
-    start_time_max_s: float | None = None
-    trim_end_s: float = 0.02
     corner_smoothing_s: float = 0.05
 
 

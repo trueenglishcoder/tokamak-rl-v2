@@ -16,6 +16,7 @@ from tokamak_control.io.config_io import load_config
 
 from tokamak_rl_v2.config.schema import ExperimentConfig
 from tokamak_rl_v2.env.references import ReferenceBatch, generate_reference_batch, sample_initial_conditions
+from tokamak_rl_v2.env.replay_start_states import ReplayStartStateLibrary
 from tokamak_rl_v2.env.shot_fragments import ShotFragmentLibrary
 from tokamak_rl_v2.rewards import T15PhysicalReward
 
@@ -38,10 +39,7 @@ class ResetPayload:
     params0: np.ndarray
     reference_seed: int
     ip_reference: np.ndarray | None = None
-    pfc_current_reference: np.ndarray | None = None
-    sol_current_reference: np.ndarray | None = None
     shot_ids: tuple[str, ...] = ()
-    shot_start_times_s: np.ndarray | None = None
 
 
 class TokamakMagneticControlEnv:
@@ -81,16 +79,21 @@ class TokamakMagneticControlEnv:
         self._shot_fragments = (
             ShotFragmentLibrary(
                 config.sim.shot_fragments,
-                n_pfc=self.cfg.pfc.n_coils,
-                n_sol=self.cfg.sol.n_coils,
                 dt=float(self.cfg.physics.t_step),
             )
             if config.sim.shot_fragments is not None
             else None
         )
+        self._replay_start_states = (
+            ReplayStartStateLibrary(
+                config.sim.config_path,
+                n_pfc=self.cfg.pfc.n_coils,
+                n_sol=self.cfg.sol.n_coils,
+            )
+            if config.sim.shot_fragments is not None
+            else None
+        )
         self.reset_metadata: list[dict[str, object]] = []
-        self.shot_pfc_current_reference: Tensor | None = None
-        self.shot_sol_current_reference: Tensor | None = None
 
     @property
     def pfc(self):
@@ -104,7 +107,6 @@ class TokamakMagneticControlEnv:
         payload = self._sample_reset_payload(self.batch_size)
         ip0, pfc0, sol0, params0 = payload.ip0, payload.pfc0, payload.sol0, payload.params0
         self._record_reset_metadata(payload)
-        self._write_shot_teacher_references(payload)
         self.previous_action.zero_()
         self.action_offset = self._sample_action_offset(self.batch_size)
         self.current_over_limit_steps.zero_()
@@ -152,7 +154,6 @@ class TokamakMagneticControlEnv:
             idx_for_boundary = indices_t.to(device=result.boundary.points.device)
             reference = self._reference_for_reset_payload(payload=payload, boundary_points=result.boundary.points[idx_for_boundary], boundary_radii=result.boundary.radii[idx_for_boundary])
             self._write_reference_indices(indices_t, reference)
-            self._write_shot_teacher_references(payload, indices_t=indices_t)
             self._record_reset_metadata(payload, indices=indices)
             return self._obs_gpu(result=result)
         for local, env_index in enumerate(indices):
@@ -160,28 +161,30 @@ class TokamakMagneticControlEnv:
         points0, radii0, _found0 = self._cpu_boundary_samples(indices=indices)
         reference = self._reference_for_reset_payload(payload=payload, boundary_points=points0, boundary_radii=radii0)
         self._write_reference_indices(indices_t, reference)
-        self._write_shot_teacher_references(payload, indices_t=indices_t)
         self._record_reset_metadata(payload, indices=indices)
         return self._obs_cpu()
 
     def _sample_reset_payload(self, count: int) -> ResetPayload:
-        if self.config.sim.initial_ranges is None:
-            raise ValueError("training config must provide replay-bounded initial_ranges")
         if self._shot_fragments is not None:
-            shot = self._shot_fragments.sample(self.rng, count=int(count), steps=int(self.config.sim.max_episode_steps))
-            ip0, pfc0, sol0, params0 = sample_initial_conditions(self.rng, self.config.sim.initial_ranges, int(count))
+            assert self._replay_start_states is not None
+            reset = self._replay_start_states.sample(self.rng, count=int(count))
+            shot = self._shot_fragments.sample(
+                self.rng,
+                count=int(count),
+                steps=int(self.config.sim.max_episode_steps),
+                initial_ip=reset.ip0,
+            )
             return ResetPayload(
-                ip0=ip0,
-                pfc0=pfc0,
-                sol0=sol0,
-                params0=params0,
+                ip0=reset.ip0,
+                pfc0=reset.pfc0,
+                sol0=reset.sol0,
+                params0=reset.params0,
                 reference_seed=int(self.rng.integers(0, 2**31 - 1)),
                 ip_reference=shot.ip_reference,
-                pfc_current_reference=shot.pfc_current_reference,
-                sol_current_reference=shot.sol_current_reference,
-                shot_ids=shot.shot_ids,
-                shot_start_times_s=shot.start_times_s,
+                shot_ids=reset.shot_ids,
             )
+        if self.config.sim.initial_ranges is None:
+            raise ValueError("training config must provide replay-bounded initial_ranges")
         ip0, pfc0, sol0, params0 = sample_initial_conditions(self.rng, self.config.sim.initial_ranges, int(count))
         return ResetPayload(ip0=ip0, pfc0=pfc0, sol0=sol0, params0=params0, reference_seed=int(self.rng.integers(0, 2**31 - 1)))
 
@@ -213,51 +216,14 @@ class TokamakMagneticControlEnv:
             self.reset_metadata = []
             return
         env_indices = list(range(len(payload.shot_ids))) if indices is None else list(indices)
-        starts = payload.shot_start_times_s if payload.shot_start_times_s is not None else np.full((len(payload.shot_ids),), np.nan)
         self.reset_metadata = [
             {
                 "env_index": int(env_indices[i]),
                 "shot_id": str(payload.shot_ids[i]),
-                "shot_start_time_s": float(starts[i]),
                 "initial_ip": float(payload.ip0[i]),
             }
             for i in range(len(payload.shot_ids))
         ]
-
-    def _write_shot_teacher_references(self, payload: ResetPayload, *, indices_t: Tensor | None = None) -> None:
-        if payload.pfc_current_reference is None or payload.sol_current_reference is None:
-            if indices_t is None:
-                self.shot_pfc_current_reference = None
-                self.shot_sol_current_reference = None
-            return
-        pfc = torch.as_tensor(payload.pfc_current_reference, dtype=torch.float32, device=self.device)
-        sol = torch.as_tensor(payload.sol_current_reference, dtype=torch.float32, device=self.device)
-        if indices_t is None or self.shot_pfc_current_reference is None or self.shot_sol_current_reference is None:
-            self.shot_pfc_current_reference = pfc
-            self.shot_sol_current_reference = sol
-            return
-        self.shot_pfc_current_reference[indices_t] = pfc
-        self.shot_sol_current_reference[indices_t] = sol
-
-    def shot_fragment_teacher_action(self) -> Tensor:
-        """Return normalized derivative actions that follow sampled shot-current curves."""
-        if self.shot_pfc_current_reference is None or self.shot_sol_current_reference is None:
-            raise RuntimeError("shot fragment teacher is only available when sim.shot_fragments is configured")
-        pfc_current, sol_current = self._pre_step_bank_currents()
-        dt = max(float(self.cfg.physics.t_step), 1.0e-12)
-        max_idx = min(int(self.shot_pfc_current_reference.shape[1]), int(self.shot_sol_current_reference.shape[1])) - 1
-        idx = torch.clamp(self.step_index + 1, 0, max_idx)
-        b = torch.arange(self.batch_size, device=self.device)
-        target_pfc = self.shot_pfc_current_reference[b, idx]
-        target_sol = self.shot_sol_current_reference[b, idx]
-        physical = torch.cat([(target_pfc - pfc_current) / dt, (target_sol - sol_current) / dt], dim=1)
-        deriv_scale = torch.where(
-            torch.isfinite(self.derivative_limits) & (self.derivative_limits > 0.0),
-            self.derivative_limits,
-            torch.ones_like(self.derivative_limits),
-        )
-        normalized = torch.clamp(torch.nan_to_num(physical / deriv_scale[None, :], nan=0.0, posinf=1.0, neginf=-1.0), -1.0, 1.0)
-        return normalized.detach()
 
     def _write_reference_indices(self, indices_t: Tensor, reference: ReferenceBatch) -> None:
         assert self.reference is not None
@@ -613,8 +579,6 @@ class TokamakMagneticControlEnv:
             "previous_action": self.previous_action.detach().cpu(),
             "action_offset": self.action_offset.detach().cpu(),
             "current_over_limit_steps": self.current_over_limit_steps.detach().cpu(),
-            "shot_pfc_current_reference": None if self.shot_pfc_current_reference is None else self.shot_pfc_current_reference.detach().cpu(),
-            "shot_sol_current_reference": None if self.shot_sol_current_reference is None else self.shot_sol_current_reference.detach().cpu(),
         }
         if self.config.sim.compute_backend == "gpu":
             assert self._gpu_sim is not None
@@ -652,8 +616,6 @@ class TokamakMagneticControlEnv:
         self.previous_action = torch.as_tensor(state["previous_action"], dtype=torch.float32, device=self.device).clone()
         self.action_offset = torch.as_tensor(state["action_offset"], dtype=torch.float32, device=self.device).clone()
         self.current_over_limit_steps = torch.as_tensor(state.get("current_over_limit_steps", torch.zeros((self.batch_size,), dtype=torch.long)), dtype=torch.long, device=self.device).clone()
-        self.shot_pfc_current_reference = None if state.get("shot_pfc_current_reference") is None else torch.as_tensor(state["shot_pfc_current_reference"], dtype=torch.float32, device=self.device).clone()
-        self.shot_sol_current_reference = None if state.get("shot_sol_current_reference") is None else torch.as_tensor(state["shot_sol_current_reference"], dtype=torch.float32, device=self.device).clone()
         if self.config.sim.compute_backend == "gpu":
             if self._gpu_sim is None:
                 self._gpu_sim = BatchedGpuTokamakSimulator(

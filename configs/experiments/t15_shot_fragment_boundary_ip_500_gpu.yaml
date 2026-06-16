@@ -12,66 +12,13 @@
     "shot_fragments": {
       "kind": "idealized_t15_trapezoid",
       "ip_a": {
-        "start": {"min": 120000.0, "max": 130000.0},
         "plateau": {"min": 385000.0, "max": 420000.0},
         "end": {"min": 170000.0, "max": 330000.0}
       },
       "ramp_up_s": {"min": 0.25, "max": 0.45},
       "hold_s": {"min": 0.35, "max": 0.75},
       "ramp_down_s": {"min": 0.25, "max": 0.55},
-      "start_time_min_s": 0.0,
-      "start_time_max_s": null,
-      "trim_end_s": 0.02,
-      "corner_smoothing_s": 0.05,
-      "sol_currents": {
-        "sol0": {
-          "start": {"min": 565000.0, "max": 645000.0},
-          "plateau": {"min": 3000000.0, "max": 3400000.0},
-          "end": {"min": 2700000.0, "max": 3375000.0}
-        },
-        "sol1": {
-          "start": {"min": 1238000.0, "max": 1387000.0},
-          "plateau": {"min": 8800000.0, "max": 9938000.0},
-          "end": {"min": 6750000.0, "max": 9450000.0}
-        },
-        "sol2": {
-          "start": {"min": 583000.0, "max": 654000.0},
-          "plateau": {"min": 3040000.0, "max": 3410000.0},
-          "end": {"min": 2700000.0, "max": 3375000.0}
-        }
-      },
-      "pfc_currents": {
-        "pfc0": {
-          "start": {"min": -19500.0, "max": -18200.0},
-          "plateau": {"min": -141600.0, "max": -139000.0},
-          "end": {"min": -120000.0, "max": -54000.0}
-        },
-        "pfc1": {
-          "start": {"min": 69700.0, "max": 71400.0},
-          "plateau": {"min": 222000.0, "max": 246500.0},
-          "end": {"min": 92000.0, "max": 244000.0}
-        },
-        "pfc2": {
-          "start": {"min": 27700.0, "max": 29400.0},
-          "plateau": {"min": 103000.0, "max": 118000.0},
-          "end": {"min": 90000.0, "max": 107000.0}
-        },
-        "pfc3": {
-          "start": {"min": 34700.0, "max": 36400.0},
-          "plateau": {"min": 128000.0, "max": 146200.0},
-          "end": {"min": 89500.0, "max": 125500.0}
-        },
-        "pfc4": {
-          "start": {"min": 88300.0, "max": 92400.0},
-          "plateau": {"min": 409000.0, "max": 433500.0},
-          "end": {"min": 188000.0, "max": 357500.0}
-        },
-        "pfc5": {
-          "start": {"min": -148000.0, "max": -129000.0},
-          "plateau": {"min": -1528000.0, "max": -1523000.0},
-          "end": {"min": -1260000.0, "max": -475000.0}
-        }
-      }
+      "corner_smoothing_s": 0.05
     },
     "initial_ranges": {
       "ip": {
@@ -187,18 +134,18 @@
     "target_preview_stride": 10
   },
   "reward": {
-    "shape_good_m": 0.005,
-    "shape_bad_m": 0.05,
-    "ip_good_a": 500.0,
-    "ip_bad_a": 20000.0,
+    "shape_good_m": 0.02,
+    "shape_bad_m": 0.20,
+    "ip_good_a": 50000.0,
+    "ip_bad_a": 250000.0,
     "boundary_missing_error_m": 0.1,
-    "shape_weight": 3.0,
-    "ip_weight": 2.0,
-    "current_weight": 2.0,
+    "shape_weight": 2.0,
+    "ip_weight": 3.0,
+    "current_weight": 1.0,
     "current_good_fraction": 0.85,
     "current_bad_fraction": 1.0,
     "max_episode_reward": 100.0,
-    "terminal_reward": -100.0,
+    "terminal_reward": -20.0,
     "reward_scale": 1.0
   },
   "randomization": {
