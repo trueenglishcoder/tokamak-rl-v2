@@ -17,19 +17,21 @@ export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-tokamak-rl-v2-shot-fragment-4gpu
 export WANDB_MODE=${WANDB_MODE:-online}
 export WANDB__SERVICE_WAIT=${WANDB__SERVICE_WAIT:-30}
 
-# Distributed training counts --steps as environment/global steps.
+# local_replay counts --steps as global environment steps.
 export TRAIN_ENV_STEPS=${TRAIN_ENV_STEPS:-1000000}
-export EVAL_ENV_STEPS=${EVAL_ENV_STEPS:-500000}
-export SAVE_CHECKPOINTS=${SAVE_CHECKPOINTS:-0}
-export CHECKPOINT_ENV_STEPS=${CHECKPOINT_ENV_STEPS:-1000000}
+export EVAL_ENV_STEPS=${EVAL_ENV_STEPS:-100000}
+export SAVE_CHECKPOINTS=${SAVE_CHECKPOINTS:-1}
+export CHECKPOINT_ENV_STEPS=${CHECKPOINT_ENV_STEPS:-100000}
 
-# Local-replay distributed training: one learner+simulator rank per GPU.
+# Same effective workload as the 1-GPU job, sharded over 4 ranks:
+# 1-GPU: 32 envs, batch 256, replay 256, chunk 64, updates/chunk 16.
+# 4-GPU: 8 envs/rank, batch 64/rank, replay 64/rank, synchronized gradients.
 export NPROC_PER_NODE=${NPROC_PER_NODE:-4}
-export NUM_ENVS=${NUM_ENVS:-512}
-export BATCH_SIZE=${BATCH_SIZE:-128}
-export REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-384}
-export ROLLOUT_CHUNK_LENGTH=${ROLLOUT_CHUNK_LENGTH:-16}
-export UPDATES_PER_ROLLOUT_CHUNK=${UPDATES_PER_ROLLOUT_CHUNK:-64}
+export NUM_ENVS=${NUM_ENVS:-32}
+export BATCH_SIZE=${BATCH_SIZE:-64}
+export REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-64}
+export ROLLOUT_CHUNK_LENGTH=${ROLLOUT_CHUNK_LENGTH:-64}
+export UPDATES_PER_ROLLOUT_CHUNK=${UPDATES_PER_ROLLOUT_CHUNK:-16}
 
 if (( NUM_ENVS % NPROC_PER_NODE != 0 )); then
   echo "NUM_ENVS=${NUM_ENVS} must be divisible by NPROC_PER_NODE=${NPROC_PER_NODE}" >&2
@@ -105,7 +107,7 @@ PYCUDA
       --wandb-name ${RUN_NAME} \
       --wandb-group ${RUN_NAME} \
       --wandb-mode ${WANDB_MODE} \
-      --controller-rollout-steps 500 \
+      --controller-rollout-steps 1000 \
       --allow-failed-gates
 
     echo "train_policy_pipeline completed at $(date -Is)"
