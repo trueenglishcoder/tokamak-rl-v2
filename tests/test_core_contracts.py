@@ -684,8 +684,22 @@ def test_shot_fragment_env_reset_uses_sampled_reference() -> None:
     assert torch.all(env.reference.ip > 0.0)
     assert env.reset_metadata
     assert all("shot_id" in item and "shot_start_time_s" in item for item in env.reset_metadata)
+    assert env.shot_pfc_current_reference is not None
+    assert env.shot_sol_current_reference is not None
+    assert cfg.sim.initial_ranges is not None
+    ip_range = cfg.sim.initial_ranges.ip
     for b, model in enumerate(env._cpu_models):
-        assert float(model.state.Ip) == pytest.approx(float(env.reference.ip[b, 0].item()))
+        ip0 = float(model.state.Ip)
+        assert float(ip_range.min) <= ip0 <= float(ip_range.max)
+        assert ip0 != pytest.approx(float(env.reference.ip[b, 0].item()), abs=1.0e-9)
+        for coil, rng in enumerate(cfg.sim.initial_ranges.pfc_currents):
+            current = float(model.state.pfc_currents[coil])
+            assert float(rng.min) <= current <= float(rng.max)
+            assert current != pytest.approx(float(env.shot_pfc_current_reference[b, 0, coil].item()), abs=1.0e-9)
+        for coil, rng in enumerate(cfg.sim.initial_ranges.sol_currents):
+            current = float(model.state.sol_currents[coil])
+            assert float(rng.min) <= current <= float(rng.max)
+            assert current != pytest.approx(float(env.shot_sol_current_reference[b, 0, coil].item()), abs=1.0e-9)
 
 
 def test_shot_fragment_teacher_action_is_finite_and_tracks_current_reference() -> None:

@@ -169,11 +169,11 @@ class TokamakMagneticControlEnv:
             raise ValueError("training config must provide replay-bounded initial_ranges")
         if self._shot_fragments is not None:
             shot = self._shot_fragments.sample(self.rng, count=int(count), steps=int(self.config.sim.max_episode_steps))
-            _ip_unused, _pfc_unused, _sol_unused, params0 = sample_initial_conditions(self.rng, self.config.sim.initial_ranges, int(count))
+            ip0, pfc0, sol0, params0 = sample_initial_conditions(self.rng, self.config.sim.initial_ranges, int(count))
             return ResetPayload(
-                ip0=shot.ip0,
-                pfc0=shot.pfc_currents,
-                sol0=shot.sol_currents,
+                ip0=ip0,
+                pfc0=pfc0,
+                sol0=sol0,
                 params0=params0,
                 reference_seed=int(self.rng.integers(0, 2**31 - 1)),
                 ip_reference=shot.ip_reference,
