@@ -102,18 +102,9 @@ class RandomizationConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class ShotFragmentIpRanges:
-    plateau: Range
-    end: Range
-
-
-@dataclass(frozen=True, slots=True)
 class ShotFragmentConfig:
     kind: Literal["idealized_t15_trapezoid"] = "idealized_t15_trapezoid"
-    ip_a: ShotFragmentIpRanges | None = None
-    ramp_up_s: Range = field(default_factory=lambda: Range(0.25, 0.45))
-    hold_s: Range = field(default_factory=lambda: Range(0.25, 0.75))
-    ramp_down_s: Range = field(default_factory=lambda: Range(0.25, 0.55))
+    shot_ids: tuple[str, ...] = ()
     corner_smoothing_s: float = 0.05
 
 

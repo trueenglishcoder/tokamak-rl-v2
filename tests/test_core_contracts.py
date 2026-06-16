@@ -12,7 +12,7 @@ import torch
 from tokamak_rl_v2.config import load_experiment_config
 from tokamak_rl_v2.config.schema import IpReferenceConfig, LearnerConfig, RewardConfig
 from tokamak_rl_v2.env import BatchStep, TokamakMagneticControlEnv
-from tokamak_rl_v2.env.replay_start_states import REPLAY_START_SHOT_IDS, ReplayStartStateLibrary
+from tokamak_rl_v2.env.replay_start_states import MAIN_7_REPLAY_START_SHOT_IDS, ReplayStartStateLibrary
 from tokamak_rl_v2.env.shot_fragments import ShotFragmentLibrary
 from tokamak_rl_v2.networks import FeedForwardGaussianActor, RecurrentQCritic
 from tokamak_rl_v2.rewards import T15PhysicalReward
@@ -360,6 +360,33 @@ def test_severe_current_limit_violation_terminates_immediately() -> None:
     assert float(np.nanmax(comps["terminated_current_hard"])) == pytest.approx(1.0)
 
 
+def test_current_limit_violation_is_logged_but_not_terminal_when_disabled() -> None:
+    cfg = load_experiment_config(CONFIG)
+    cfg = replace(
+        cfg,
+        sim=replace(
+            cfg.sim,
+            compute_backend="cpu",
+            max_episode_steps=4,
+            terminate_on_current_limit=False,
+            current_termination_over_limit_a=5000.0,
+            current_termination_grace_steps=2,
+            current_hard_termination_fraction=1.01,
+        ),
+    )
+    env = TokamakMagneticControlEnv(cfg, batch_size=1, device="cpu", seed=12)
+    env.reset()
+    limit = float(env.current_limits[0].item())
+    env._cpu_models[0].state.pfc_currents[0] = 1.08 * limit
+    result = env.step(torch.zeros((1, env.action_dim), dtype=torch.float32))
+    comps = result.info["reward_components"]
+    assert bool(result.terminated[0].item()) is False
+    assert float(np.nanmax(comps["current_over_limit_a"])) > 0.0
+    assert float(np.nanmax(comps["current_usage_fraction"])) > 1.0
+    assert float(np.nanmax(comps["terminated_current"])) == pytest.approx(0.0)
+    assert int(env.current_over_limit_steps[0].item()) == 1
+
+
 def test_hold_reset_boundary_uses_observed_reset_boundary() -> None:
     cfg = load_experiment_config(CONFIG)
     cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=4))
@@ -615,8 +642,14 @@ def test_hold_reset_ip_reference_uses_actual_reset_ip() -> None:
 def test_replay_start_state_library_loads_expected_real_shots() -> None:
     cfg = load_experiment_config(SHOT_FRAGMENT_CONFIG)
     assert cfg.sim.shot_fragments is not None
-    library = ReplayStartStateLibrary(cfg.sim.config_path, n_pfc=6, n_sol=3)
-    assert tuple(row.shot_id for row in library.rows) == REPLAY_START_SHOT_IDS
+    assert cfg.sim.shot_fragments.shot_ids == MAIN_7_REPLAY_START_SHOT_IDS
+    library = ReplayStartStateLibrary(
+        cfg.sim.config_path,
+        n_pfc=6,
+        n_sol=3,
+        shot_ids=cfg.sim.shot_fragments.shot_ids,
+    )
+    assert tuple(row.shot_id for row in library.rows) == MAIN_7_REPLAY_START_SHOT_IDS
     sample = library.sample(np.random.default_rng(123), count=12)
     assert sample.ip0.shape == (12,)
     assert sample.pfc0.shape == (12, 6)
@@ -634,15 +667,40 @@ def test_replay_start_state_library_loads_expected_real_shots() -> None:
 def test_shot_fragment_library_anchors_ip_reference_to_reset_ip() -> None:
     cfg = load_experiment_config(SHOT_FRAGMENT_CONFIG)
     assert cfg.sim.shot_fragments is not None
-    library = ShotFragmentLibrary(cfg.sim.shot_fragments, dt=0.001)
-    initial_ip = np.asarray([124750.0, 125050.0, 126250.0, 127000.0, 124900.0, 125400.0], dtype=float)
-    sample = library.sample(np.random.default_rng(123), count=6, steps=100, initial_ip=initial_ip)
-    assert sample.ip_reference.shape == (6, 101)
+    library = ShotFragmentLibrary(cfg.sim.shot_fragments, dt=0.001, config_path=cfg.sim.config_path)
+    reset_library = ReplayStartStateLibrary(
+        cfg.sim.config_path,
+        n_pfc=6,
+        n_sol=3,
+        shot_ids=cfg.sim.shot_fragments.shot_ids,
+    )
+    sampled_reset = reset_library.sample(np.random.default_rng(123), count=6)
+    initial_ip = np.asarray(sampled_reset.ip0, dtype=float)
+    sample = library.sample(
+        np.random.default_rng(123),
+        count=6,
+        steps=1000,
+        initial_ip=initial_ip,
+        shot_ids=sampled_reset.shot_ids,
+    )
+    assert sample.ip_reference.shape == (6, 1001)
     assert np.all(sample.ip_reference > 0.0)
     assert np.all(np.isfinite(sample.ip_reference))
     assert np.allclose(sample.ip_reference[:, 0], initial_ip)
-    max_step_delta = np.max(np.abs(np.diff(sample.ip_reference, axis=1)))
-    assert max_step_delta < 15000.0
+    step_delta = np.diff(sample.ip_reference, axis=1)
+    assert np.min(step_delta) >= -1.0e-6
+    family_1s = [library.templates[shot_id].ip_at_1s for shot_id in cfg.sim.shot_fragments.shot_ids]
+    assert float(np.min(sample.ip_reference[:, -1])) >= float(min(family_1s)) - 1.0
+    assert float(np.max(sample.ip_reference[:, -1])) <= float(max(family_1s)) + 1.0
+    for idx, shot_id in enumerate(sampled_reset.shot_ids):
+        template = library.templates[shot_id]
+        assert sample.shot_ids[idx] == shot_id
+        assert sample.ip_reference[idx, -1] == pytest.approx(template.plateau_ip, rel=1.0e-4)
+        assert sample.ip_reference[idx, 0] == pytest.approx(float(sampled_reset.ip0[idx]))
+        ramp_end_idx = int(np.ceil(template.ramp_up_end_s / 0.001))
+        ramp_end_idx = min(ramp_end_idx, sample.ip_reference.shape[1] - 1)
+        tail = sample.ip_reference[idx, ramp_end_idx:]
+        assert np.max(np.abs(tail - tail[0])) < 2500.0
 
 
 def test_sim_limit_scales_expand_current_and_derivative_limits() -> None:
@@ -685,7 +743,13 @@ def test_shot_fragment_reference_requires_concrete_ip_reference() -> None:
 def test_shot_fragment_env_reset_uses_sampled_reference() -> None:
     cfg = load_experiment_config(SHOT_FRAGMENT_CONFIG)
     cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=12))
-    library = ReplayStartStateLibrary(cfg.sim.config_path, n_pfc=6, n_sol=3)
+    assert cfg.sim.shot_fragments is not None
+    library = ReplayStartStateLibrary(
+        cfg.sim.config_path,
+        n_pfc=6,
+        n_sol=3,
+        shot_ids=cfg.sim.shot_fragments.shot_ids,
+    )
     rows_by_id = {row.shot_id: row for row in library.rows}
     env = TokamakMagneticControlEnv(cfg, batch_size=2, device="cpu", seed=44)
     obs = env.reset()
@@ -709,6 +773,7 @@ def test_shot_fragment_loader_rejects_removed_fragment_fields(tmp_path: Path) ->
     cases = [
         ("pfc_currents", {"pfc0": {"start": {"min": 0.0, "max": 1.0}, "plateau": {"min": 0.0, "max": 1.0}, "end": {"min": 0.0, "max": 1.0}}}),
         ("start_time_min_s", 0.0),
+        ("ip_a", {"plateau": {"min": 380000.0, "max": 400000.0}}),
     ]
     for key, value in cases:
         mutated = json.loads(json.dumps(raw))
@@ -718,10 +783,10 @@ def test_shot_fragment_loader_rejects_removed_fragment_fields(tmp_path: Path) ->
         with pytest.raises(ValueError, match=key):
             load_experiment_config(path)
     mutated = json.loads(json.dumps(raw))
-    mutated["sim"]["shot_fragments"]["ip_a"]["start"] = {"min": 120000.0, "max": 130000.0}
-    path = tmp_path / "invalid_ip_start.json"
+    mutated["sim"]["shot_fragments"]["unexpected"] = 123
+    path = tmp_path / "invalid_fragment_unknown.json"
     path.write_text(json.dumps(mutated), encoding="utf-8")
-    with pytest.raises(ValueError, match="ip_a.start"):
+    with pytest.raises(ValueError, match="unsupported keys"):
         load_experiment_config(path)
 
 
@@ -992,9 +1057,15 @@ def test_policy_pipeline_gates_require_learning_signals() -> None:
         "max_shape_error_m": 0.03,
         "min_ip_improvement_frac": 0.25,
         "min_ip_improvement_a": 20000.0,
+        "max_ip_error_a": None,
+        "max_ip_error_late_a": None,
         "min_action_rms": 0.005,
         "max_action_rms": 0.5,
+        "min_mean_episode_completion": 0.95,
         "min_episode_completion": 0.95,
+        "min_baseline_ip_error_a": 0.0,
+        "min_baseline_ip_error_late_a": 0.0,
+        "always_require_ip_improvement": False,
         "min_policy_weight_extra": 1.0e-4,
         "min_sampled_q_spread": 1.0e-8,
         "require_controller_rollout": True,
@@ -1061,6 +1132,66 @@ def test_policy_pipeline_gates_require_learning_signals() -> None:
     assert bad_controller["passed"] is False
     assert controller_reasons["controller_shape_error"] is False
     assert controller_reasons["controller_ip_error"] is False
+
+
+def test_policy_pipeline_shot_family_gates_reject_easy_tasks_and_missing_ip_gain() -> None:
+    actor_eval = {
+        "boundary_found": 1.0,
+        "boundary_found_late_min": 1.0,
+        "current_over_limit_a": 0.0,
+        "current_over_limit_a_max": 0.0,
+        "current_over_limit_a_late_max": 0.0,
+        "shape_error_mean_m": 0.02,
+        "shape_error_mean_m_late": 0.02,
+        "ip_error_a": 82000.0,
+        "ip_error_a_late": 90000.0,
+        "action_rms": 0.02,
+        "mean_episode_completion": 0.96,
+        "min_episode_completion": 0.91,
+    }
+    no_control = {"ip_error_a": 90000.0, "ip_error_a_late": 95000.0}
+    tail_losses = {"tail100.policy_weight_max": 0.06, "tail100.sampled_q_spread": 1.0e-4}
+    controller_rollout = {
+        "status": "ok",
+        "boundary_found_mean": 1.0,
+        "current_over_limit_a_max": 0.0,
+        "shape_error_mean_m": 0.02,
+        "shape_error_late_m": 0.02,
+        "ip_error_a": 24000.0,
+        "ip_error_late_a": 24000.0,
+    }
+    gates = evaluate_policy_gates(
+        actor_eval=actor_eval,
+        no_control=no_control,
+        tail_losses=tail_losses,
+        action_samples=20,
+        min_boundary_found=0.999,
+        max_current_over_limit_a=0.0,
+        max_shape_error_m=0.03,
+        min_ip_improvement_frac=0.25,
+        min_ip_improvement_a=20000.0,
+        max_ip_error_a=25000.0,
+        max_ip_error_late_a=25000.0,
+        min_action_rms=0.005,
+        max_action_rms=0.5,
+        min_mean_episode_completion=0.95,
+        min_episode_completion=0.90,
+        min_baseline_ip_error_a=100000.0,
+        min_baseline_ip_error_late_a=100000.0,
+        always_require_ip_improvement=True,
+        min_policy_weight_extra=1.0e-4,
+        min_sampled_q_spread=1.0e-8,
+        require_controller_rollout=True,
+        controller_rollout=controller_rollout,
+        max_controller_shape_error_m=0.03,
+        max_controller_ip_error_a=25000.0,
+    )
+    reasons = {check["name"]: check["passed"] for check in gates["checks"]}
+    assert reasons["task_difficulty"] is False
+    assert reasons["ip_error_mean"] is False
+    assert reasons["ip_error_late"] is False
+    assert reasons["ip_improvement"] is False
+    assert reasons["ip_improvement_late"] is False
 
 
 def test_experiment_configs_use_neutral_output_names() -> None:

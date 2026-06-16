@@ -32,6 +32,7 @@ def main(argv: list[str] | None = None) -> int:
     output_dir = Path(args.output_dir or cfg.training.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     wandb_run = _start_wandb(args, cfg, output_dir=output_dir)
+    gate_profile = _gate_profile_for_config(cfg)
     rank0 = _distributed_rank() == 0
     runtime_device = _rank_runtime_device(args.device or cfg.training.device, cfg)
     runtime_cfg = _rank_runtime_config(cfg, runtime_device)
@@ -68,6 +69,45 @@ def main(argv: list[str] | None = None) -> int:
             )
             _wandb_log(wandb_run, "pipeline/no_control_selection", baseline, step=0)
             _wandb_log(wandb_run, "pipeline/no_control_holdout", holdout_baseline, step=0)
+        baseline_difficulty = _baseline_difficulty_report(
+            holdout_baseline,
+            min_ip_error_a=float(gate_profile["min_baseline_ip_error_a"]),
+            min_ip_error_late_a=float(gate_profile["min_baseline_ip_error_late_a"]),
+        )
+        if rank0:
+            _wandb_log(wandb_run, "pipeline/no_control_difficulty", baseline_difficulty, step=0)
+        if bool(gate_profile["enforce_baseline_difficulty"]) and not bool(baseline_difficulty["passed"]):
+            if rank0:
+                report = {
+                    "status": "failed_baseline_difficulty",
+                    "config": str(Path(args.config).resolve()),
+                    "output_dir": str(output_dir),
+                    "evaluation_seed_offsets": {
+                        "selection": selection_seed_offset,
+                        "holdout": holdout_seed_offset,
+                    },
+                    "reset_sanity": reset_report,
+                    "no_control_selection": baseline,
+                    "no_control": holdout_baseline,
+                    "baseline_difficulty": baseline_difficulty,
+                    "gates": [
+                        {
+                            "name": "baseline_difficulty",
+                            "passed": False,
+                            "value": {
+                                "ip_error_a": holdout_baseline.get("ip_error_a"),
+                                "ip_error_a_late": holdout_baseline.get("ip_error_a_late"),
+                            },
+                            "threshold": {
+                                "ip_error_a": f">= {float(gate_profile['min_baseline_ip_error_a']):g}",
+                                "ip_error_a_late": f">= {float(gate_profile['min_baseline_ip_error_late_a']):g}",
+                            },
+                        }
+                    ],
+                }
+                _write_json(output_dir / "policy_validation.json", report)
+                _wandb_log(wandb_run, "pipeline", {"passed": 0.0, "failed_baseline_difficulty": 1.0}, step=0)
+            return 2 if not args.allow_failed_gates else 0
         train_result = trainer.train()
         if cfg.training.distributed_mode == "local_replay" and not rank0:
             return 0
@@ -94,15 +134,21 @@ def main(argv: list[str] | None = None) -> int:
             max_shape_error_m=float(args.max_shape_error_m),
             min_ip_improvement_frac=float(args.min_ip_improvement_frac),
             min_ip_improvement_a=float(args.min_ip_improvement_a),
+            max_ip_error_a=gate_profile["max_ip_error_a"],
+            max_ip_error_late_a=gate_profile["max_ip_error_late_a"],
             min_action_rms=float(args.min_action_rms),
             max_action_rms=float(args.max_action_rms),
-            min_episode_completion=float(args.min_episode_completion),
+            min_mean_episode_completion=float(gate_profile["min_mean_episode_completion"]),
+            min_episode_completion=float(gate_profile["min_episode_completion"]),
+            min_baseline_ip_error_a=float(gate_profile["min_baseline_ip_error_a"]),
+            min_baseline_ip_error_late_a=float(gate_profile["min_baseline_ip_error_late_a"]),
+            always_require_ip_improvement=bool(gate_profile["always_require_ip_improvement"]),
             min_policy_weight_extra=float(args.min_policy_weight_extra),
             min_sampled_q_spread=float(args.min_sampled_q_spread),
             require_controller_rollout=not bool(args.skip_controller_rollout_gate),
             controller_rollout=rollout_report,
             max_controller_shape_error_m=float(args.max_controller_shape_error_m),
-            max_controller_ip_error_a=float(args.max_controller_ip_error_a),
+            max_controller_ip_error_a=float(gate_profile["max_controller_ip_error_a"]),
         )
         report = {
             "status": "passed" if gate_report["passed"] else "failed_gates",
@@ -117,6 +163,7 @@ def main(argv: list[str] | None = None) -> int:
             "reset_sanity": reset_report,
             "no_control_selection": baseline,
             "no_control": holdout_baseline,
+            "baseline_difficulty": baseline_difficulty,
             "train_result": train_result,
             "actor_eval": actor_eval,
             "tail_losses": losses,
@@ -219,9 +266,15 @@ def evaluate_policy_gates(
     max_shape_error_m: float,
     min_ip_improvement_frac: float,
     min_ip_improvement_a: float,
+    max_ip_error_a: float | None,
+    max_ip_error_late_a: float | None,
     min_action_rms: float,
     max_action_rms: float,
+    min_mean_episode_completion: float,
     min_episode_completion: float,
+    min_baseline_ip_error_a: float,
+    min_baseline_ip_error_late_a: float,
+    always_require_ip_improvement: bool,
     min_policy_weight_extra: float,
     min_sampled_q_spread: float,
     require_controller_rollout: bool,
@@ -253,9 +306,29 @@ def evaluate_policy_gates(
 
     baseline_ip = _metric(no_control, "ip_error_a")
     actor_ip = _metric(actor_eval, "ip_error_a")
+    baseline_ip_late = _metric(no_control, "ip_error_a_late", default=baseline_ip)
+    actor_ip_late = _metric(actor_eval, "ip_error_a_late", default=actor_ip)
+    if float(min_baseline_ip_error_a) > 0.0 or float(min_baseline_ip_error_late_a) > 0.0:
+        add(
+            "task_difficulty",
+            _finite(baseline_ip)
+            and baseline_ip >= float(min_baseline_ip_error_a)
+            and _finite(baseline_ip_late)
+            and baseline_ip_late >= float(min_baseline_ip_error_late_a),
+            value={"baseline_a": baseline_ip, "baseline_late_a": baseline_ip_late},
+            threshold={
+                "baseline_a": f">= {float(min_baseline_ip_error_a):g} A",
+                "baseline_late_a": f">= {float(min_baseline_ip_error_late_a):g} A",
+            },
+        )
+    if max_ip_error_a is not None:
+        add("ip_error_mean", _finite(actor_ip) and actor_ip <= float(max_ip_error_a), value=actor_ip, threshold=f"<= {float(max_ip_error_a):g} A")
+    if max_ip_error_late_a is not None:
+        add("ip_error_late", _finite(actor_ip_late) and actor_ip_late <= float(max_ip_error_late_a), value=actor_ip_late, threshold=f"late <= {float(max_ip_error_late_a):g} A")
+
     ip_improvement = baseline_ip - actor_ip if _finite(baseline_ip) and _finite(actor_ip) else float("nan")
     ip_improvement_frac = ip_improvement / max(abs(baseline_ip), 1.0e-12) if _finite(ip_improvement) and _finite(baseline_ip) else float("nan")
-    if _finite(baseline_ip) and baseline_ip >= min_ip_improvement_a:
+    if always_require_ip_improvement or (_finite(baseline_ip) and baseline_ip >= min_ip_improvement_a):
         add(
             "ip_improvement",
             ip_improvement >= min_ip_improvement_a and ip_improvement_frac >= min_ip_improvement_frac,
@@ -271,11 +344,9 @@ def evaluate_policy_gates(
             details="baseline error is below the absolute gate",
         )
 
-    baseline_ip_late = _metric(no_control, "ip_error_a_late", default=baseline_ip)
-    actor_ip_late = _metric(actor_eval, "ip_error_a_late", default=actor_ip)
     ip_late_improvement = baseline_ip_late - actor_ip_late if _finite(baseline_ip_late) and _finite(actor_ip_late) else float("nan")
     ip_late_improvement_frac = ip_late_improvement / max(abs(baseline_ip_late), 1.0e-12) if _finite(ip_late_improvement) and _finite(baseline_ip_late) else float("nan")
-    if _finite(baseline_ip_late) and baseline_ip_late >= min_ip_improvement_a:
+    if always_require_ip_improvement or (_finite(baseline_ip_late) and baseline_ip_late >= min_ip_improvement_a):
         add(
             "ip_improvement_late",
             ip_late_improvement >= min_ip_improvement_a and ip_late_improvement_frac >= min_ip_improvement_frac,
@@ -298,9 +369,12 @@ def evaluate_policy_gates(
     min_completion = _metric(actor_eval, "min_episode_completion", default=mean_completion)
     add(
         "episode_completion",
-        _finite(min_completion) and min_completion >= min_episode_completion,
+        _finite(mean_completion)
+        and mean_completion >= min_mean_episode_completion
+        and _finite(min_completion)
+        and min_completion >= min_episode_completion,
         value={"mean": mean_completion, "min": min_completion, "mean_steps": _metric(actor_eval, "mean_episode_steps"), "min_steps": _metric(actor_eval, "min_episode_steps")},
-        threshold=f"min >= {min_episode_completion:g}",
+        threshold=f"mean >= {min_mean_episode_completion:g}, min >= {min_episode_completion:g}",
     )
 
     policy_weight_max = _metric(tail_losses, "tail100.policy_weight_max")
@@ -592,6 +666,56 @@ def _cap_training_intervals(cfg: ExperimentConfig) -> ExperimentConfig:
     if checkpoint_interval == int(cfg.training.checkpoint_interval_steps) and eval_interval == int(cfg.training.eval_interval_steps):
         return cfg
     return replace(cfg, training=replace(cfg.training, checkpoint_interval_steps=checkpoint_interval, eval_interval_steps=eval_interval))
+
+
+def _gate_profile_for_config(cfg: ExperimentConfig) -> dict[str, float | bool | None]:
+    is_shot_family = cfg.sim.shot_fragments is not None and str(cfg.reference.ip.kind) == "shot_trapezoid_fragment"
+    if not is_shot_family:
+        return {
+            "enforce_baseline_difficulty": False,
+            "min_baseline_ip_error_a": 0.0,
+            "min_baseline_ip_error_late_a": 0.0,
+            "always_require_ip_improvement": False,
+            "max_ip_error_a": None,
+            "max_ip_error_late_a": None,
+            "min_mean_episode_completion": 0.95,
+            "min_episode_completion": 0.95,
+            "max_controller_ip_error_a": 40000.0,
+        }
+    return {
+        "enforce_baseline_difficulty": True,
+        "min_baseline_ip_error_a": 100000.0,
+        "min_baseline_ip_error_late_a": 100000.0,
+        "always_require_ip_improvement": True,
+        "max_ip_error_a": 25000.0,
+        "max_ip_error_late_a": 25000.0,
+        "min_mean_episode_completion": 0.95,
+        "min_episode_completion": 0.90,
+        "max_controller_ip_error_a": 25000.0,
+    }
+
+
+def _baseline_difficulty_report(
+    metrics: Mapping[str, object],
+    *,
+    min_ip_error_a: float,
+    min_ip_error_late_a: float,
+) -> dict[str, float]:
+    ip_error_a = _metric(metrics, "ip_error_a")
+    ip_error_a_late = _metric(metrics, "ip_error_a_late", default=ip_error_a)
+    passed = (
+        _finite(ip_error_a)
+        and ip_error_a >= float(min_ip_error_a)
+        and _finite(ip_error_a_late)
+        and ip_error_a_late >= float(min_ip_error_late_a)
+    )
+    return {
+        "passed": 1.0 if passed else 0.0,
+        "ip_error_a": ip_error_a,
+        "ip_error_a_late": ip_error_a_late,
+        "min_ip_error_a": float(min_ip_error_a),
+        "min_ip_error_a_late": float(min_ip_error_late_a),
+    }
 
 
 def _selected_checkpoint(output_dir: Path) -> Path | None:

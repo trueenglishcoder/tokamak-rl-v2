@@ -80,6 +80,7 @@ class TokamakMagneticControlEnv:
             ShotFragmentLibrary(
                 config.sim.shot_fragments,
                 dt=float(self.cfg.physics.t_step),
+                config_path=config.sim.config_path,
             )
             if config.sim.shot_fragments is not None
             else None
@@ -89,6 +90,7 @@ class TokamakMagneticControlEnv:
                 config.sim.config_path,
                 n_pfc=self.cfg.pfc.n_coils,
                 n_sol=self.cfg.sol.n_coils,
+                shot_ids=config.sim.shot_fragments.shot_ids,
             )
             if config.sim.shot_fragments is not None
             else None
@@ -173,6 +175,7 @@ class TokamakMagneticControlEnv:
                 count=int(count),
                 steps=int(self.config.sim.max_episode_steps),
                 initial_ip=reset.ip0,
+                shot_ids=reset.shot_ids,
             )
             return ResetPayload(
                 ip0=reset.ip0,

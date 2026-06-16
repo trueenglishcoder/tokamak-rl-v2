@@ -23,7 +23,6 @@ from tokamak_rl_v2.config.schema import (
     Range,
     ReferenceConfig,
     RewardConfig,
-    ShotFragmentIpRanges,
     ShotFragmentConfig,
     SimConfig,
     TrainingConfig,
@@ -122,19 +121,16 @@ def _current_safety_limits(raw: Mapping[str, Any] | None) -> CurrentSafetyLimits
     )
 
 
-def _shot_fragment_ip_ranges(raw: Mapping[str, Any], name: str) -> ShotFragmentIpRanges:
-    return ShotFragmentIpRanges(
-        plateau=_range(_mapping(raw.get("plateau"), f"{name}.plateau"), f"{name}.plateau"),
-        end=_range(_mapping(raw.get("end"), f"{name}.end"), f"{name}.end"),
-    )
-
-
 def _shot_fragments(raw: Mapping[str, Any] | None) -> ShotFragmentConfig | None:
     if not raw:
         return None
     removed = {
         "pfc_currents",
         "sol_currents",
+        "ip_a",
+        "ramp_up_s",
+        "hold_s",
+        "ramp_down_s",
         "start_time_min_s",
         "start_time_max_s",
         "trim_end_s",
@@ -142,16 +138,14 @@ def _shot_fragments(raw: Mapping[str, Any] | None) -> ShotFragmentConfig | None:
     stale = sorted(set(raw) & removed)
     if stale:
         raise ValueError("sim.shot_fragments contains removed fields: " + ", ".join(stale))
-    ip_raw = _mapping(raw.get("ip_a"), "sim.shot_fragments.ip_a")
-    if "start" in ip_raw:
-        raise ValueError("sim.shot_fragments.ip_a.start has been removed; shot fragments now anchor to the sampled reset Ip0")
+    allowed = {"kind", "shot_ids", "corner_smoothing_s"}
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ValueError("sim.shot_fragments contains unsupported keys: " + ", ".join(unknown))
     kind = str(raw.get("kind", "idealized_t15_trapezoid"))
     return ShotFragmentConfig(
         kind=kind,
-        ip_a=_shot_fragment_ip_ranges(ip_raw, "sim.shot_fragments.ip_a"),
-        ramp_up_s=_range(_mapping(raw.get("ramp_up_s"), "sim.shot_fragments.ramp_up_s"), "sim.shot_fragments.ramp_up_s"),
-        hold_s=_range(_mapping(raw.get("hold_s"), "sim.shot_fragments.hold_s"), "sim.shot_fragments.hold_s"),
-        ramp_down_s=_range(_mapping(raw.get("ramp_down_s"), "sim.shot_fragments.ramp_down_s"), "sim.shot_fragments.ramp_down_s"),
+        shot_ids=_string_tuple(raw.get("shot_ids"), "sim.shot_fragments.shot_ids"),
         corner_smoothing_s=float(raw.get("corner_smoothing_s", 0.05)),
     )
 
@@ -307,8 +301,8 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
         shots = cfg.sim.shot_fragments
         if shots.kind != "idealized_t15_trapezoid":
             raise ValueError("sim.shot_fragments.kind is unsupported")
-        if shots.ip_a is None:
-            raise ValueError("sim.shot_fragments.ip_a is required")
+        if not shots.shot_ids:
+            raise ValueError("sim.shot_fragments.shot_ids must not be empty")
         if not math.isfinite(float(shots.corner_smoothing_s)) or float(shots.corner_smoothing_s) < 0.0:
             raise ValueError("sim.shot_fragments.corner_smoothing_s must be finite and non-negative")
     if not math.isfinite(ip.rate_limit) or ip.rate_limit < 0.0:

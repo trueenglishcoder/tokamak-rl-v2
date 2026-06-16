@@ -9,7 +9,8 @@ import numpy as np
 
 from tokamak_rl_v2.env.references import PARAMETER_ORDER
 
-REPLAY_START_SHOT_IDS: tuple[str, ...] = ("3854", "3855", "3856", "3857", "3858", "3859", "3862", "3863", "3864")
+AVAILABLE_REPLAY_START_SHOT_IDS: tuple[str, ...] = ("3854", "3855", "3856", "3857", "3858", "3859", "3862", "3863", "3864")
+MAIN_7_REPLAY_START_SHOT_IDS: tuple[str, ...] = ("3856", "3857", "3858", "3859", "3862", "3863", "3864")
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,12 +34,20 @@ class ReplayStartStateSample:
 class ReplayStartStateLibrary:
     """Load coherent replay-start reset rows from the real T15 replay-start set."""
 
-    def __init__(self, config_path: Path, *, n_pfc: int, n_sol: int) -> None:
+    def __init__(
+        self,
+        config_path: Path,
+        *,
+        n_pfc: int,
+        n_sol: int,
+        shot_ids: tuple[str, ...] | None = None,
+    ) -> None:
         sim_root = Path(config_path).resolve().parents[1]
         initial_root = sim_root / "configs" / "initial_currents"
         boundary_root = sim_root / "output" / "t15_boundary_parameters"
+        chosen_shot_ids = _validated_shot_ids(shot_ids)
         rows: list[ReplayStartStateRow] = []
-        for shot_id in REPLAY_START_SHOT_IDS:
+        for shot_id in chosen_shot_ids:
             initial_path = initial_root / f"T15MD_new_data_{shot_id}.toml"
             boundary_path = boundary_root / f"simulated_replay_{shot_id}_boundary_params.csv"
             if not initial_path.exists():
@@ -93,4 +102,20 @@ def _load_first_valid_boundary_row(path: Path) -> tuple[float, np.ndarray]:
     raise ValueError(f"could not find a valid replay-start boundary row in {path}")
 
 
-__all__ = ["REPLAY_START_SHOT_IDS", "ReplayStartStateLibrary", "ReplayStartStateRow", "ReplayStartStateSample"]
+def _validated_shot_ids(shot_ids: tuple[str, ...] | None) -> tuple[str, ...]:
+    chosen = AVAILABLE_REPLAY_START_SHOT_IDS if shot_ids is None else tuple(str(shot_id) for shot_id in shot_ids)
+    if not chosen:
+        raise ValueError("replay-start shot_ids must not be empty")
+    unknown = sorted(set(chosen) - set(AVAILABLE_REPLAY_START_SHOT_IDS))
+    if unknown:
+        raise ValueError("unknown replay-start shot_ids: " + ", ".join(unknown))
+    return chosen
+
+
+__all__ = [
+    "AVAILABLE_REPLAY_START_SHOT_IDS",
+    "MAIN_7_REPLAY_START_SHOT_IDS",
+    "ReplayStartStateLibrary",
+    "ReplayStartStateRow",
+    "ReplayStartStateSample",
+]
