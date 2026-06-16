@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+import torch.distributed as dist
 from torch import Tensor, nn
 import torch.nn.functional as F
 
@@ -53,6 +54,7 @@ class MaximumAPosterioriPolicyOptimiser:
         target_critic: RecurrentQCritic,
         config: LearnerConfig,
         device: torch.device | str,
+        distributed: bool = False,
     ) -> None:
         self.actor = actor
         self.critic = critic
@@ -60,6 +62,7 @@ class MaximumAPosterioriPolicyOptimiser:
         self.target_critic = target_critic
         self.config = config
         self.device = torch.device(device)
+        self.distributed = bool(distributed)
         self.actor_optim = torch.optim.Adam(self.actor.parameters(), lr=float(config.actor_lr))
         self.critic_optim = torch.optim.Adam(self.critic.parameters(), lr=float(config.critic_lr))
         self.log_mean_kl_penalty = nn.Parameter(torch.zeros((), dtype=torch.float32, device=self.device))
@@ -135,6 +138,7 @@ class MaximumAPosterioriPolicyOptimiser:
         loss = torch.sum(((q - target).pow(2)) * mask) / denom
         self.critic_optim.zero_grad(set_to_none=True)
         loss.backward()
+        self._average_gradients(self.critic.parameters())
         torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 10.0)
         self.critic_optim.step()
         q_mean = torch.sum(q.detach() * mask) / denom
@@ -199,12 +203,14 @@ class MaximumAPosterioriPolicyOptimiser:
         actor_loss = mle_loss + mean_penalty.detach() * mean_kl + std_penalty.detach() * std_kl
         self.actor_optim.zero_grad(set_to_none=True)
         actor_loss.backward()
+        self._average_gradients(self.actor.parameters())
         torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 10.0)
         self.actor_optim.step()
 
         dual_loss = mean_penalty * (float(self.config.mean_kl_epsilon) - mean_kl.detach()) + std_penalty * (float(self.config.std_kl_epsilon) - std_kl.detach())
         self.kl_optim.zero_grad(set_to_none=True)
         dual_loss.backward()
+        self._average_gradients([self.log_mean_kl_penalty, self.log_std_kl_penalty])
         self.kl_optim.step()
         with torch.no_grad():
             self.log_mean_kl_penalty.clamp_(min=-20.0, max=20.0)
@@ -304,3 +310,16 @@ class MaximumAPosterioriPolicyOptimiser:
                 target.mul_(1.0 - tau).add_(source, alpha=tau)
             for target, source in zip(self.target_critic.parameters(), self.critic.parameters(), strict=True):
                 target.mul_(1.0 - tau).add_(source, alpha=tau)
+
+    def _average_gradients(self, parameters) -> None:
+        if not self.distributed or not dist.is_available() or not dist.is_initialized():
+            return
+        world_size = int(dist.get_world_size())
+        if world_size <= 1:
+            return
+        for param in parameters:
+            grad = getattr(param, "grad", None)
+            if grad is None:
+                continue
+            dist.all_reduce(grad, op=dist.ReduceOp.SUM)
+            grad.div_(float(world_size))

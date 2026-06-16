@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from dataclasses import replace
 
 from tokamak_rl_v2.config import load_experiment_config
@@ -35,6 +36,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--eval-max-steps", type=int, default=None)
     ap.add_argument("--actor-workers", type=int, default=None)
     ap.add_argument("--actor-devices", default=None)
+    ap.add_argument("--distributed-mode", choices=("single", "local_replay"), default=None)
     ap.add_argument("--save-checkpoints", action=argparse.BooleanOptionalAction, default=None)
     ap.add_argument("--wandb", action="store_true")
     ap.add_argument("--wandb-project", default="tokamak-rl-v2")
@@ -69,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
                 critic_mlp_hidden_dim=args.critic_mlp_hidden_dim if args.critic_mlp_hidden_dim is not None else cfg.network.critic_mlp_hidden_dim,
             ),
         )
-    if any(v is not None for v in (args.save_checkpoints, args.checkpoint_interval_steps, args.eval_interval_steps, args.eval_episodes, args.eval_max_steps, args.actor_workers, args.actor_devices)):
+    if any(v is not None for v in (args.save_checkpoints, args.checkpoint_interval_steps, args.eval_interval_steps, args.eval_episodes, args.eval_max_steps, args.actor_workers, args.actor_devices, args.distributed_mode)):
         cfg = replace(
             cfg,
             training=replace(
@@ -81,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
                 eval_max_steps=args.eval_max_steps if args.eval_max_steps is not None else cfg.training.eval_max_steps,
                 actor_workers=args.actor_workers if args.actor_workers is not None else cfg.training.actor_workers,
                 actor_devices=_device_list(args.actor_devices) if args.actor_devices is not None else cfg.training.actor_devices,
+                distributed_mode=args.distributed_mode if args.distributed_mode is not None else cfg.training.distributed_mode,
             ),
         )
     if args.steps is not None and int(args.steps) <= 0:
@@ -89,14 +92,16 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--num-envs must be positive")
     _validate_experiment_config(cfg)
     wandb_run = None
-    if args.wandb and args.wandb_mode != "disabled":
+    rank = int(os.environ.get("RANK", "0"))
+    if args.wandb and args.wandb_mode != "disabled" and rank == 0:
         import wandb
         wandb_run = wandb.init(project=args.wandb_project, name=args.wandb_name or cfg.name, mode=args.wandb_mode, config={"experiment": cfg.name})
     trainer = Trainer(cfg, steps=args.steps, num_envs=args.num_envs, device=args.device, output_dir=args.output_dir, wandb_run=wandb_run, resume_checkpoint=args.resume_checkpoint)
     result = trainer.train()
     if wandb_run is not None:
         wandb_run.finish()
-    print(result)
+    if rank == 0:
+        print(result)
     return 0
 
 def _device_list(raw: str) -> tuple[str, ...]:

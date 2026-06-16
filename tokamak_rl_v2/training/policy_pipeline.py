@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import signal
 from dataclasses import replace
 from pathlib import Path
@@ -31,19 +32,24 @@ def main(argv: list[str] | None = None) -> int:
     output_dir = Path(args.output_dir or cfg.training.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     wandb_run = _start_wandb(args, cfg, output_dir=output_dir)
+    rank0 = _distributed_rank() == 0
+    runtime_device = _rank_runtime_device(args.device or cfg.training.device, cfg)
+    runtime_cfg = _rank_runtime_config(cfg, runtime_device)
     previous_signal_handlers = _install_shutdown_signal_handlers()
     try:
-        reset_report = run_reset_sanity(cfg, device=args.device, num_envs=args.num_envs)
-        _wandb_log(wandb_run, "pipeline/reset", reset_report, step=0)
+        reset_report = run_reset_sanity(runtime_cfg, device=runtime_device, num_envs=args.num_envs)
+        if rank0:
+            _wandb_log(wandb_run, "pipeline/reset", reset_report, step=0)
         reset_gate = reset_report["max_abs_boundary_radii_error_m"] <= float(args.reset_error_tolerance_m) and reset_report["boundary_found_mean"] >= float(args.min_boundary_found)
         if not reset_gate:
-            report = {
-                "status": "failed_reset_sanity",
-                "reset_sanity": reset_report,
-                "gates": [{"name": "reset_sanity", "passed": False}],
-            }
-            _write_json(output_dir / "policy_validation.json", report)
-            _wandb_log(wandb_run, "pipeline", {"passed": 0.0, "failed_reset_sanity": 1.0}, step=0)
+            if rank0:
+                report = {
+                    "status": "failed_reset_sanity",
+                    "reset_sanity": reset_report,
+                    "gates": [{"name": "reset_sanity", "passed": False}],
+                }
+                _write_json(output_dir / "policy_validation.json", report)
+                _wandb_log(wandb_run, "pipeline", {"passed": 0.0, "failed_reset_sanity": 1.0}, step=0)
             return 2 if not args.allow_failed_gates else 0
 
         trainer = Trainer(cfg, steps=args.steps, num_envs=args.num_envs, device=args.device, output_dir=output_dir, wandb_run=wandb_run, resume_checkpoint=args.resume_checkpoint)
@@ -51,17 +57,20 @@ def main(argv: list[str] | None = None) -> int:
         holdout_seed_offset = int(args.holdout_eval_seed_offset)
         baseline = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=int(cfg.training.eval_max_steps), policy="no_control", seed_offset=selection_seed_offset)
         holdout_baseline = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=int(cfg.training.eval_max_steps), policy="no_control", seed_offset=holdout_seed_offset)
-        _write_baseline_report(
-            output_dir,
-            reset_sanity=reset_report,
-            no_control_selection=baseline,
-            no_control=holdout_baseline,
-            selection_seed_offset=selection_seed_offset,
-            holdout_seed_offset=holdout_seed_offset,
-        )
-        _wandb_log(wandb_run, "pipeline/no_control_selection", baseline, step=0)
-        _wandb_log(wandb_run, "pipeline/no_control_holdout", holdout_baseline, step=0)
+        if rank0:
+            _write_baseline_report(
+                output_dir,
+                reset_sanity=reset_report,
+                no_control_selection=baseline,
+                no_control=holdout_baseline,
+                selection_seed_offset=selection_seed_offset,
+                holdout_seed_offset=holdout_seed_offset,
+            )
+            _wandb_log(wandb_run, "pipeline/no_control_selection", baseline, step=0)
+            _wandb_log(wandb_run, "pipeline/no_control_holdout", holdout_baseline, step=0)
         train_result = trainer.train()
+        if cfg.training.distributed_mode == "local_replay" and not rank0:
+            return 0
 
         selected_checkpoint = _selected_checkpoint(output_dir)
         if selected_checkpoint is not None and selected_checkpoint.name == "best.pt":
@@ -492,7 +501,7 @@ def _apply_overrides(cfg: ExperimentConfig, args: argparse.Namespace) -> Experim
                 critic_mlp_hidden_dim=args.critic_mlp_hidden_dim if args.critic_mlp_hidden_dim is not None else cfg.network.critic_mlp_hidden_dim,
             ),
         )
-    if any(v is not None for v in (args.steps, args.num_envs, args.device, args.output_dir, args.save_checkpoints, args.checkpoint_interval_steps, args.eval_interval_steps, args.eval_episodes, args.eval_max_steps, args.actor_workers, args.actor_devices)):
+    if any(v is not None for v in (args.steps, args.num_envs, args.device, args.output_dir, args.save_checkpoints, args.checkpoint_interval_steps, args.eval_interval_steps, args.eval_episodes, args.eval_max_steps, args.actor_workers, args.actor_devices, args.distributed_mode)):
         steps = int(args.steps) if args.steps is not None else int(cfg.training.steps)
         checkpoint_interval = args.checkpoint_interval_steps if args.checkpoint_interval_steps is not None else cfg.training.checkpoint_interval_steps
         eval_interval = args.eval_interval_steps if args.eval_interval_steps is not None else cfg.training.eval_interval_steps
@@ -513,6 +522,7 @@ def _apply_overrides(cfg: ExperimentConfig, args: argparse.Namespace) -> Experim
                 eval_max_steps=args.eval_max_steps if args.eval_max_steps is not None else cfg.training.eval_max_steps,
                 actor_workers=args.actor_workers if args.actor_workers is not None else cfg.training.actor_workers,
                 actor_devices=_device_list(args.actor_devices) if args.actor_devices is not None else cfg.training.actor_devices,
+                distributed_mode=args.distributed_mode if args.distributed_mode is not None else cfg.training.distributed_mode,
             ),
         )
     return _cap_training_intervals(cfg)
@@ -547,6 +557,7 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--holdout-eval-seed-offset", type=int, default=200000)
     ap.add_argument("--actor-workers", type=int, default=None)
     ap.add_argument("--actor-devices", default=None)
+    ap.add_argument("--distributed-mode", choices=("single", "local_replay"), default=None)
     ap.add_argument("--save-checkpoints", action=argparse.BooleanOptionalAction, default=None)
     ap.add_argument("--reset-error-tolerance-m", type=float, default=1.0e-6)
     ap.add_argument("--min-boundary-found", type=float, default=0.999)
@@ -629,6 +640,31 @@ def _resolve_device(value: str) -> torch.device:
     return dev
 
 
+def _distributed_rank() -> int:
+    return int(os.environ.get("RANK", "0"))
+
+
+def _distributed_local_rank() -> int:
+    return int(os.environ.get("LOCAL_RANK", str(_distributed_rank())))
+
+
+def _rank_runtime_device(value: str | None, cfg: ExperimentConfig) -> str:
+    raw = str(value or cfg.training.device)
+    if cfg.training.distributed_mode != "local_replay":
+        return raw
+    if raw == "cpu":
+        return "cpu"
+    if not torch.cuda.is_available():
+        return "cpu"
+    return f"cuda:{_distributed_local_rank()}"
+
+
+def _rank_runtime_config(cfg: ExperimentConfig, runtime_device: str) -> ExperimentConfig:
+    if cfg.training.distributed_mode != "local_replay" or cfg.sim.compute_backend != "gpu":
+        return cfg
+    return replace(cfg, sim=replace(cfg.sim, gpu_device=runtime_device))
+
+
 def _jsonable(value: object) -> object:
     if isinstance(value, Path):
         return str(value)
@@ -652,6 +688,8 @@ def _write_json(path: Path, data: Mapping[str, Any]) -> None:
 
 def _start_wandb(args: argparse.Namespace, cfg: ExperimentConfig, *, output_dir: Path):
     if not bool(args.wandb) or args.wandb_mode == "disabled":
+        return None
+    if cfg.training.distributed_mode == "local_replay" and _distributed_rank() != 0:
         return None
     import wandb
 

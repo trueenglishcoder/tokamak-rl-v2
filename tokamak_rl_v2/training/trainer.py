@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import queue
 import time
 import random
 import sys
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 import numpy as np
 import torch
+import torch.distributed as dist
 try:
     from tqdm.auto import tqdm
 except Exception:  # pragma: no cover - optional local dependency
@@ -34,12 +36,97 @@ from tokamak_rl_v2.training.mpo import MaximumAPosterioriPolicyOptimiser
 from tokamak_rl_v2.training.replay import FIFOSequenceReplay
 
 
+def _value_to_numpy(value: object) -> np.ndarray:
+    if torch.is_tensor(value):
+        return value.detach().cpu().numpy()
+    return np.asarray(value)
+
+
+def _component_mean(value: object) -> float:
+    if torch.is_tensor(value):
+        tensor = value.detach().to(dtype=torch.float32)
+        finite = torch.isfinite(tensor)
+        if not bool(torch.any(finite).item()):
+            return float("nan")
+        return float(torch.mean(tensor[finite]).detach().cpu().item())
+    arr = np.asarray(value, dtype=float)
+    return float(np.nanmean(arr)) if arr.size else float("nan")
+
+
+def _distributed_mean_scalars(values: dict[str, float], *, device: torch.device, enabled: bool) -> dict[str, float]:
+    if not enabled or not (dist.is_available() and dist.is_initialized()) or int(dist.get_world_size()) <= 1:
+        return values
+    out: dict[str, float] = {}
+    for key in sorted(values):
+        value = float(values[key])
+        finite = math_isfinite(value)
+        pair = torch.tensor([value if finite else 0.0, 1.0 if finite else 0.0], dtype=torch.float64, device=device)
+        dist.all_reduce(pair, op=dist.ReduceOp.SUM)
+        count = float(pair[1].detach().cpu().item())
+        out[key] = float(pair[0].detach().cpu().item() / count) if count > 0.0 else float("nan")
+    return out
+
+
+class _RewardComponentAccumulator:
+    def __init__(self, device: torch.device) -> None:
+        self.device = torch.device(device)
+        self.sums: dict[str, torch.Tensor] = {}
+        self.counts: dict[str, torch.Tensor] = {}
+
+    def add(self, components: Mapping[str, object]) -> None:
+        for raw_name, raw_value in components.items():
+            name = str(raw_name)
+            if torch.is_tensor(raw_value):
+                tensor = raw_value.detach().to(device=self.device, dtype=torch.float32)
+            else:
+                tensor = torch.as_tensor(raw_value, dtype=torch.float32, device=self.device)
+            finite = torch.isfinite(tensor)
+            value_sum = torch.where(finite, tensor, torch.zeros_like(tensor)).sum()
+            count = finite.to(dtype=torch.float32).sum()
+            if name not in self.sums:
+                self.sums[name] = torch.zeros((), dtype=torch.float32, device=self.device)
+                self.counts[name] = torch.zeros((), dtype=torch.float32, device=self.device)
+            self.sums[name] = self.sums[name] + value_sum
+            self.counts[name] = self.counts[name] + count
+
+    def means(self, *, distributed: bool = False, reset: bool = True) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for name in sorted(self.sums):
+            pair = torch.stack([self.sums[name], self.counts[name]]).to(dtype=torch.float64)
+            if distributed and dist.is_available() and dist.is_initialized() and int(dist.get_world_size()) > 1:
+                dist.all_reduce(pair, op=dist.ReduceOp.SUM)
+            count = float(pair[1].detach().cpu().item())
+            out[name] = float(pair[0].detach().cpu().item() / count) if count > 0.0 else float("nan")
+        if reset:
+            self.clear()
+        return out
+
+    def clear(self) -> None:
+        self.sums.clear()
+        self.counts.clear()
+
+
+def math_isfinite(value: float) -> bool:
+    return bool(np.isfinite(float(value)))
+
+
 class Trainer:
     def __init__(self, config: ExperimentConfig, *, steps: int | None = None, num_envs: int | None = None, device: str | None = None, output_dir: str | Path | None = None, wandb_run=None, resume_checkpoint: str | Path | None = None) -> None:
+        self.distributed_mode = str(config.training.distributed_mode)
+        self.distributed_rank = 0
+        self.distributed_world_size = 1
+        self.distributed_local_rank = 0
+        requested_num_envs = int(config.training.num_envs if num_envs is None else num_envs)
+        requested_device = config.training.device if device is None else device
+        self.global_num_envs = requested_num_envs
+        if self.distributed_mode == "local_replay":
+            config, requested_device, requested_num_envs = self._configure_local_replay_runtime(config, requested_num_envs=requested_num_envs, requested_device=str(requested_device))
         self.config = config
         self.steps = int(config.training.steps if steps is None else steps)
-        self.num_envs = int(config.training.num_envs if num_envs is None else num_envs)
-        self.device = _resolve_device(config.training.device if device is None else device)
+        self.num_envs = int(requested_num_envs)
+        self.device = _resolve_device(str(requested_device))
+        if self.device.type == "cuda":
+            torch.cuda.set_device(self.device)
         self.output_dir = Path(config.training.output_dir if output_dir is None else output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.wandb_run = wandb_run
@@ -49,14 +136,20 @@ class Trainer:
         self._last_actor_devices: tuple[str, ...] = ()
         self._last_envs_per_worker: int | None = None
         self._last_total_training_envs: int | None = None
-        torch.manual_seed(int(config.training.seed))
-        np.random.seed(int(config.training.seed))
-        self.env = TokamakMagneticControlEnv(config, batch_size=self.num_envs, device=self.device, seed=int(config.training.seed))
+        base_seed = int(config.training.seed)
+        rank_seed = base_seed + int(self.distributed_rank) * 1000003
+        torch.manual_seed(base_seed)
+        np.random.seed(rank_seed)
+        self.env = TokamakMagneticControlEnv(config, batch_size=self.num_envs, device=self.device, seed=rank_seed)
+        torch.manual_seed(base_seed)
         self.actor = FeedForwardGaussianActor(self.env.obs_dim, self.env.action_dim, config.network.hidden_dim, min_std=config.network.actor_min_std, initial_std=config.network.actor_initial_std).to(self.device)
         self.critic = RecurrentQCritic(self.env.obs_dim, self.env.action_dim, config.network.critic_hidden_dim, config.network.critic_mlp_hidden_dim).to(self.device)
         self.target_actor = FeedForwardGaussianActor(self.env.obs_dim, self.env.action_dim, config.network.hidden_dim, min_std=config.network.actor_min_std, initial_std=config.network.actor_initial_std).to(self.device)
         self.target_critic = RecurrentQCritic(self.env.obs_dim, self.env.action_dim, config.network.critic_hidden_dim, config.network.critic_mlp_hidden_dim).to(self.device)
-        self.learner = MaximumAPosterioriPolicyOptimiser(actor=self.actor, critic=self.critic, target_actor=self.target_actor, target_critic=self.target_critic, config=config.learner, device=self.device)
+        self.learner = MaximumAPosterioriPolicyOptimiser(actor=self.actor, critic=self.critic, target_actor=self.target_actor, target_critic=self.target_critic, config=config.learner, device=self.device, distributed=self.distributed_mode == "local_replay")
+        if self.distributed_mode == "local_replay":
+            self._broadcast_trainable_state()
+            torch.manual_seed(rank_seed + 17)
         self.replay = FIFOSequenceReplay(capacity_episodes=int(config.learner.replay_capacity_episodes), max_episode_steps=int(config.sim.max_episode_steps), active_envs=self.num_envs, obs_dim=self.env.obs_dim, action_dim=self.env.action_dim, device=self.device)
         self.schema = self.env.export_schema()
         self.normalization = self.env.normalization()
@@ -77,11 +170,72 @@ class Trainer:
         except Exception as exc:
             print(f"warning: failed to configure W&B metrics: {exc}", file=sys.stderr)
 
+    def _configure_local_replay_runtime(self, config: ExperimentConfig, *, requested_num_envs: int, requested_device: str) -> tuple[ExperimentConfig, str, int]:
+        rank = int(os.environ.get("RANK", "0"))
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        local_rank = int(os.environ.get("LOCAL_RANK", str(rank)))
+        if world_size > 1 and not dist.is_initialized():
+            wants_cuda = requested_device != "cpu" and torch.cuda.is_available()
+            backend = "nccl" if wants_cuda else "gloo"
+            dist.init_process_group(backend=backend, init_method="env://")
+        self.distributed_rank = rank
+        self.distributed_world_size = world_size
+        self.distributed_local_rank = local_rank
+        if requested_num_envs % world_size != 0:
+            raise ValueError(f"local_replay requires global num_envs divisible by WORLD_SIZE: num_envs={requested_num_envs}, WORLD_SIZE={world_size}")
+        if requested_device == "cpu":
+            resolved_device = "cpu"
+        elif torch.cuda.is_available():
+            if local_rank >= torch.cuda.device_count():
+                raise RuntimeError(f"LOCAL_RANK={local_rank} is not visible; CUDA device count is {torch.cuda.device_count()}")
+            resolved_device = f"cuda:{local_rank}"
+            torch.cuda.set_device(torch.device(resolved_device))
+        else:
+            resolved_device = "cpu"
+        if config.sim.compute_backend == "gpu" and not resolved_device.startswith("cuda"):
+            raise RuntimeError("local_replay with sim.compute_backend=gpu requires CUDA")
+        local_envs = requested_num_envs // world_size
+        if int(config.training.actor_workers) != 1:
+            raise ValueError("local_replay does not use actor_workers; set actor_workers=1")
+        cfg = replace(
+            config,
+            sim=replace(config.sim, gpu_device=resolved_device) if config.sim.compute_backend == "gpu" else config.sim,
+            training=replace(config.training, num_envs=requested_num_envs, device=resolved_device, distributed_mode="local_replay"),
+        )
+        return cfg, resolved_device, local_envs
+
+    def _rank0(self) -> bool:
+        return int(self.distributed_rank) == 0
+
+    def _distributed_initialized(self) -> bool:
+        return dist.is_available() and dist.is_initialized()
+
+    def _broadcast_trainable_state(self) -> None:
+        if not self._distributed_initialized() or int(dist.get_world_size()) <= 1:
+            return
+        for module in (self.actor, self.critic, self.target_actor, self.target_critic):
+            for tensor in list(module.parameters()) + list(module.buffers()):
+                dist.broadcast(tensor.data, src=0)
+        dist.broadcast(self.learner.log_mean_kl_penalty.data, src=0)
+        dist.broadcast(self.learner.log_std_kl_penalty.data, src=0)
+        dist.broadcast(self.learner.last_temperature.data, src=0)
+
+    def _distributed_all_bool(self, value: bool) -> bool:
+        if not self._distributed_initialized() or int(dist.get_world_size()) <= 1:
+            return bool(value)
+        flag = torch.tensor([1 if value else 0], dtype=torch.int32, device=self.device)
+        dist.all_reduce(flag, op=dist.ReduceOp.MIN)
+        return bool(int(flag.detach().cpu().item()) == 1)
+
+    def _barrier(self) -> None:
+        if self._distributed_initialized() and int(dist.get_world_size()) > 1:
+            dist.barrier()
+
     def _wandb_log(self, values: dict[str, object], *, step: int) -> None:
         if self.wandb_run is None:
             return
         raw_step = int(step)
-        if int(self.config.training.actor_workers) > 1:
+        if self.distributed_mode == "local_replay" or int(self.config.training.actor_workers) > 1:
             env_step = raw_step
             decision_step = raw_step
         else:
@@ -139,6 +293,8 @@ class Trainer:
         }
 
     def train(self) -> dict[str, Any]:
+        if self.distributed_mode == "local_replay":
+            return self._train_local_replay_distributed()
         if int(self.config.training.actor_workers) > 1:
             return self._train_distributed()
         self._write_config_snapshot()
@@ -193,7 +349,7 @@ class Trainer:
                 if comps:
                     flat = {"step": step}
                     for name, value in comps.items():
-                        flat[name] = float(np.nanmean(value))
+                        flat[name] = _component_mean(value)
                     if reward_writer is None:
                         reward_writer = csv.DictWriter(reward_f, fieldnames=list(flat.keys()))
                         reward_writer.writeheader()
@@ -236,6 +392,186 @@ class Trainer:
         metrics_path.write_text(json.dumps(final, indent=2), encoding="utf-8")
         return final
 
+
+    def _train_local_replay_distributed(self) -> dict[str, Any]:
+        if self.resume_checkpoint is not None:
+            raise ValueError("local_replay distributed training is not exactly resumable because replay/env state is sharded per rank")
+        if int(self.config.training.actor_workers) != 1:
+            raise ValueError("local_replay does not use actor_workers")
+        self._write_config_snapshot()
+        losses_path = self.output_dir / "losses.csv"
+        metrics_path = self.output_dir / "metrics.json"
+        rewards_path = self.output_dir / "reward_components.csv"
+        eval_path = self.output_dir / "eval_history.csv"
+        health_path = self.output_dir / "replay_health.csv"
+        replay_health_fields = [
+            *self._replay_health_fields(),
+            "replay_ready_all",
+            "distributed_world_size",
+            "local_envs_per_rank",
+            "global_envs",
+        ]
+        loss_fields = ["step", "critic_loss", "actor_loss", "mean_kl", "std_kl", "q_mean", "target_q_mean", "actor_mle_loss", "actor_param_delta_norm", "action_mean_abs", "action_std_mean", "sampled_q_spread", "policy_weight_entropy", "policy_weight_max", "mpo_temperature", "mean_kl_penalty", "std_kl_penalty", "env_steps_per_second", *replay_health_fields]
+
+        loss_f = reward_f = health_f = None
+        loss_writer = health_writer = reward_writer = None
+        if self._rank0():
+            loss_f = losses_path.open("w", newline="", encoding="utf-8")
+            reward_f = rewards_path.open("w", newline="", encoding="utf-8")
+            health_f = health_path.open("w", newline="", encoding="utf-8")
+            loss_writer = csv.DictWriter(loss_f, fieldnames=loss_fields)
+            health_writer = csv.DictWriter(health_f, fieldnames=["step", *replay_health_fields])
+            loss_writer.writeheader()
+            health_writer.writeheader()
+
+        obs = self.env.reset()
+        start = time.time()
+        updates = 0
+        local_step = 0
+        env_steps = 0
+        last_update_step = 0
+        last_checkpoint_step = 0
+        last_eval_step = 0
+        reward_acc = _RewardComponentAccumulator(self.device)
+        progress = tqdm(total=max(self.steps, 0), desc="local-replay-train", unit="env-step", dynamic_ncols=True) if self._rank0() else None
+
+        try:
+            while env_steps < self.steps:
+                with torch.no_grad():
+                    action, _logp, _mean = self.actor.sample(obs)
+                batch_step = self.env.step(action)
+                discount = torch.full((self.num_envs,), float(self.config.learner.discount), dtype=torch.float32, device=self.device)
+                done = batch_step.terminated | batch_step.truncated
+                self.replay.add_batch(obs, batch_step.applied_action, batch_step.reward, discount, batch_step.obs, done)
+                obs = self.env.reset_indices(done) if bool(torch.any(done).item()) else batch_step.obs
+
+                local_step += 1
+                previous_env_steps = env_steps
+                env_steps += int(self.global_num_envs)
+                comps = batch_step.info.get("reward_components", {}) if isinstance(batch_step.info, dict) else {}
+                if isinstance(comps, Mapping) and comps:
+                    reward_acc.add(comps)
+
+                if progress is not None:
+                    progress.update(min(env_steps, self.steps) - min(previous_env_steps, self.steps))
+                    progress.set_postfix(replay=self.replay.size, updates=updates, reward=f"{float(batch_step.reward.mean().detach().cpu()):.4f}", refresh=False)
+
+                chunk_due = local_step % int(self.config.learner.rollout_chunk_length) == 0 or env_steps >= self.steps
+                if not chunk_due:
+                    continue
+
+                reward_means = reward_acc.means(distributed=self._distributed_initialized(), reset=True)
+                if self._rank0() and reward_means:
+                    flat = {"step": env_steps, **reward_means}
+                    if reward_writer is None:
+                        assert reward_f is not None
+                        reward_writer = csv.DictWriter(reward_f, fieldnames=list(flat.keys()))
+                        reward_writer.writeheader()
+                    reward_writer.writerow(flat)
+                    assert reward_f is not None
+                    reward_f.flush()
+                    self._wandb_log({f"reward/{k}": v for k, v in flat.items() if k != "step"}, step=env_steps)
+
+                replay_health_local = self._replay_health(step=env_steps, updates=updates, last_update_step=last_update_step)
+                ready_all = self._distributed_all_bool(bool(replay_health_local["replay_ready"]))
+                replay_health_local["replay_ready_all"] = 1.0 if ready_all else 0.0
+                replay_health_local["distributed_world_size"] = float(self.distributed_world_size)
+                replay_health_local["local_envs_per_rank"] = float(self.num_envs)
+                replay_health_local["global_envs"] = float(self.global_num_envs)
+                replay_health = _distributed_mean_scalars(replay_health_local, device=self.device, enabled=self._distributed_initialized())
+                if self._rank0() and health_writer is not None:
+                    health_writer.writerow({"step": env_steps, **replay_health})
+                    assert health_f is not None
+                    health_f.flush()
+                    self._wandb_log({f"train/{k}": v for k, v in replay_health.items()}, step=env_steps)
+
+                metrics = None
+                if ready_all:
+                    for _ in range(int(self.config.learner.updates_per_rollout_chunk)):
+                        seq = self._sample_replay()
+                        metrics = self.learner.update(seq)
+                        updates += 1
+                    last_update_step = env_steps
+                    speed = float(env_steps) / max(time.time() - start, 1.0e-9)
+                    replay_health_local = self._replay_health(step=env_steps, updates=updates, last_update_step=last_update_step)
+                    replay_health_local["replay_ready_all"] = 1.0
+                    replay_health_local["distributed_world_size"] = float(self.distributed_world_size)
+                    replay_health_local["local_envs_per_rank"] = float(self.num_envs)
+                    replay_health_local["global_envs"] = float(self.global_num_envs)
+                    replay_health = _distributed_mean_scalars(replay_health_local, device=self.device, enabled=self._distributed_initialized())
+                    metrics_mean = _distributed_mean_scalars(asdict(metrics), device=self.device, enabled=self._distributed_initialized()) if metrics is not None else {}
+                    row = {"step": env_steps, "env_steps_per_second": speed, **metrics_mean, **replay_health}
+                    if self._rank0() and loss_writer is not None:
+                        loss_writer.writerow(row)
+                        assert loss_f is not None
+                        loss_f.flush()
+                        self._wandb_log({f"train/{k}": v for k, v in row.items() if k != "step"}, step=env_steps)
+
+                if self._rank0() and self._save_checkpoints_enabled() and env_steps - last_checkpoint_step >= max(int(self.config.training.checkpoint_interval_steps), 1):
+                    self._save_checkpoint("latest.pt", step=env_steps, updates=updates)
+                    last_checkpoint_step = env_steps
+
+                if self._rank0() and env_steps - last_eval_step >= max(int(self.config.training.eval_interval_steps), 1):
+                    eval_metrics = self.evaluate_detailed(max_steps=int(self.config.training.eval_max_steps), episodes=int(self.config.training.eval_episodes))
+                    score = self._selection_score(eval_metrics)
+                    eval_metrics["selection_score"] = score
+                    _append_csv_row(eval_path, {"step": env_steps, "env_step": env_steps, **eval_metrics})
+                    self._wandb_log({f"eval/{k}": v for k, v in eval_metrics.items()}, step=env_steps)
+                    if score > self.best_eval:
+                        self.best_eval = score
+                        self.best_eval_details = dict(eval_metrics)
+                        self._remember_best_actor()
+                        if self._save_checkpoints_enabled():
+                            self._save_checkpoint("best.pt", step=env_steps, updates=updates)
+                        self._export("exports/best_actor", step=env_steps, updates=updates, eval_score=score)
+                    last_eval_step = env_steps
+
+                self._barrier()
+        finally:
+            if progress is not None:
+                progress.close()
+            for handle in (loss_f, reward_f, health_f):
+                if handle is not None:
+                    handle.close()
+
+        if self._rank0():
+            if self._save_checkpoints_enabled():
+                self._save_checkpoint("final.pt", step=env_steps, updates=updates)
+            self._export("exports/final_actor", step=env_steps, updates=updates, eval_score=None)
+            final = {
+                "start_step": self.start_step,
+                "steps": env_steps,
+                "env_steps": env_steps,
+                "updates": updates,
+                "best_eval": self.best_eval,
+                "best_eval_details": self.best_eval_details,
+                "device": str(self.device),
+                "learner_device": str(self.device),
+                "output_dir": str(self.output_dir),
+                "distributed_mode": "local_replay",
+                "rank": int(self.distributed_rank),
+                "world_size": int(self.distributed_world_size),
+                "local_envs_per_rank": int(self.num_envs),
+                "total_training_envs": int(self.global_num_envs),
+                "save_checkpoints": self._save_checkpoints_enabled(),
+            }
+            metrics_path.write_text(json.dumps(final, indent=2), encoding="utf-8")
+        else:
+            final = {
+                "start_step": self.start_step,
+                "steps": env_steps,
+                "env_steps": env_steps,
+                "updates": updates,
+                "device": str(self.device),
+                "output_dir": str(self.output_dir),
+                "distributed_mode": "local_replay",
+                "rank": int(self.distributed_rank),
+                "world_size": int(self.distributed_world_size),
+                "local_envs_per_rank": int(self.num_envs),
+                "total_training_envs": int(self.global_num_envs),
+            }
+        self._barrier()
+        return final
 
     def _train_distributed(self) -> dict[str, Any]:
         self._write_config_snapshot()
@@ -447,7 +783,7 @@ class Trainer:
                 progress = (steps.to(torch.float32) / max_steps_f).detach().cpu().numpy().reshape(-1)
                 early_cutoff = max(0.2, 1.0 / max_steps_f)
                 for name, value in comps.items():
-                    arr = np.asarray(value, dtype=float).reshape(-1)
+                    arr = np.asarray(_value_to_numpy(value), dtype=float).reshape(-1)
                     if arr.size:
                         finite = np.isfinite(arr)
                         component_values.setdefault(str(name), []).extend(arr[finite].astype(float).tolist())
@@ -567,9 +903,9 @@ class Trainer:
         return float(score)
 
     def _metadata(self, *, step: int, updates: int, eval_score: float | None = None) -> dict[str, object]:
-        exact_resume_supported = not bool(self._last_actor_devices)
+        exact_resume_supported = not bool(self._last_actor_devices) and self.distributed_mode != "local_replay"
         raw_step = int(step)
-        if self._last_actor_devices:
+        if self._last_actor_devices or self.distributed_mode == "local_replay":
             env_step = raw_step
             decision_step = raw_step
         else:
@@ -582,6 +918,13 @@ class Trainer:
             out["envs_per_worker"] = self._last_envs_per_worker
             out["total_training_envs"] = self._last_total_training_envs
             out["resume_limitation"] = "actor-worker environment states are not checkpointed"
+        if self.distributed_mode == "local_replay":
+            out["distributed_mode"] = "local_replay"
+            out["rank"] = int(self.distributed_rank)
+            out["world_size"] = int(self.distributed_world_size)
+            out["local_envs"] = int(self.num_envs)
+            out["total_training_envs"] = int(self.global_num_envs)
+            out["resume_limitation"] = "local-replay distributed environment/replay state is sharded per rank"
         return out
 
     def restore_best_actor(self) -> bool:
@@ -608,9 +951,12 @@ class Trainer:
         if torch.cuda.is_available():
             rng_state["torch_cuda"] = torch.cuda.get_rng_state_all()
         try:
-            env_state = self.env.state_dict()
+            if self.distributed_mode == "local_replay":
+                env_state = None
+            else:
+                env_state = self.env.state_dict()
         except RuntimeError:
-            if int(self.config.training.actor_workers) > 1:
+            if int(self.config.training.actor_workers) > 1 or self.distributed_mode == "local_replay":
                 env_state = None
             else:
                 raise
@@ -724,6 +1070,8 @@ class Trainer:
         return export_deterministic_actor(actor=self.actor, export_dir=self.output_dir / relative, schema=self.schema, normalization=self.normalization, metadata=self._metadata(step=step, updates=updates, eval_score=eval_score))
 
     def _write_config_snapshot(self) -> None:
+        if self.distributed_mode == "local_replay" and not self._rank0():
+            return
         def convert(obj):
             if isinstance(obj, Path):
                 return str(obj)

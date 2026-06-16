@@ -23,16 +23,16 @@ export EVAL_ENV_STEPS=${EVAL_ENV_STEPS:-500000}
 export SAVE_CHECKPOINTS=${SAVE_CHECKPOINTS:-0}
 export CHECKPOINT_ENV_STEPS=${CHECKPOINT_ENV_STEPS:-1000000}
 
-# GPU 0 runs the learner/evaluation. GPUs 1-3 run simulator actor workers.
-export NUM_ENVS=${NUM_ENVS:-96}
-export ACTOR_WORKERS=${ACTOR_WORKERS:-3}
-export ACTOR_DEVICES=${ACTOR_DEVICES:-cuda:1,cuda:2,cuda:3}
-export LEARNER_DEVICE=${LEARNER_DEVICE:-cuda:0}
-export LEARNER_SIM_GPU_DEVICE=${LEARNER_SIM_GPU_DEVICE:-cuda:0}
+# Local-replay distributed training: one learner+simulator rank per GPU.
+export NPROC_PER_NODE=${NPROC_PER_NODE:-4}
+export NUM_ENVS=${NUM_ENVS:-512}
+export BATCH_SIZE=${BATCH_SIZE:-128}
 export REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-384}
+export ROLLOUT_CHUNK_LENGTH=${ROLLOUT_CHUNK_LENGTH:-16}
+export UPDATES_PER_ROLLOUT_CHUNK=${UPDATES_PER_ROLLOUT_CHUNK:-64}
 
-if (( NUM_ENVS % ACTOR_WORKERS != 0 )); then
-  echo "NUM_ENVS=${NUM_ENVS} must be divisible by ACTOR_WORKERS=${ACTOR_WORKERS}" >&2
+if (( NUM_ENVS % NPROC_PER_NODE != 0 )); then
+  echo "NUM_ENVS=${NUM_ENVS} must be divisible by NPROC_PER_NODE=${NPROC_PER_NODE}" >&2
   exit 2
 fi
 
@@ -68,10 +68,11 @@ PYCUDA
     echo "train_env_steps=${TRAIN_ENV_STEPS}"
     echo "eval_env_steps=${EVAL_ENV_STEPS}"
     echo "num_envs=${NUM_ENVS}"
-    echo "actor_workers=${ACTOR_WORKERS}"
-    echo "actor_devices=${ACTOR_DEVICES}"
-    echo "learner_device=${LEARNER_DEVICE}"
+    echo "nproc_per_node=${NPROC_PER_NODE}"
+    echo "batch_size_per_rank=${BATCH_SIZE}"
     echo "replay_capacity_episodes=${REPLAY_CAPACITY_EPISODES}"
+    echo "rollout_chunk_length=${ROLLOUT_CHUNK_LENGTH}"
+    echo "updates_per_rollout_chunk=${UPDATES_PER_ROLLOUT_CHUNK}"
     echo "save_checkpoints=${SAVE_CHECKPOINTS}"
     echo "checkpoint_env_steps=${CHECKPOINT_ENV_STEPS}"
 
@@ -80,18 +81,18 @@ PYCUDA
       CHECKPOINT_ARGS=(--save-checkpoints --checkpoint-interval-steps "${CHECKPOINT_ENV_STEPS}")
     fi
 
-    python3 scripts/train_policy_pipeline.py \
+    torchrun --standalone --nproc_per_node=${NPROC_PER_NODE} scripts/train_policy_pipeline.py \
       --config ${POLICY_CONFIG} \
       --output-dir ${TRAIN_OUTPUT} \
       --steps ${TRAIN_ENV_STEPS} \
-      --device ${LEARNER_DEVICE} \
+      --device auto \
       --sim-compute-backend gpu \
-      --sim-gpu-device ${LEARNER_SIM_GPU_DEVICE} \
       --num-envs ${NUM_ENVS} \
-      --actor-workers ${ACTOR_WORKERS} \
-      --actor-devices ${ACTOR_DEVICES} \
-      --batch-size 256 \
+      --distributed-mode local_replay \
+      --batch-size ${BATCH_SIZE} \
       --replay-capacity-episodes ${REPLAY_CAPACITY_EPISODES} \
+      --rollout-chunk-length ${ROLLOUT_CHUNK_LENGTH} \
+      --updates-per-rollout-chunk ${UPDATES_PER_ROLLOUT_CHUNK} \
       --hidden-dim 256 \
       --critic-hidden-dim 256 \
       --critic-mlp-hidden-dim 256 \

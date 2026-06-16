@@ -113,30 +113,33 @@ class FIFOSequenceReplay:
                 raise ValueError("lane_indices length must match batch size")
             if torch.any((lanes < 0) | (lanes >= self.active_envs)):
                 raise ValueError("lane_indices contain an out-of-range replay lane")
-        for b in range(B):
-            lane = int(lanes[b].item())
-            slot = int(self.active_slots[lane].item())
-            if slot < 0:
-                slot = self._allocate_episode_slot()
-                self.active_slots[lane] = slot
-            pos = int(self.episode_lengths[slot].item())
-            if pos >= self.max_episode_steps:
-                self._close_active_episode(lane)
-                slot = int(self.active_slots[lane].item())
-                pos = 0
+        slots = self.active_slots[lanes]
+        if bool(torch.any(slots < 0).item()):
+            for lane in lanes[slots < 0].detach().cpu().tolist():
+                new_slot = self._allocate_episode_slot()
+                self.active_slots[int(lane)] = new_slot
+            slots = self.active_slots[lanes]
+        positions = self.episode_lengths[slots]
+        if bool(torch.any(positions >= self.max_episode_steps).item()):
+            for lane in lanes[positions >= self.max_episode_steps].detach().cpu().tolist():
+                self._close_active_episode(int(lane))
+            slots = self.active_slots[lanes]
+            positions = self.episode_lengths[slots]
 
-            self.obs[slot, pos] = obs[b].detach()
-            self.action[slot, pos] = action[b].detach()
-            self.reward[slot, pos] = reward[b].detach()
-            self.discount[slot, pos] = discount[b].detach()
-            self.next_obs[slot, pos] = next_obs[b].detach()
-            self.done[slot, pos] = done[b].detach()
-            self.valid[slot, pos] = True
-            self.episode_lengths[slot] += 1
+        self.obs[slots, positions] = obs.detach()
+        self.action[slots, positions] = action.detach()
+        self.reward[slots, positions] = reward.detach()
+        self.discount[slots, positions] = discount.detach()
+        self.next_obs[slots, positions] = next_obs.detach()
+        self.done[slots, positions] = done.detach()
+        self.valid[slots, positions] = True
+        self.episode_lengths[slots] += 1
+        self.size = min(self.capacity, int(self.size) + B)
 
-            if bool(done[b].item()) or int(self.episode_lengths[slot].item()) >= self.max_episode_steps:
-                self._close_active_episode(lane)
-        self.size = int(torch.sum(self.episode_lengths).item())
+        close_mask = done.detach().to(dtype=torch.bool) | (self.episode_lengths[slots] >= self.max_episode_steps)
+        if bool(torch.any(close_mask).item()):
+            for lane in lanes[close_mask].detach().cpu().tolist():
+                self._close_active_episode(int(lane))
 
     def ready(self, sequence_length: int, batch_size: int, min_sequence_length: int | None = None) -> bool:
         min_len = self._effective_min_sequence_length(sequence_length, min_sequence_length)
@@ -250,6 +253,9 @@ class FIFOSequenceReplay:
         if slot < 0:
             raise RuntimeError("replay has no free episode slot; increase replay_capacity_episodes above the active environment count")
         self.generation += 1
+        previous_length = int(self.episode_lengths[slot].detach().cpu().item())
+        if previous_length > 0:
+            self.size = max(0, int(self.size) - previous_length)
         self.obs[slot].zero_()
         self.action[slot].zero_()
         self.reward[slot].zero_()

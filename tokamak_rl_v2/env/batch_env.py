@@ -519,7 +519,7 @@ class TokamakMagneticControlEnv:
         components["terminated_current_hard"] = current_hard_terminated.to(dtype=rb.reward.dtype)
         components["terminated_current_grace"] = current_grace_terminated.to(dtype=rb.reward.dtype)
         components["current_over_limit_steps"] = self.current_over_limit_steps.to(dtype=rb.reward.dtype)
-        return rb.reward, terminated, {"reward_components": {k: v.detach().cpu().numpy() for k, v in components.items()}}
+        return rb.reward, terminated, {"reward_components": {k: v.detach() for k, v in components.items()}}
 
     def _reward_cpu(self, action: Tensor) -> tuple[Tensor, Tensor, dict[str, object]]:
         ip_ref, ref_points, _ref_radii = self._reference_at()
@@ -562,7 +562,7 @@ class TokamakMagneticControlEnv:
         components["terminated_current_hard"] = current_hard_terminated.to(dtype=rb.reward.dtype)
         components["terminated_current_grace"] = current_grace_terminated.to(dtype=rb.reward.dtype)
         components["current_over_limit_steps"] = self.current_over_limit_steps.to(dtype=rb.reward.dtype)
-        return rb.reward, terminated, {"reward_components": {k: v.detach().cpu().numpy() for k, v in components.items()}}
+        return rb.reward, terminated, {"reward_components": {k: v.detach() for k, v in components.items()}}
 
     def export_schema(self) -> dict[str, object]:
         return {

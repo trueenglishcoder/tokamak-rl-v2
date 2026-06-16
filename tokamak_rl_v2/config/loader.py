@@ -267,6 +267,7 @@ def _training(raw: Mapping[str, Any], base: Path) -> TrainingConfig:
         eval_max_steps=int(raw.get("eval_max_steps", defaults.eval_max_steps)),
         actor_workers=int(raw.get("actor_workers", defaults.actor_workers)),
         actor_devices=_string_tuple(raw.get("actor_devices"), "training.actor_devices"),
+        distributed_mode=str(raw.get("distributed_mode", defaults.distributed_mode)),
     )
 
 
@@ -384,6 +385,10 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
     for name in ("steps", "num_envs", "checkpoint_interval_steps", "eval_interval_steps", "eval_episodes", "eval_max_steps", "actor_workers"):
         if int(getattr(training, name)) <= 0:
             raise ValueError(f"training.{name} must be positive")
+    if training.distributed_mode not in {"single", "local_replay"}:
+        raise ValueError("training.distributed_mode must be single or local_replay")
+    if training.distributed_mode == "local_replay" and int(training.actor_workers) != 1:
+        raise ValueError("training.distributed_mode=local_replay does not use actor_workers; set actor_workers=1")
 
 
 def _range_crosses_or_touches_zero(min_value: float, max_value: float) -> bool:

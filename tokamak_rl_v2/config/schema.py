@@ -188,6 +188,7 @@ class TrainingConfig:
     eval_max_steps: int = 1000
     actor_workers: int = 1
     actor_devices: tuple[str, ...] = ()
+    distributed_mode: Literal["single", "local_replay"] = "single"
 
 
 @dataclass(frozen=True, slots=True)

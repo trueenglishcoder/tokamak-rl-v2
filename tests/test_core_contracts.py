@@ -489,6 +489,20 @@ def test_replay_samples_short_terminal_episodes_with_padding_mask() -> None:
     assert torch.all(batch.done[:, 2])
 
 
+def test_replay_batched_insert_preserves_lane_boundaries_and_size() -> None:
+    replay = FIFOSequenceReplay(capacity_episodes=6, max_episode_steps=4, active_envs=3, obs_dim=2, action_dim=1, device="cpu")
+    for t in range(3):
+        obs = torch.tensor([[0.0, float(t)], [1.0, float(t)], [2.0, float(t)]])
+        done = torch.tensor([False, t == 1, False])
+        replay.add_batch(obs, torch.zeros((3, 1)), torch.zeros((3,)), torch.ones((3,)), obs + 0.5, done)
+
+    assert replay.size == 9
+    assert replay.completed_episodes >= 1
+    batch = replay.sample(batch_size=12, sequence_length=2)
+    assert torch.all(batch.obs[:, :, 0] == batch.obs[:, :1, 0])
+    assert not torch.any(batch.done[:, :-1])
+
+
 def test_environment_reset_indices_only_resets_done_slot() -> None:
     cfg = load_experiment_config(CONFIG)
     cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=8))
@@ -805,6 +819,28 @@ def test_config_loader_reads_explicit_training_devices(tmp_path: Path) -> None:
     assert cfg.training.device == "cuda:0"
     assert cfg.training.actor_workers == 2
     assert cfg.training.actor_devices == ("cuda:1", "cuda:2")
+
+
+def test_config_loader_accepts_local_replay_and_rejects_actor_workers(tmp_path: Path) -> None:
+    data = json.loads(CONFIG.read_text())
+    data["training"]["distributed_mode"] = "local_replay"
+    path = tmp_path / "local_replay.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    cfg = load_experiment_config(path)
+    assert cfg.training.distributed_mode == "local_replay"
+
+    data["training"]["actor_workers"] = 2
+    bad_path = tmp_path / "bad_local_replay_workers.json"
+    bad_path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="local_replay does not use actor_workers"):
+        load_experiment_config(bad_path)
+
+    data = json.loads(CONFIG.read_text())
+    data["training"]["distributed_mode"] = "not_real"
+    bad_mode = tmp_path / "bad_distributed_mode.json"
+    bad_mode.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="distributed_mode"):
+        load_experiment_config(bad_mode)
 
 
 def test_config_loader_rejects_invalid_values(tmp_path: Path) -> None:
