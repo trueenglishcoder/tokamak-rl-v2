@@ -29,7 +29,7 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("holdout_eval_seed_offset must differ from eval_seed_offset")
     cfg = _apply_overrides(load_experiment_config(args.config), args)
     _validate_experiment_config(cfg)
-    if bool(cfg.training.production_mode) and bool(args.skip_controller_rollout_gate):
+    if bool(cfg.training.production_mode) and bool(args.skip_controller_rollout_gate) and not bool(args.reward_sweep_mode):
         raise ValueError("production_mode rejects --skip-controller-rollout-gate")
     if bool(cfg.training.production_mode):
         controller_rollout_steps = int(args.controller_rollout_steps)
@@ -144,8 +144,10 @@ def main(argv: list[str] | None = None) -> int:
         train_status = str(train_result.get("status", "completed")) if isinstance(train_result, Mapping) else "completed"
         if train_status.startswith("failed_"):
             if rank0:
+                status = "sweep_failed_training" if bool(args.reward_sweep_mode) else train_status
                 report = {
-                    "status": train_status,
+                    "status": status,
+                    "training_status": train_status,
                     "config": str(Path(args.config).resolve()),
                     "output_dir": str(output_dir),
                     "reset_sanity": reset_report,
@@ -156,6 +158,8 @@ def main(argv: list[str] | None = None) -> int:
                 }
                 _write_json(output_dir / "policy_validation.json", report)
                 _wandb_log(wandb_run, "pipeline", {"passed": 0.0, train_status: 1.0}, step=_train_env_step(train_result, cfg))
+            if bool(args.reward_sweep_mode):
+                return 0
             return 2 if not args.allow_failed_gates else 0
 
         selected_checkpoint = _selected_checkpoint(output_dir)
@@ -163,11 +167,83 @@ def main(argv: list[str] | None = None) -> int:
             _load_actor_weights(trainer, selected_checkpoint)
         elif selected_checkpoint is None:
             trainer.restore_best_actor()
-        actor_eval = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=_eval_max_steps_for_config(cfg), policy="actor", seed_offset=holdout_seed_offset)
+        try:
+            actor_eval = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=_eval_max_steps_for_config(cfg), policy="actor", seed_offset=holdout_seed_offset)
+        except Exception as exc:
+            if rank0 and bool(args.reward_sweep_mode):
+                report = {
+                    "status": "sweep_failed_eval",
+                    "config": str(Path(args.config).resolve()),
+                    "output_dir": str(output_dir),
+                    "evaluation_seed_offsets": {
+                        "selection": selection_seed_offset,
+                        "holdout": holdout_seed_offset,
+                    },
+                    "train_result": train_result,
+                    "error": repr(exc),
+                    "gates": [{"name": "actor_eval", "passed": False, "value": repr(exc), "threshold": "eval must complete"}],
+                }
+                _write_json(output_dir / "policy_validation.json", report)
+                _wandb_log(wandb_run, "pipeline", {"sweep_failed_eval": 1.0}, step=_train_env_step(train_result, cfg))
+                return 0
+            raise
         train_env_step = _train_env_step(train_result, cfg)
         _wandb_log(wandb_run, "pipeline/actor_eval_holdout", actor_eval, step=train_env_step)
         losses = summarize_training_losses(output_dir / "losses.csv")
         selected_export = _selected_export_dir(output_dir)
+        if bool(args.reward_sweep_mode):
+            gate_report = evaluate_policy_gates(
+                actor_eval=actor_eval,
+                no_control=holdout_baseline,
+                tail_losses=losses,
+                action_samples=int(cfg.learner.action_samples),
+                min_boundary_found=float(args.min_boundary_found),
+                max_current_over_limit_a=float(args.max_current_over_limit_a),
+                max_shape_error_m=float(args.max_shape_error_m),
+                min_ip_improvement_frac=float(args.min_ip_improvement_frac),
+                min_ip_improvement_a=float(args.min_ip_improvement_a),
+                max_ip_error_a=gate_profile["max_ip_error_a"],
+                max_ip_error_late_a=gate_profile["max_ip_error_late_a"],
+                min_action_rms=float(args.min_action_rms),
+                max_action_rms=float(args.max_action_rms),
+                min_mean_episode_completion=float(gate_profile["min_mean_episode_completion"]),
+                min_episode_completion=float(gate_profile["min_episode_completion"]),
+                min_baseline_ip_error_a=float(gate_profile["min_baseline_ip_error_a"]),
+                min_baseline_ip_error_late_a=float(gate_profile["min_baseline_ip_error_late_a"]),
+                always_require_ip_improvement=bool(gate_profile["always_require_ip_improvement"]),
+                min_policy_weight_extra=float(args.min_policy_weight_extra),
+                min_sampled_q_spread=float(args.min_sampled_q_spread),
+                include_mpo_gates=False,
+                require_controller_rollout=False,
+                controller_rollout={},
+                max_controller_shape_error_m=float(args.max_controller_shape_error_m),
+                max_controller_ip_error_a=float(gate_profile["max_controller_ip_error_a"]),
+            )
+            report = {
+                "status": "sweep_completed",
+                "gate_passed": bool(gate_report["passed"]),
+                "config": str(Path(args.config).resolve()),
+                "output_dir": str(output_dir),
+                "evaluation_seed_offsets": {
+                    "selection": selection_seed_offset,
+                    "holdout": holdout_seed_offset,
+                },
+                "checkpoint": None if selected_checkpoint is None else str(selected_checkpoint),
+                "export_dir": None if selected_export is None else str(selected_export),
+                "reset_sanity": reset_report,
+                "no_control_selection": baseline,
+                "no_control": holdout_baseline,
+                "baseline_difficulty": baseline_difficulty,
+                "train_result": train_result,
+                "actor_eval": actor_eval,
+                "tail_losses": losses,
+                "gates": gate_report["checks"],
+            }
+            _write_json(output_dir / "policy_validation.json", report)
+            _wandb_log(wandb_run, "pipeline/tail_losses", losses, step=train_env_step)
+            _wandb_log(wandb_run, "pipeline/gates", _gate_metrics(gate_report["checks"]), step=train_env_step)
+            _wandb_log(wandb_run, "pipeline", {"sweep_completed": 1.0, "gate_passed": 1.0 if gate_report["passed"] else 0.0}, step=train_env_step)
+            return 0
         controller_steps = int(args.controller_rollout_steps) if int(args.controller_rollout_steps) > 0 else int(cfg.sim.max_episode_steps)
         rollout_report = validate_exported_controller(selected_export, cfg, steps=controller_steps) if selected_export is not None else {"status": "missing_export"}
 
@@ -738,6 +814,7 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--controller-rollout-steps", type=int, default=0)
     ap.add_argument("--skip-controller-rollout-gate", action="store_true")
     ap.add_argument("--allow-failed-gates", action="store_true")
+    ap.add_argument("--reward-sweep-mode", action="store_true")
     ap.add_argument("--wandb", action="store_true")
     ap.add_argument("--wandb-project", default="tokamak-rl-v2-policy")
     ap.add_argument("--wandb-name", default=None)
