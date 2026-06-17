@@ -454,8 +454,16 @@ def _validate_reward_config(reward: RewardConfig, *, prefix: str) -> None:
             raise ValueError(f"{prefix}.{name} must be finite and non-negative")
     for name in ("current_soft_fraction", "derivative_soft_fraction"):
         value = float(getattr(reward, name))
-        if not math.isfinite(value) or not 0.0 <= value < 1.0:
-            raise ValueError(f"{prefix}.{name} must be finite and in [0, 1)")
+        if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+            raise ValueError(f"{prefix}.{name} must be finite and in [0, 1]")
+    for soft_name, bad_name in (
+        ("current_soft_fraction", "current_bad_fraction"),
+        ("derivative_soft_fraction", "derivative_bad_fraction"),
+    ):
+        soft = float(getattr(reward, soft_name))
+        bad = float(getattr(reward, bad_name))
+        if not math.isfinite(bad) or bad <= soft:
+            raise ValueError(f"{prefix}.{bad_name} must be finite and greater than {prefix}.{soft_name}")
     if not math.isfinite(float(reward.terminal_reward)):
         raise ValueError(f"{prefix}.terminal_reward must be finite")
 
@@ -469,7 +477,6 @@ _STALE_REWARD_KEYS = {
     "ip_bad_a",
     "shape_weight",
     "current_good_fraction",
-    "current_bad_fraction",
     "max_episode_reward",
     "current_good_a",
     "current_bad_a",

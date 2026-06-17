@@ -19,21 +19,38 @@ def test_reward_sweep_manifest_has_144_unique_variants() -> None:
     assert [variant["index"] for variant in variants] == list(range(144))
     assert len({variant["name"] for variant in variants}) == 144
     assert len({variant["folder"] for variant in variants}) == 144
-    assert variants[0]["folder"] == "v000_s0_i0_c0_a0"
-    assert variants[-1]["folder"] == "v143_s3_i2_c3_a2"
+    assert variants[0]["folder"] == "v000_s0_i0_c0_d0"
+    assert variants[-1]["folder"] == "v143_s3_i2_c3_d2"
     current_by_regime = {
         variant["current_regime"]: (
             variant["reward"]["current_weight"],
             variant["reward"]["current_soft_fraction"],
+            variant["reward"]["current_bad_fraction"],
         )
         for variant in variants
-        if variant["shape_regime"] == "s0" and variant["ip_regime"] == "i0" and variant["actuator_regime"] == "a0"
+        if variant["shape_regime"] == "s0" and variant["ip_regime"] == "i0" and variant["derivative_regime"] == "d0"
     }
     assert current_by_regime == {
-        "c0": (4.0, 0.90),
-        "c1": (6.0, 0.90),
-        "c2": (6.0, 0.85),
-        "c3": (8.0, 0.85),
+        "c0": (0.5, 1.0, 1.4),
+        "c1": (1.0, 1.0, 1.4),
+        "c2": (2.0, 1.0, 1.4),
+        "c3": (4.0, 1.0, 1.4),
+    }
+    derivative_by_regime = {
+        variant["derivative_regime"]: (
+            variant["reward"]["derivative_weight"],
+            variant["reward"]["derivative_soft_fraction"],
+            variant["reward"]["derivative_bad_fraction"],
+            variant["reward"]["action_weight"],
+            variant["reward"]["delta_action_weight"],
+        )
+        for variant in variants
+        if variant["shape_regime"] == "s0" and variant["ip_regime"] == "i0" and variant["current_regime"] == "c0"
+    }
+    assert derivative_by_regime == {
+        "d0": (0.1, 1.0, 1.4, 0.0, 0.0),
+        "d1": (0.25, 1.0, 1.4, 0.0, 0.0),
+        "d2": (0.5, 1.0, 1.4, 0.0, 0.0),
     }
 
 
@@ -218,5 +235,5 @@ def test_physical_sweep_regime_summary_groups_reward_axes(tmp_path: Path) -> Non
     summarize(tmp_path, out_dir, top=2, min_completion=0.95, min_boundary_late=0.999, max_terminated_boundary=0.001, max_current_over_limit_a_max=250000.0, max_current_over_limit_fraction_late=0.5)
 
     regimes = list(csv.DictReader((out_dir / "physical_regime_summary.csv").open()))
-    assert {row["regime_kind"] for row in regimes} == {"shape", "ip", "current", "actuator"}
+    assert {row["regime_kind"] for row in regimes} == {"shape", "ip", "current", "derivative"}
     assert any(row["regime_kind"] == "current" and row["regime"] == "c0" for row in regimes)

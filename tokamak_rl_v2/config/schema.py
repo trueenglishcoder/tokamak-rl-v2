@@ -104,7 +104,9 @@ class RewardConfig:
     action_weight: float = 0.02
     delta_action_weight: float = 0.05
     current_soft_fraction: float = 0.90
+    current_bad_fraction: float = 1.40
     derivative_soft_fraction: float = 0.90
+    derivative_bad_fraction: float = 1.40
     terminal_reward: float = -20.0
     reward_scale: float = 1.0
 

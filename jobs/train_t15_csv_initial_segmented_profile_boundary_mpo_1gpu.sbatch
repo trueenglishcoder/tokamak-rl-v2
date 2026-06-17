@@ -49,6 +49,7 @@ srun \
 
     cd /workspace/tokamak-rl-v2
     mkdir -p slurm_logs outputs data/processed
+    python3 scripts/apply_t15_actuator_limits.py /workspace/tokamak-sim/configs/T15MD_new_data.toml
 
     python3 - <<PYCUDA
 import torch

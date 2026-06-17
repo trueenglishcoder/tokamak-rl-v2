@@ -8,29 +8,29 @@ from typing import Any
 
 
 SHAPE_REGIMES = [
-    {"id": "s0", "shape_mean_weight": 5.0, "shape_max_weight": 1.5},
+    {"id": "s0", "shape_mean_weight": 4.0, "shape_max_weight": 1.0},
     {"id": "s1", "shape_mean_weight": 6.0, "shape_max_weight": 2.0},
     {"id": "s2", "shape_mean_weight": 8.0, "shape_max_weight": 2.5},
     {"id": "s3", "shape_mean_weight": 10.0, "shape_max_weight": 3.0},
 ]
 
 IP_REGIMES = [
-    {"id": "i0", "ip_weight": 2.5},
-    {"id": "i1", "ip_weight": 3.0},
-    {"id": "i2", "ip_weight": 3.5},
+    {"id": "i0", "ip_weight": 3.0},
+    {"id": "i1", "ip_weight": 4.0},
+    {"id": "i2", "ip_weight": 5.0},
 ]
 
 CURRENT_REGIMES = [
-    {"id": "c0", "current_weight": 4.0, "current_soft_fraction": 0.90},
-    {"id": "c1", "current_weight": 6.0, "current_soft_fraction": 0.90},
-    {"id": "c2", "current_weight": 6.0, "current_soft_fraction": 0.85},
-    {"id": "c3", "current_weight": 8.0, "current_soft_fraction": 0.85},
+    {"id": "c0", "current_weight": 0.5},
+    {"id": "c1", "current_weight": 1.0},
+    {"id": "c2", "current_weight": 2.0},
+    {"id": "c3", "current_weight": 4.0},
 ]
 
-ACTUATOR_REGIMES = [
-    {"id": "a0", "derivative_weight": 0.25, "action_weight": 0.01, "delta_action_weight": 0.025},
-    {"id": "a1", "derivative_weight": 0.50, "action_weight": 0.02, "delta_action_weight": 0.050},
-    {"id": "a2", "derivative_weight": 0.75, "action_weight": 0.04, "delta_action_weight": 0.075},
+DERIVATIVE_REGIMES = [
+    {"id": "d0", "derivative_weight": 0.10},
+    {"id": "d1", "derivative_weight": 0.25},
+    {"id": "d2", "derivative_weight": 0.50},
 ]
 
 FIXED_REWARD = {
@@ -39,6 +39,12 @@ FIXED_REWARD = {
     "ip_scale_a": 25000.0,
     "reward_scale": 1.0,
     "terminal_reward": -20.0,
+    "current_soft_fraction": 1.0,
+    "current_bad_fraction": 1.4,
+    "derivative_soft_fraction": 1.0,
+    "derivative_bad_fraction": 1.4,
+    "action_weight": 0.0,
+    "delta_action_weight": 0.0,
 }
 
 
@@ -48,18 +54,15 @@ def build_variants() -> list[dict[str, Any]]:
     for shape in SHAPE_REGIMES:
         for ip in IP_REGIMES:
             for current in CURRENT_REGIMES:
-                for actuator in ACTUATOR_REGIMES:
-                    name = f"{shape['id']}_{ip['id']}_{current['id']}_{actuator['id']}"
+                for derivative in DERIVATIVE_REGIMES:
+                    name = f"{shape['id']}_{ip['id']}_{current['id']}_{derivative['id']}"
                     reward = {
                         **FIXED_REWARD,
                         "shape_mean_weight": shape["shape_mean_weight"],
                         "shape_max_weight": shape["shape_max_weight"],
                         "ip_weight": ip["ip_weight"],
                         "current_weight": current["current_weight"],
-                        "current_soft_fraction": current["current_soft_fraction"],
-                        "derivative_weight": actuator["derivative_weight"],
-                        "action_weight": actuator["action_weight"],
-                        "delta_action_weight": actuator["delta_action_weight"],
+                        "derivative_weight": derivative["derivative_weight"],
                     }
                     variants.append(
                         {
@@ -69,7 +72,7 @@ def build_variants() -> list[dict[str, Any]]:
                             "shape_regime": shape["id"],
                             "ip_regime": ip["id"],
                             "current_regime": current["id"],
-                            "actuator_regime": actuator["id"],
+                            "derivative_regime": derivative["id"],
                             "reward": reward,
                         }
                     )
@@ -80,7 +83,7 @@ def build_variants() -> list[dict[str, Any]]:
 def build_manifest() -> dict[str, Any]:
     variants = build_variants()
     return {
-        "description": "144-run T15 CSV segmented-profile reward direction sweep",
+        "description": "144-run T15 CSV segmented-profile reward direction sweep with real-run actuator legality fixed",
         "variant_count": len(variants),
         "runs_per_array_task": 3,
         "array_task_count": 48,
@@ -88,7 +91,7 @@ def build_manifest() -> dict[str, Any]:
         "shape_regimes": SHAPE_REGIMES,
         "ip_regimes": IP_REGIMES,
         "current_regimes": CURRENT_REGIMES,
-        "actuator_regimes": ACTUATOR_REGIMES,
+        "derivative_regimes": DERIVATIVE_REGIMES,
         "variants": variants,
     }
 

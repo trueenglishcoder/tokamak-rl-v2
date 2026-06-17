@@ -12,17 +12,17 @@
     "csv_initial_state_split": "train",
     "current_safety_limits": {
       "pfc_currents": {
-        "pfc0": 141689.8,
-        "pfc1": 246462.44,
-        "pfc2": 117773.4144,
-        "pfc3": 146124.84,
-        "pfc4": 433476.288,
-        "pfc5": 1527683.5872
+        "pfc0": 198365.72,
+        "pfc1": 345047.416,
+        "pfc2": 164882.78,
+        "pfc3": 204574.776,
+        "pfc4": 606866.803,
+        "pfc5": 2138757.022
       },
       "sol_currents": {
-        "sol0": 3400635.968,
-        "sol1": 9937517.5,
-        "sol2": 3408556.22
+        "sol0": 4760890.355,
+        "sol1": 13912524.5,
+        "sol2": 4771978.708
       }
     },
     "current_limit_scale": 1.0,
@@ -73,12 +73,14 @@
     "shape_mean_weight": 4.0,
     "shape_max_weight": 1.0,
     "ip_weight": 3.0,
-    "current_weight": 2.0,
-    "derivative_weight": 0.5,
-    "action_weight": 0.02,
-    "delta_action_weight": 0.05,
-    "current_soft_fraction": 0.90,
-    "derivative_soft_fraction": 0.90,
+    "current_weight": 0.5,
+    "derivative_weight": 0.1,
+    "action_weight": 0.0,
+    "delta_action_weight": 0.0,
+    "current_soft_fraction": 1.0,
+    "current_bad_fraction": 1.4,
+    "derivative_soft_fraction": 1.0,
+    "derivative_bad_fraction": 1.4,
     "terminal_reward": -20.0,
     "reward_scale": 1.0
   },

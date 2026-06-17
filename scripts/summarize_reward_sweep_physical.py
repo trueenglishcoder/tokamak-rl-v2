@@ -50,13 +50,16 @@ SUMMARY_FIELDS = [
     "shape_regime",
     "ip_regime",
     "current_regime",
-    "actuator_regime",
+    "derivative_regime",
     "shape_mean_weight",
     "shape_max_weight",
     "ip_weight",
     "current_weight",
     "current_soft_fraction",
+    "current_bad_fraction",
     "derivative_weight",
+    "derivative_soft_fraction",
+    "derivative_bad_fraction",
     "action_weight",
     "delta_action_weight",
     "eval_rows",
@@ -263,13 +266,16 @@ def summarize_variant(
         "shape_regime": str(variant.get("shape_regime") or ""),
         "ip_regime": str(variant.get("ip_regime") or ""),
         "current_regime": str(variant.get("current_regime") or ""),
-        "actuator_regime": str(variant.get("actuator_regime") or ""),
+        "derivative_regime": str(variant.get("derivative_regime") or variant.get("actuator_regime") or ""),
         "shape_mean_weight": reward.get("shape_mean_weight", ""),
         "shape_max_weight": reward.get("shape_max_weight", ""),
         "ip_weight": reward.get("ip_weight", ""),
         "current_weight": reward.get("current_weight", ""),
         "current_soft_fraction": reward.get("current_soft_fraction", ""),
+        "current_bad_fraction": reward.get("current_bad_fraction", ""),
         "derivative_weight": reward.get("derivative_weight", ""),
+        "derivative_soft_fraction": reward.get("derivative_soft_fraction", ""),
+        "derivative_bad_fraction": reward.get("derivative_bad_fraction", ""),
         "action_weight": reward.get("action_weight", ""),
         "delta_action_weight": reward.get("delta_action_weight", ""),
         "eval_rows": len(eval_rows),
@@ -337,7 +343,7 @@ def _regime_key(row: dict[str, Any], kind: str) -> tuple[str, str]:
         "shape": "shape_regime",
         "ip": "ip_regime",
         "current": "current_regime",
-        "actuator": "actuator_regime",
+        "derivative": "derivative_regime",
     }[kind]
     return kind, str(row.get(key) or "")
 
@@ -345,7 +351,7 @@ def _regime_key(row: dict[str, Any], kind: str) -> tuple[str, str]:
 def regime_summary(rows: list[dict[str, Any]], top_n: int) -> list[dict[str, Any]]:
     groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        for kind in ("shape", "ip", "current", "actuator"):
+        for kind in ("shape", "ip", "current", "derivative"):
             groups[_regime_key(row, kind)].append(row)
 
     top_folders = {row["folder"] for row in rank_rows(rows)[:top_n]}

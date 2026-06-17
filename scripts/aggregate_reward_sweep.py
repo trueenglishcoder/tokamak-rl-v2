@@ -151,7 +151,10 @@ def summarize_variant(root: Path, variant: dict[str, Any]) -> tuple[dict[str, An
         "ip_weight": reward.get("ip_weight", ""),
         "current_weight": reward.get("current_weight", ""),
         "current_soft_fraction": reward.get("current_soft_fraction", ""),
+        "current_bad_fraction": reward.get("current_bad_fraction", ""),
         "derivative_weight": reward.get("derivative_weight", ""),
+        "derivative_soft_fraction": reward.get("derivative_soft_fraction", ""),
+        "derivative_bad_fraction": reward.get("derivative_bad_fraction", ""),
         "action_weight": reward.get("action_weight", ""),
         "delta_action_weight": reward.get("delta_action_weight", ""),
     }

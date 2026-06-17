@@ -273,6 +273,45 @@ def test_physical_reward_penalizes_current_usage() -> None:
         assert removed not in rb.components
 
 
+def test_physical_reward_actuator_losses_start_above_legal_envelope() -> None:
+    reward_fn = T15PhysicalReward(
+        RewardConfig(
+            reward_scale=1.0,
+            current_soft_fraction=1.0,
+            current_bad_fraction=1.4,
+            derivative_soft_fraction=1.0,
+            derivative_bad_fraction=1.4,
+            current_weight=1.0,
+            derivative_weight=1.0,
+            action_weight=0.0,
+            delta_action_weight=0.0,
+        ),
+        control_rate_hz=1000.0,
+    )
+    ref = torch.zeros((3, 32, 2), dtype=torch.float32)
+    action = torch.zeros((3, 9), dtype=torch.float32)
+    rb = reward_fn(
+        ip=torch.full((3,), 200000.0),
+        ip_ref=torch.full((3,), 200000.0),
+        boundary_points=ref,
+        reference_points=ref,
+        action=action,
+        previous_action=action,
+        current_over_limit_a=torch.tensor([0.0, 0.0, 1000.0], dtype=torch.float32),
+        current_usage_fraction=torch.tensor([0.75, 1.0, 1.2], dtype=torch.float32),
+        current_margin_fraction=torch.tensor([0.25, 0.0, -0.2], dtype=torch.float32),
+        derivative_usage=torch.tensor([0.5, 1.0, 1.2], dtype=torch.float32),
+        boundary_found=torch.ones((3,), dtype=torch.bool),
+        terminated=torch.zeros((3,), dtype=torch.bool),
+    )
+    assert float(rb.components["current_loss"][0].item()) == pytest.approx(0.0)
+    assert float(rb.components["current_loss"][1].item()) == pytest.approx(0.0)
+    assert rb.components["current_loss"][2] > 0.0
+    assert float(rb.components["derivative_loss"][0].item()) == pytest.approx(0.0)
+    assert float(rb.components["derivative_loss"][1].item()) == pytest.approx(0.0)
+    assert rb.components["derivative_loss"][2] > 0.0
+
+
 def test_environment_reset_step_contract() -> None:
     cfg = load_experiment_config(CONFIG)
     cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=4))

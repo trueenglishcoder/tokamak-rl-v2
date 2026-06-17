@@ -47,6 +47,7 @@ srun \
 
     cd /workspace/tokamak-rl-v2
     mkdir -p slurm_logs outputs data/processed
+    python3 scripts/apply_t15_actuator_limits.py /workspace/tokamak-sim/configs/T15MD_new_data.toml
 
     if [[ ! -f data/processed/t15_reference_limits.json || ! -f data/processed/t15_csv_initial_states.npz ]]; then
       echo "missing processed CSV production artifacts; run the production data preparation job before the reward sweep" >&2
@@ -55,8 +56,8 @@ srun \
 
     ARRAY_JOB=${SLURM_ARRAY_JOB_ID:-${SLURM_JOB_ID:-manual}}
     ARRAY_TASK=${SLURM_ARRAY_TASK_ID:-0}
-    SWEEP_ROOT=outputs/t15_reward_sweep144_1m_${ARRAY_JOB}
-    SWEEP_WANDB_PROJECT=tokamak-rl-v2-reward144-1m-${ARRAY_JOB}
+    SWEEP_ROOT=outputs/t15_reward_sweep144_legal_1m_${ARRAY_JOB}
+    SWEEP_WANDB_PROJECT=tokamak-rl-v2-reward144-legal-1m-${ARRAY_JOB}
     MANIFEST=${SWEEP_ROOT}/variants.json
 
     mkdir -p "${SWEEP_ROOT}" "${SWEEP_ROOT}/generated_configs"

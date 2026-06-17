@@ -62,8 +62,8 @@ class T15PhysicalReward:
         shape_mean_loss = _huber(shape_error_mean / max(float(c.shape_mean_scale_m), 1.0e-12))
         shape_max_loss = _huber(shape_error_max / max(float(c.shape_max_scale_m), 1.0e-12))
         ip_loss = _huber(ip_error / max(float(c.ip_scale_a), 1.0e-12))
-        current_loss = _threshold_square(current_usage_fraction, start=float(c.current_soft_fraction), bad=1.0)
-        derivative_loss = _threshold_square(derivative_usage, start=float(c.derivative_soft_fraction), bad=1.0)
+        current_loss = _threshold_square(current_usage_fraction, start=float(c.current_soft_fraction), bad=float(c.current_bad_fraction))
+        derivative_loss = _threshold_square(derivative_usage, start=float(c.derivative_soft_fraction), bad=float(c.derivative_bad_fraction))
         action_loss = torch.mean(action.pow(2), dim=-1)
         delta_action_loss = torch.mean(delta_action.pow(2), dim=-1)
 
