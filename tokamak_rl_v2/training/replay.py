@@ -6,6 +6,10 @@ import torch
 from torch import Tensor
 
 
+def _format_gib(value: int | float) -> str:
+    return f"{float(value) / (1024.0**3):.2f}"
+
+
 @dataclass(frozen=True, slots=True)
 class SequenceBatch:
     obs: Tensor
@@ -61,6 +65,12 @@ class FIFOSequenceReplay:
         critic_dim = int(obs_dim if critic_obs_dim is None else critic_obs_dim)
 
         shape = (self.capacity_episodes, self.max_episode_steps)
+        self._check_memory_budget(
+            obs_dim=int(obs_dim),
+            critic_obs_dim=critic_dim,
+            action_dim=int(action_dim),
+            transitions=int(self.capacity_episodes) * int(self.max_episode_steps),
+        )
         self.obs = torch.zeros((*shape, int(obs_dim)), dtype=torch.float32, device=self.device)
         self.critic_obs = torch.zeros((*shape, critic_dim), dtype=torch.float32, device=self.device)
         self.action = torch.zeros((*shape, int(action_dim)), dtype=torch.float32, device=self.device)
@@ -81,6 +91,32 @@ class FIFOSequenceReplay:
         self.completed_episodes = 0
         self.generation = 0
         self.start_episodes(self.active_envs)
+
+    def _check_memory_budget(self, *, obs_dim: int, critic_obs_dim: int, action_dim: int, transitions: int) -> None:
+        if self.device.type != "cuda" or not torch.cuda.is_available():
+            return
+        float_size = torch.empty((), dtype=torch.float32).element_size()
+        bool_size = torch.empty((), dtype=torch.bool).element_size()
+        long_size = torch.empty((), dtype=torch.long).element_size()
+        transition_bytes = transitions * (
+            float_size * (obs_dim + critic_obs_dim + action_dim + 1 + 1 + obs_dim + critic_obs_dim)
+            + bool_size * 2
+        )
+        episode_bytes = self.capacity_episodes * (long_size + bool_size + long_size)
+        active_bytes = self.active_envs * (long_size + long_size)
+        required_bytes = int(transition_bytes + episode_bytes + active_bytes)
+        with torch.cuda.device(self.device):
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+        reserve_fraction = 0.90
+        if required_bytes > int(free_bytes * reserve_fraction):
+            raise RuntimeError(
+                "replay buffer does not fit in available CUDA memory: "
+                f"requires {_format_gib(required_bytes)} GiB for "
+                f"capacity_episodes={self.capacity_episodes}, max_episode_steps={self.max_episode_steps}, "
+                f"obs_dim={obs_dim}, critic_obs_dim={critic_obs_dim}, action_dim={action_dim}; "
+                f"free={_format_gib(free_bytes)} GiB, total={_format_gib(total_bytes)} GiB. "
+                "Reduce learner.replay_capacity_episodes, num_envs, or critic observation size."
+            )
 
     @property
     def capacity(self) -> int:
