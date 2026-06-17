@@ -145,7 +145,7 @@ def _discover_variants(root: Path) -> list[dict[str, Any]]:
         return [variant for variant in variants if isinstance(variant, dict)]
 
     discovered: list[dict[str, Any]] = []
-    for run_dir in sorted(path for path in root.iterdir() if path.is_dir() and path.name.startswith("v")):
+    for run_dir in sorted(path for path in root.iterdir() if path.is_dir() and path.name[:1] in {"v", "b", "f"}):
         variant = _variant_from_reward_file(run_dir / "reward_variant.json")
         if not variant:
             variant = {"folder": run_dir.name, "name": run_dir.name, "index": len(discovered)}
@@ -159,7 +159,8 @@ def _folder_for_variant(variant: dict[str, Any]) -> str:
         return str(folder)
     index = int(_finite(variant.get("index"), default=0.0))
     name = str(variant.get("name") or f"variant_{index:03d}")
-    return f"v{index:03d}_{name}"
+    prefix = str(variant.get("folder_prefix") or variant.get("prefix") or "v")
+    return f"{prefix}{index:03d}_{name}"
 
 
 def _tail_metric(rows: list[dict[str, str]], *keys: str) -> float:
@@ -520,10 +521,13 @@ def summarize(
     _write_csv(out_dir / "physical_pareto_front.csv", front, SUMMARY_FIELDS)
     _write_csv(out_dir / "physical_regime_summary.csv", regimes)
     best = next((row for row in ranked if row["selection_valid"]), None)
+    if best is None:
+        best = next((row for row in ranked if row["valid_actor_eval"] and math.isfinite(_finite(row["physical_priority_score"], float("inf")))), None)
     best_payload = {
         "source_root": str(root),
         "best_candidate": _row_for_json(best),
         "best_pareto_candidate": _row_for_json(front[0] if front else None),
+        "best_candidate_passed_hard_filters": bool(best and best["selection_valid"]),
         "valid_candidates": sum(bool(row["selection_valid"]) for row in ranked),
         "total_candidates": len(ranked),
         "thresholds": {

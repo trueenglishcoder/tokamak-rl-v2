@@ -118,7 +118,18 @@ def _eval_max_steps_for_config(config: ExperimentConfig) -> int:
 
 
 class Trainer:
-    def __init__(self, config: ExperimentConfig, *, steps: int | None = None, num_envs: int | None = None, device: str | None = None, output_dir: str | Path | None = None, wandb_run=None, resume_checkpoint: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        config: ExperimentConfig,
+        *,
+        steps: int | None = None,
+        num_envs: int | None = None,
+        device: str | None = None,
+        output_dir: str | Path | None = None,
+        wandb_run=None,
+        resume_checkpoint: str | Path | None = None,
+        export_policy: bool = True,
+    ) -> None:
         self.distributed_mode = str(config.training.distributed_mode)
         self.distributed_rank = 0
         self.distributed_world_size = 1
@@ -138,6 +149,7 @@ class Trainer:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.wandb_run = wandb_run
         self.resume_checkpoint = Path(resume_checkpoint) if resume_checkpoint is not None else None
+        self.export_policy = bool(export_policy)
         self.start_step = 0
         self.start_updates = 0
         self._last_actor_devices: tuple[str, ...] = ()
@@ -271,7 +283,10 @@ class Trainer:
             decision_step = raw_step
             env_step = raw_step * self.num_envs
         payload = {"global_step": int(env_step), "env_step": int(env_step), "decision_step": int(decision_step), **values}
-        self.wandb_run.log(payload, step=int(env_step))
+        try:
+            self.wandb_run.log(payload, step=int(env_step))
+        except Exception as exc:
+            print(f"warning: W&B log failed; continuing with disk outputs: {exc}", file=sys.stderr)
 
     def _min_replay_sequence_length(self) -> int:
         return int(getattr(self.config.learner, "min_replay_sequence_length", self.config.learner.unroll_length))
@@ -1274,7 +1289,9 @@ class Trainer:
             return value
         return convert(obj)
 
-    def _export(self, relative: str, *, step: int, updates: int, eval_score: float | None) -> Path:
+    def _export(self, relative: str, *, step: int, updates: int, eval_score: float | None) -> Path | None:
+        if not self.export_policy:
+            return None
         return export_deterministic_actor(actor=self.actor, export_dir=self.output_dir / relative, schema=self.schema, normalization=self.normalization, metadata=self._metadata(step=step, updates=updates, eval_score=eval_score))
 
     def _write_config_snapshot(self) -> None:

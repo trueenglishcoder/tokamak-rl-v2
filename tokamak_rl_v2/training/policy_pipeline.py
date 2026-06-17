@@ -6,6 +6,7 @@ import json
 import math
 import os
 import signal
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
@@ -79,7 +80,16 @@ def main(argv: list[str] | None = None) -> int:
                     _write_json(output_dir / "policy_validation.json", report)
                 return 2 if not args.allow_failed_gates else 0
 
-        trainer = Trainer(cfg, steps=args.steps, num_envs=args.num_envs, device=args.device, output_dir=output_dir, wandb_run=None, resume_checkpoint=args.resume_checkpoint)
+        trainer = Trainer(
+            cfg,
+            steps=args.steps,
+            num_envs=args.num_envs,
+            device=args.device,
+            output_dir=output_dir,
+            wandb_run=None,
+            resume_checkpoint=args.resume_checkpoint,
+            export_policy=not bool(args.no_export),
+        )
         wandb_run = _start_wandb(args, cfg, output_dir=output_dir)
         trainer.wandb_run = wandb_run
         trainer._configure_wandb_metrics()
@@ -815,11 +825,13 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--skip-controller-rollout-gate", action="store_true")
     ap.add_argument("--allow-failed-gates", action="store_true")
     ap.add_argument("--reward-sweep-mode", action="store_true")
+    ap.add_argument("--no-export", action="store_true", help="Disable trainer actor exports. Used for reward sweeps.")
     ap.add_argument("--wandb", action="store_true")
     ap.add_argument("--wandb-project", default="tokamak-rl-v2-policy")
     ap.add_argument("--wandb-name", default=None)
     ap.add_argument("--wandb-group", default=None)
     ap.add_argument("--wandb-mode", choices=("online", "offline", "disabled"), default="online")
+    ap.add_argument("--wandb-optional", action="store_true", help="Continue if W&B init fails.")
     return ap
 
 
@@ -1072,21 +1084,27 @@ def _start_wandb(args: argparse.Namespace, cfg: ExperimentConfig, *, output_dir:
         return None
     if cfg.training.distributed_mode == "local_replay" and _distributed_rank() != 0:
         return None
-    import wandb
+    try:
+        import wandb
 
-    return wandb.init(
-        project=args.wandb_project,
-        name=args.wandb_name or cfg.name,
-        group=args.wandb_group,
-        mode=args.wandb_mode,
-        config={
-            "experiment": cfg.name,
-            "policy_pipeline": "hold_reset_boundary",
-            "output_dir": str(output_dir),
-            "eval_seed_offset": int(args.eval_seed_offset),
-            "holdout_eval_seed_offset": int(args.holdout_eval_seed_offset),
-        },
-    )
+        return wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_name or cfg.name,
+            group=args.wandb_group,
+            mode=args.wandb_mode,
+            config={
+                "experiment": cfg.name,
+                "policy_pipeline": "hold_reset_boundary",
+                "output_dir": str(output_dir),
+                "eval_seed_offset": int(args.eval_seed_offset),
+                "holdout_eval_seed_offset": int(args.holdout_eval_seed_offset),
+            },
+        )
+    except Exception as exc:
+        if bool(getattr(args, "wandb_optional", False)):
+            print(f"warning: W&B init failed and --wandb-optional is set; continuing without W&B: {exc}", file=sys.stderr)
+            return None
+        raise
 
 
 def _wandb_log(wandb_run, prefix: str, metrics: Mapping[str, object], *, step: int) -> None:
@@ -1101,7 +1119,10 @@ def _wandb_log(wandb_run, prefix: str, metrics: Mapping[str, object], *, step: i
         if math.isfinite(numeric):
             payload[f"{prefix}/{key}"] = numeric
     if payload:
-        wandb_run.log({"global_step": int(step), **payload}, step=int(step))
+        try:
+            wandb_run.log({"global_step": int(step), **payload}, step=int(step))
+        except Exception as exc:
+            print(f"warning: W&B log failed; continuing with disk outputs: {exc}", file=sys.stderr)
 
 
 def _train_env_step(train_result: Mapping[str, object], cfg: ExperimentConfig) -> int:
