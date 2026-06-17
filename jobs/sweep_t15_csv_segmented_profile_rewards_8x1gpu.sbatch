@@ -23,6 +23,7 @@ export REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-512}
 export BATCH_SIZE=${BATCH_SIZE:-256}
 export ROLLOUT_CHUNK_LENGTH=${ROLLOUT_CHUNK_LENGTH:-64}
 export UPDATES_PER_ROLLOUT_CHUNK=${UPDATES_PER_ROLLOUT_CHUNK:-32}
+export SWEEP_RUN_PREFIX=${SWEEP_RUN_PREFIX:-t15_csv_reward}
 export WANDB_MODE=${WANDB_MODE:-online}
 export WANDB__SERVICE_WAIT=${WANDB__SERVICE_WAIT:-30}
 
@@ -76,7 +77,8 @@ variant_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(variant["name"]))
 
 array_job = os.environ.get("SLURM_ARRAY_JOB_ID") or os.environ.get("SLURM_JOB_ID") or "manual"
 array_task = os.environ.get("SLURM_ARRAY_TASK_ID", str(variant_index))
-run_name = os.environ.get("RUN_NAME") or f"t15_csv_reward_{variant_index}_{variant_name}_1m_{array_job}_{array_task}"
+run_prefix = os.environ.get("SWEEP_RUN_PREFIX", "t15_csv_reward")
+run_name = f"{run_prefix}_{variant_index}_{variant_name}_1m_{array_job}_{array_task}"
 run_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", run_name)
 
 cfg = json.loads(base_path.read_text(encoding="utf-8"))
@@ -109,9 +111,9 @@ PYVAR
 
     ARRAY_JOB=${SLURM_ARRAY_JOB_ID:-${SLURM_JOB_ID:-manual}}
     ARRAY_TASK=${SLURM_ARRAY_TASK_ID:-${VARIANT_INDEX}}
-    RUN_NAME=${RUN_NAME:-t15_csv_reward_${VARIANT_INDEX}_${VARIANT_NAME}_1m_${ARRAY_JOB}_${ARRAY_TASK}}
-    TRAIN_OUTPUT=${TRAIN_OUTPUT:-outputs/${RUN_NAME}}
-    WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-tokamak-rl-v2-reward-direction-8x1m-${ARRAY_JOB}}
+    RUN_NAME=${SWEEP_RUN_PREFIX}_${VARIANT_INDEX}_${VARIANT_NAME}_1m_${ARRAY_JOB}_${ARRAY_TASK}
+    TRAIN_OUTPUT=outputs/${RUN_NAME}
+    WANDB_PROJECT_NAME=${SWEEP_WANDB_PROJECT_NAME:-tokamak-rl-v2-reward-direction-8x1m-${ARRAY_JOB}}
 
     echo "policy_config=${GENERATED_CONFIG}"
     echo "base_policy_config=${POLICY_CONFIG}"

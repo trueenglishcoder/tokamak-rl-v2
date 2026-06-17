@@ -39,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     if bool(cfg.training.production_mode) and bool(args.allow_failed_gates):
         raise ValueError("production_mode rejects --allow-failed-gates")
-    wandb_run = _start_wandb(args, cfg, output_dir=output_dir)
+    wandb_run = None
     gate_profile = _gate_profile_for_config(cfg)
     production_mode = bool(cfg.training.production_mode)
     rank0 = _distributed_rank() == 0
@@ -58,7 +58,6 @@ def main(argv: list[str] | None = None) -> int:
                     "gates": [{"name": artifact_failure["name"], "passed": False, "value": artifact_failure["path"], "threshold": "exists"}],
                 }
                 _write_json(output_dir / "policy_validation.json", report)
-                _wandb_log(wandb_run, "pipeline", {"passed": 0.0, artifact_failure["status"]: 1.0}, step=0)
             return 2 if not args.allow_failed_gates else 0
 
         reset_report: dict[str, float] = {}
@@ -69,8 +68,6 @@ def main(argv: list[str] | None = None) -> int:
         holdout_seed_offset = int(args.holdout_eval_seed_offset)
         if not production_mode:
             reset_report = run_reset_sanity(runtime_cfg, device=runtime_device, num_envs=args.num_envs)
-            if rank0:
-                _wandb_log(wandb_run, "pipeline/reset", reset_report, step=0)
             reset_gate = reset_report["max_abs_boundary_radii_error_m"] <= float(args.reset_error_tolerance_m) and reset_report["boundary_found_mean"] >= float(args.min_boundary_found)
             if not reset_gate:
                 if rank0:
@@ -80,10 +77,14 @@ def main(argv: list[str] | None = None) -> int:
                         "gates": [{"name": "reset_sanity", "passed": False}],
                     }
                     _write_json(output_dir / "policy_validation.json", report)
-                    _wandb_log(wandb_run, "pipeline", {"passed": 0.0, "failed_reset_sanity": 1.0}, step=0)
                 return 2 if not args.allow_failed_gates else 0
 
-        trainer = Trainer(cfg, steps=args.steps, num_envs=args.num_envs, device=args.device, output_dir=output_dir, wandb_run=wandb_run, resume_checkpoint=args.resume_checkpoint)
+        trainer = Trainer(cfg, steps=args.steps, num_envs=args.num_envs, device=args.device, output_dir=output_dir, wandb_run=None, resume_checkpoint=args.resume_checkpoint)
+        wandb_run = _start_wandb(args, cfg, output_dir=output_dir)
+        trainer.wandb_run = wandb_run
+        trainer._configure_wandb_metrics()
+        if not production_mode and rank0:
+            _wandb_log(wandb_run, "pipeline/reset", reset_report, step=0)
         if not production_mode:
             baseline = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=_eval_max_steps_for_config(cfg), policy="no_control", seed_offset=selection_seed_offset)
             holdout_baseline = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=_eval_max_steps_for_config(cfg), policy="no_control", seed_offset=holdout_seed_offset)
