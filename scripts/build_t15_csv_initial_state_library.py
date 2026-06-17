@@ -6,14 +6,10 @@ import json
 import os
 import re
 from collections import Counter, defaultdict
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 
-from tokamak_control.core.plasma_model import PlasmaModel
-from tokamak_control.geometry.boundary import BoundaryNotFoundError, find_plasma_boundary_with_status
 from tokamak_control.io.config_io import load_config
 
 from tokamak_rl_v2.config import load_experiment_config
@@ -23,11 +19,10 @@ from tokamak_rl_v2.env.t15_reference_limits import load_reference_limits
 
 
 IP_RE = re.compile(r"t15md_(\d+)_ip\.csv$")
-_WORKER_SIM_CFG = None
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Build coherent real-T15 CSV reset-state library for plain RL.")
+    ap = argparse.ArgumentParser(description="Build coherent real-T15 CSV reset-state library for production RL.")
     ap.add_argument("--experiment-config", default="configs/experiments/t15_csv_initial_segmented_profile_boundary_mpo.yaml")
     ap.add_argument("--data-root", default="../tokamak-sim/data/t15_data_new")
     ap.add_argument("--ip-glob", default="ip/t15md_*_ip.csv")
@@ -38,21 +33,22 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out-json", default="data/processed/t15_csv_initial_states.json")
     ap.add_argument("--out-rejected", default="data/processed/t15_csv_initial_states_rejected.csv")
     ap.add_argument("--reference-limits", default="data/processed/t15_reference_limits.json")
-    ap.add_argument("--zero-action-steps", type=int, default=10)
+    ap.add_argument("--zero-action-steps", type=int, default=10, help="Deprecated; accepted for old wrappers but ignored.")
     ap.add_argument("--max-rows-per-shot", type=int, default=600)
-    ap.add_argument("--workers", type=int, default=min(8, max(1, os.cpu_count() or 1)))
+    ap.add_argument("--workers", type=int, default=min(8, max(1, os.cpu_count() or 1)), help="Deprecated; accepted for old wrappers but ignored.")
     ap.add_argument("--progress-every", type=int, default=100)
     args = ap.parse_args(argv)
 
     data_root = Path(args.data_root).resolve()
     machine_config = Path(args.machine_config).resolve()
     exp_cfg = load_experiment_config(args.experiment_config)
-    sim_cfg = load_config(machine_config)
-    current_limits = _current_limit_vector(exp_cfg, sim_cfg)
+    machine_cfg = load_config(machine_config)
+    current_limits = _current_limit_vector(exp_cfg, machine_cfg)
     reference_limits = load_reference_limits(args.reference_limits)
 
     candidates: list[dict[str, object]] = []
     rejected: list[dict[str, object]] = []
+    raw_rows = 0
     for ip_path in sorted(data_root.glob(str(args.ip_glob))):
         match = IP_RE.search(ip_path.name)
         if not match:
@@ -65,6 +61,7 @@ def main(argv: list[str] | None = None) -> int:
         ip = _load_two_column(ip_path, delimiter=str(args.delimiter))
         coils = _load_coils(coil_path, delimiter=str(args.delimiter))
         rows = _candidate_rows(ip, coils, max_rows=int(args.max_rows_per_shot))
+        raw_rows += len(rows)
         print(f"[csv-initial-states] shot={shot_id} candidates={len(rows)}", flush=True)
         for row in rows:
             row_index = int(row["source_index"])
@@ -91,17 +88,14 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
 
-    accepted = _validate_sim_candidates(
+    accepted = sorted(
         candidates,
-        rejected,
-        machine_config=machine_config,
-        sim_cfg=sim_cfg,
-        zero_action_steps=int(args.zero_action_steps),
-        workers=max(1, int(args.workers)),
-        progress_every=max(1, int(args.progress_every)),
+        key=lambda row: (str(row["shot_id"]), float(row["time_s"]), int(row["source_index"])),
     )
-
-    accepted = sorted(accepted, key=lambda row: (str(row["shot_id"]), float(row["time_s"]), int(row["source_index"])))
+    print(
+        f"[csv-initial-states] cheap-filter raw={raw_rows} accepted={len(accepted)} rejected={len(rejected)}",
+        flush=True,
+    )
     episode_gap_s = float(exp_cfg.sim.max_episode_steps) * float(exp_cfg.reference.t_step)
     splits = _assign_splits(accepted, gap_s=episode_gap_s)
     _validate_split_gates(accepted, splits, gap_s=episode_gap_s)
@@ -155,91 +149,6 @@ def _candidate(
         "local_abs_dip_dt_a_per_s": float(dipdt),
         "max_current_usage_fraction": float(usage),
     }
-
-
-def _validate_sim_candidates(
-    candidates: list[dict[str, object]],
-    rejected: list[dict[str, object]],
-    *,
-    machine_config: Path,
-    sim_cfg,
-    zero_action_steps: int,
-    workers: int,
-    progress_every: int,
-) -> list[dict[str, object]]:
-    accepted: list[dict[str, object]] = []
-    total = len(candidates)
-    print(f"[csv-initial-states] simulator-validation candidates={total} workers={workers}", flush=True)
-    if total == 0:
-        return accepted
-    if workers <= 1:
-        for idx, row in enumerate(candidates, start=1):
-            reason = _sim_rejection_reason(
-                sim_cfg,
-                ip0=float(row["ip0"]),
-                pfc0=np.asarray(row["pfc0"], dtype=float),
-                sol0=np.asarray(row["sol0"], dtype=float),
-                zero_action_steps=zero_action_steps,
-            )
-            _record_sim_validation(row, reason, accepted, rejected)
-            if idx % progress_every == 0 or idx == total:
-                print(f"[csv-initial-states] validated={idx}/{total} accepted={len(accepted)} rejected={len(rejected)}", flush=True)
-        return accepted
-
-    with ProcessPoolExecutor(max_workers=workers, initializer=_init_worker, initargs=(str(machine_config),)) as pool:
-        future_to_row = {
-            pool.submit(
-                _sim_rejection_reason_worker,
-                float(row["ip0"]),
-                np.asarray(row["pfc0"], dtype=float),
-                np.asarray(row["sol0"], dtype=float),
-                int(zero_action_steps),
-            ): row
-            for row in candidates
-        }
-        for idx, future in enumerate(as_completed(future_to_row), start=1):
-            row = future_to_row[future]
-            try:
-                reason = future.result()
-            except Exception as exc:  # pragma: no cover - defensive multiprocessing surface
-                reason = f"sim_failure:{type(exc).__name__}"
-            _record_sim_validation(row, reason, accepted, rejected)
-            if idx % progress_every == 0 or idx == total:
-                print(f"[csv-initial-states] validated={idx}/{total} accepted={len(accepted)} rejected={len(rejected)}", flush=True)
-    return accepted
-
-
-def _record_sim_validation(
-    row: dict[str, object],
-    reason: str | None,
-    accepted: list[dict[str, object]],
-    rejected: list[dict[str, object]],
-) -> None:
-    if reason is None:
-        accepted.append(row)
-        return
-    rejected.append(
-        _reject(
-            str(row["shot_id"]),
-            int(row["source_index"]),
-            float(row["time_s"]),
-            reason,
-            float(row["max_current_usage_fraction"]),
-            float(row["local_abs_dip_dt_a_per_s"]),
-            ip0=float(row["ip0"]),
-        )
-    )
-
-
-def _init_worker(machine_config: str) -> None:
-    global _WORKER_SIM_CFG
-    _WORKER_SIM_CFG = load_config(Path(machine_config))
-
-
-def _sim_rejection_reason_worker(ip0: float, pfc0: np.ndarray, sol0: np.ndarray, zero_action_steps: int) -> str | None:
-    if _WORKER_SIM_CFG is None:
-        raise RuntimeError("worker simulator config was not initialized")
-    return _sim_rejection_reason(_WORKER_SIM_CFG, ip0=ip0, pfc0=pfc0, sol0=sol0, zero_action_steps=zero_action_steps)
 
 
 def _load_two_column(path: Path, *, delimiter: str) -> np.ndarray:
@@ -310,35 +219,6 @@ def _basic_rejection_reason(ip0: float, pfc0: np.ndarray, sol0: np.ndarray, usag
     if not np.isfinite(dipdt):
         return "invalid_local_dipdt"
     return None
-
-
-def _sim_rejection_reason(sim_cfg, *, ip0: float, pfc0: np.ndarray, sol0: np.ndarray, zero_action_steps: int) -> str | None:
-    try:
-        pfc = sim_cfg.pfc.__class__(name=sim_cfg.pfc.name, coils=list(sim_cfg.pfc.coils), currents=pfc0)
-        sol = sim_cfg.sol.__class__(name=sim_cfg.sol.name, coils=list(sim_cfg.sol.coils), currents=sol0)
-        model = PlasmaModel.from_settings(grid=sim_cfg.grid, pfc=pfc, sol=sol, settings=replace(sim_cfg.physics, Ip0=float(ip0)))
-        _assert_boundary(model, sim_cfg)
-        zeros_pfc = np.zeros((sim_cfg.pfc.n_coils,), dtype=float)
-        zeros_sol = np.zeros((sim_cfg.sol.n_coils,), dtype=float)
-        for _ in range(max(0, int(zero_action_steps))):
-            model.step(pfc_current_derivs=zeros_pfc, sol_current_derivs=zeros_sol)
-            _assert_boundary(model, sim_cfg)
-    except BoundaryNotFoundError:
-        return "boundary_not_found"
-    except Exception as exc:
-        return f"sim_failure:{type(exc).__name__}"
-    return None
-
-
-def _assert_boundary(model: PlasmaModel, sim_cfg) -> None:
-    _poly, _level, _status = find_plasma_boundary_with_status(
-        model.state.psi,
-        model.grid,
-        (model.R0, model.Z0),
-        n_levels=80,
-        limiter_shape=sim_cfg.limiter_shape,
-        boundary_mode=sim_cfg.boundary_mode,
-    )
 
 
 def _reject(shot_id: str, row_index: int, time_s: float, reason: str, usage: float, dipdt: float, *, ip0: float = float("nan")) -> dict[str, object]:
@@ -472,6 +352,7 @@ def _summary(
         "source_root": str(data_root),
         "machine_config": str(machine_config),
         "reference_limits": str(reference_limits_path),
+        "simulator_validation": False,
         "split_gap_seconds": float(split_gap_seconds),
         "total_rows": int(len(accepted) + len(rejected)),
         "candidate_rows": int(len(accepted) + len(rejected)),
