@@ -209,20 +209,57 @@ def build_focused_variants(center_reward: dict[str, float]) -> list[dict[str, An
     return variants
 
 
-def build_variants(sweep_pass: str = "broad", center_reward: dict[str, float] | None = None) -> list[dict[str, Any]]:
+def _select_evenly(variants: list[dict[str, Any]], count: int) -> list[dict[str, Any]]:
+    if count <= 0:
+        raise ValueError("variant count must be positive")
+    if count >= len(variants):
+        return variants
+    if count == 1:
+        selected = [variants[0]]
+    else:
+        indices = [round(i * (len(variants) - 1) / (count - 1)) for i in range(count)]
+        selected = [variants[index] for index in indices]
+    reindexed: list[dict[str, Any]] = []
+    for new_index, variant in enumerate(selected):
+        item = dict(variant)
+        item["source_index"] = int(variant["index"])
+        item["index"] = int(new_index)
+        old_folder = str(variant["folder"])
+        prefix = old_folder[0]
+        item["folder"] = f"{prefix}{new_index:03d}_{variant['name']}"
+        reindexed.append(item)
+    return reindexed
+
+
+def build_variants(sweep_pass: str = "broad", center_reward: dict[str, float] | None = None, variant_budget: int | None = None) -> list[dict[str, Any]]:
     if sweep_pass == "broad":
-        return build_broad_variants()
-    if sweep_pass == "focused":
+        variants = build_broad_variants()
+    elif sweep_pass == "focused":
         if center_reward is None:
             raise ValueError("focused sweep requires center_reward")
-        return build_focused_variants(center_reward)
-    raise ValueError(f"Unknown reward sweep pass: {sweep_pass}")
+        variants = build_focused_variants(center_reward)
+    else:
+        raise ValueError(f"Unknown reward sweep pass: {sweep_pass}")
+    return _select_evenly(variants, int(variant_budget)) if variant_budget is not None else variants
 
 
-def build_manifest(sweep_pass: str = "broad", center_reward: dict[str, float] | None = None) -> dict[str, Any]:
-    variants = build_variants(sweep_pass=sweep_pass, center_reward=center_reward)
-    runs_per_task = 1 if sweep_pass == "broad" else 2
-    array_task_count = 96
+def build_manifest(
+    sweep_pass: str = "broad",
+    center_reward: dict[str, float] | None = None,
+    *,
+    variant_budget: int | None = None,
+    runs_per_array_task: int | None = None,
+    array_task_count: int | None = None,
+) -> dict[str, Any]:
+    variants = build_variants(sweep_pass=sweep_pass, center_reward=center_reward, variant_budget=variant_budget)
+    runs_per_task = int(runs_per_array_task if runs_per_array_task is not None else (1 if sweep_pass == "broad" else 2))
+    if runs_per_task <= 0:
+        raise ValueError("runs_per_array_task must be positive")
+    if array_task_count is None:
+        if len(variants) % runs_per_task != 0:
+            raise ValueError(f"{len(variants)} variants is not divisible by {runs_per_task} runs per task")
+        array_task_count = len(variants) // runs_per_task
+    array_task_count = int(array_task_count)
     expected = array_task_count * runs_per_task
     if len(variants) != expected:
         raise ValueError(f"{sweep_pass} manifest has {len(variants)} variants, expected {expected}")
@@ -262,9 +299,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--pass", dest="sweep_pass", choices=("broad", "focused"), default="broad")
     parser.add_argument("--center", type=Path, default=None, help="physical_best_candidate.json for focused pass")
+    parser.add_argument("--variant-budget", type=int, default=None)
+    parser.add_argument("--runs-per-array-task", type=int, default=None)
+    parser.add_argument("--array-task-count", type=int, default=None)
     args = parser.parse_args(argv)
     center_reward = load_center_reward(args.center) if args.sweep_pass == "focused" and args.center is not None else None
-    manifest = build_manifest(sweep_pass=args.sweep_pass, center_reward=center_reward)
+    manifest = build_manifest(
+        sweep_pass=args.sweep_pass,
+        center_reward=center_reward,
+        variant_budget=args.variant_budget,
+        runs_per_array_task=args.runs_per_array_task,
+        array_task_count=args.array_task_count,
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     print(args.output)

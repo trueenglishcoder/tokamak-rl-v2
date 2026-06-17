@@ -15,6 +15,8 @@ from scripts.submit_two_pass_reward_sweep import submit_chain
 ROOT = Path(__file__).resolve().parents[1]
 PASS1_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_96gpu_pass1_broad.sbatch"
 PASS2_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_96gpu_pass2_focused.sbatch"
+PASS1_12_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_pass1_broad.sbatch"
+PASS2_12_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_pass2_focused.sbatch"
 RERUN_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_rerun_1gpu.sbatch"
 
 
@@ -78,6 +80,30 @@ def test_reward_sweep_focused_manifest_has_192_unique_variants() -> None:
     assert variants[0]["reward"]["delta_action_weight"] == 0.0
 
 
+def test_reward_sweep_budgeted_manifests_have_36_variants() -> None:
+    broad = build_manifest("broad", variant_budget=36, runs_per_array_task=3, array_task_count=12)
+    assert broad["variant_count"] == 36
+    assert broad["runs_per_array_task"] == 3
+    assert broad["array_task_count"] == 12
+    assert broad["variants"][0]["folder"].startswith("b000_")
+    assert broad["variants"][-1]["folder"].startswith("b035_")
+    assert "source_index" in broad["variants"][1]
+
+    center = {
+        "shape_mean_weight": 8.0,
+        "shape_max_weight": 2.5,
+        "ip_weight": 4.0,
+        "current_weight": 3.0,
+        "derivative_weight": 0.5,
+    }
+    focused = build_manifest("focused", center, variant_budget=36, runs_per_array_task=3, array_task_count=12)
+    assert focused["variant_count"] == 36
+    assert focused["runs_per_array_task"] == 3
+    assert focused["array_task_count"] == 12
+    assert focused["variants"][0]["folder"].startswith("f000_")
+    assert focused["variants"][-1]["folder"].startswith("f035_")
+
+
 def test_reward_sweep_array_task_mappings() -> None:
     broad = build_variants("broad")
     for task_id in range(96):
@@ -99,7 +125,7 @@ def test_reward_sweep_array_task_mappings() -> None:
 
 
 def test_reward_sweep_job_blocks_stale_name_leaks() -> None:
-    for path in (PASS1_JOB, PASS2_JOB, RERUN_JOB):
+    for path in (PASS1_JOB, PASS2_JOB, PASS1_12_JOB, PASS2_12_JOB, RERUN_JOB):
         text = path.read_text(encoding="utf-8")
         assert "unset RUN_NAME" in text
         assert "unset TRAIN_OUTPUT" in text
@@ -372,13 +398,15 @@ def test_submit_two_pass_chain_uses_slurm_dependencies(tmp_path: Path, monkeypat
         pass1_aggregate_job=Path("jobs/agg1.sbatch"),
         pass2_job=Path("jobs/pass2.sbatch"),
         final_aggregate_job=Path("jobs/final.sbatch"),
+        root_prefix="outputs/t15_reward_sweep72_legal_1m",
     )
 
     assert payload["pass1_jobid"] == "111"
     assert payload["pass1_aggregate_jobid"] == "112"
     assert payload["pass2_jobid"] == "113"
     assert payload["final_aggregate_jobid"] == "114"
-    assert payload["root"] == "outputs/t15_reward_sweep288_legal_1m_111"
+    assert payload["root"] == "outputs/t15_reward_sweep72_legal_1m_111"
+    assert submitted[0][2] == "--export=ALL,SWEEP_ROOT_PREFIX=outputs/t15_reward_sweep72_legal_1m"
     assert submitted[1][2] == "--dependency=afterany:111"
     assert submitted[2][2] == "--dependency=afterok:112"
     assert submitted[3][2] == "--dependency=afterany:113"

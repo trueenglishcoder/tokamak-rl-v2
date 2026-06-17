@@ -26,10 +26,11 @@ def submit_chain(
     pass1_aggregate_job: Path,
     pass2_job: Path,
     final_aggregate_job: Path,
+    root_prefix: str,
 ) -> dict[str, Any]:
     Path("slurm_logs").mkdir(parents=True, exist_ok=True)
-    pass1_jobid = _submit(["sbatch", "--parsable", str(pass1_job)])
-    root = f"outputs/t15_reward_sweep288_legal_1m_{pass1_jobid}"
+    pass1_jobid = _submit(["sbatch", "--parsable", f"--export=ALL,SWEEP_ROOT_PREFIX={root_prefix}", str(pass1_job)])
+    root = f"{root_prefix}_{pass1_jobid}"
     center_json = f"{root}/selection/pass1/physical_best_candidate.json"
 
     pass1_aggregate_jobid = _submit(
@@ -83,16 +84,18 @@ def submit_chain(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Submit the full two-pass legal-actuator reward sweep dependency chain.")
-    parser.add_argument("--pass1-job", type=Path, default=Path("jobs/sweep_t15_csv_segmented_profile_rewards_96gpu_pass1_broad.sbatch"))
+    parser.add_argument("--pass1-job", type=Path, default=Path("jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_pass1_broad.sbatch"))
     parser.add_argument("--pass1-aggregate-job", type=Path, default=Path("jobs/aggregate_t15_reward_sweep_pass1.sbatch"))
-    parser.add_argument("--pass2-job", type=Path, default=Path("jobs/sweep_t15_csv_segmented_profile_rewards_96gpu_pass2_focused.sbatch"))
+    parser.add_argument("--pass2-job", type=Path, default=Path("jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_pass2_focused.sbatch"))
     parser.add_argument("--final-aggregate-job", type=Path, default=Path("jobs/aggregate_t15_reward_sweep_final.sbatch"))
+    parser.add_argument("--root-prefix", default="outputs/t15_reward_sweep72_legal_1m")
     args = parser.parse_args(argv)
     payload = submit_chain(
         pass1_job=args.pass1_job,
         pass1_aggregate_job=args.pass1_aggregate_job,
         pass2_job=args.pass2_job,
         final_aggregate_job=args.final_aggregate_job,
+        root_prefix=args.root_prefix,
     )
     print(json.dumps(payload, indent=2))
     return 0
