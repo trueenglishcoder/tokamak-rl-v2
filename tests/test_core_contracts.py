@@ -1196,6 +1196,15 @@ def test_eval_checkpoint_retention_keeps_top_k_and_milestones(tmp_path: Path) ->
     assert state["metadata"]["eval_score"] == 0.3
 
 
+def test_local_replay_replay_health_waits_for_episode_horizon(tmp_path: Path) -> None:
+    cfg = _small_config(tmp_path)
+    cfg = replace(cfg, sim=replace(cfg.sim, max_episode_steps=500))
+    cfg = replace(cfg, learner=replace(cfg.learner, rollout_chunk_length=64))
+    trainer = Trainer(cfg, device="cpu", output_dir=tmp_path)
+
+    assert trainer._min_replay_health_check_chunks() == 9
+
+
 def test_export_cli_rejects_malformed_checkpoint(tmp_path: Path) -> None:
     checkpoint = tmp_path / "malformed.pt"
     torch.save(["not", "a", "checkpoint"], checkpoint)

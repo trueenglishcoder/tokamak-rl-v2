@@ -321,6 +321,15 @@ class Trainer:
             "learner_no_update_warning": 1.0 if warning else 0.0,
         }
 
+    def _min_replay_health_check_chunks(self) -> int:
+        rollout = max(int(self.config.learner.rollout_chunk_length), 1)
+        episode_steps = max(int(self.config.sim.max_episode_steps), 1)
+        # Full-episode tasks cannot produce eligible closed episodes before at
+        # least one lane reaches the configured horizon. Give the replay one
+        # extra rollout chunk after that before treating missing sequences as a
+        # real learner failure.
+        return max(2, (episode_steps + rollout - 1) // rollout + 1)
+
     def train(self) -> dict[str, Any]:
         if self.distributed_mode == "local_replay":
             return self._train_local_replay_distributed()
@@ -525,9 +534,14 @@ class Trainer:
                     health_f.flush()
                     self._wandb_log({f"train/{k}": v for k, v in replay_health.items()}, step=env_steps)
 
-                if rollout_chunks_seen >= 2 and not ready_all:
+                if rollout_chunks_seen >= self._min_replay_health_check_chunks() and not ready_all:
                     status = "failed_replay_health"
-                    details = {"env_steps": int(env_steps), "rollout_chunks_seen": int(rollout_chunks_seen), "replay_health": replay_health}
+                    details = {
+                        "env_steps": int(env_steps),
+                        "rollout_chunks_seen": int(rollout_chunks_seen),
+                        "min_replay_health_check_chunks": int(self._min_replay_health_check_chunks()),
+                        "replay_health": replay_health,
+                    }
                     return self._failure_result(status, env_steps=env_steps, updates=updates, details=details)
 
                 metrics = None
