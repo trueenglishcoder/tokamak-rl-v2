@@ -117,8 +117,12 @@ output_dir = sweep_root / folder
 generated_config = sweep_root / "generated_configs" / f"{folder}.json"
 
 cfg = json.loads(base_path.read_text(encoding="utf-8"))
+repo_root = pathlib.Path.cwd()
 base_name = cfg.get("name", base_path.stem)
 cfg["name"] = f"{base_name}_{folder}"
+cfg.setdefault("sim", {})["config_path"] = str(pathlib.Path("/workspace/tokamak-sim/configs/T15MD_new_data.toml"))
+cfg["sim"]["csv_initial_state_library"] = str(repo_root / "data/processed/t15_csv_initial_states.npz")
+cfg.setdefault("reference", {}).setdefault("ip", {})["limits_path"] = str(repo_root / "data/processed/t15_reference_limits.json")
 cfg.setdefault("reward", {}).update(variant["reward"])
 cfg.setdefault("training", {})["steps"] = train_steps
 cfg["training"]["output_dir"] = str(output_dir)
