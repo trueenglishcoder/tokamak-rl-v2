@@ -42,15 +42,28 @@ class CurrentSafetyLimits:
 
 @dataclass(frozen=True, slots=True)
 class IpReferenceConfig:
-    min: float
-    max: float
-    rate_limit: float
-    segment_min_steps: int
-    segment_max_steps: int
-    segment_count_min: int
-    segment_count_max: int
-    hold_probability: float
-    kind: Literal["segmented", "hold_reset", "shot_trapezoid_fragment"] = "segmented"
+    min: float = 0.0
+    max: float = 1.0
+    rate_limit: float = 0.0
+    segment_min_steps: int = 50
+    segment_max_steps: int = 300
+    segment_count_min: int = 3
+    segment_count_max: int = 8
+    hold_probability: float = 0.35
+    kind: Literal["segmented", "hold_reset", "segmented_profile"] = "segmented"
+    limits_path: Path | None = None
+    start_mode: Literal["reset_ip"] = "reset_ip"
+    plateau_min_fraction: float = 0.25
+    plateau_max_fraction: float = 1.0
+    end_min_fraction: float = 0.25
+    end_max_fraction: float = 1.0
+    ramp_up_rate_fraction: float = 0.25
+    ramp_down_rate_fraction: float = 0.25
+    hold_min_steps: int = 50
+    hold_max_steps: int = 250
+    final_hold_min_steps: int = 50
+    smooth_ramps: bool = True
+    max_delta_fraction: float = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,24 +84,28 @@ class ReferenceConfig:
 
 @dataclass(frozen=True, slots=True)
 class ObservationConfig:
+    actor_kind: Literal["controller_state_v2"] = "controller_state_v2"
+    critic_kind: Literal["privileged_training_state_v1"] = "privileged_training_state_v1"
     target_preview_steps: int = 8
     target_preview_stride: int = 10
 
 
 @dataclass(frozen=True, slots=True)
 class RewardConfig:
-    shape_good_m: float = 0.005
-    shape_bad_m: float = 0.05
-    ip_good_a: float = 500.0
-    ip_bad_a: float = 20000.0
+    shape_mean_scale_m: float = 0.03
+    shape_max_scale_m: float = 0.08
+    ip_scale_a: float = 25000.0
     boundary_missing_error_m: float = 0.10
-    shape_weight: float = 3.0
-    ip_weight: float = 2.0
+    shape_mean_weight: float = 4.0
+    shape_max_weight: float = 1.0
+    ip_weight: float = 3.0
     current_weight: float = 2.0
-    current_good_fraction: float = 0.85
-    current_bad_fraction: float = 1.0
-    max_episode_reward: float = 100.0
-    terminal_reward: float = -100.0
+    derivative_weight: float = 0.5
+    action_weight: float = 0.02
+    delta_action_weight: float = 0.05
+    current_soft_fraction: float = 0.90
+    derivative_soft_fraction: float = 0.90
+    terminal_reward: float = -20.0
     reward_scale: float = 1.0
 
 
@@ -102,13 +119,6 @@ class RandomizationConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class ShotFragmentConfig:
-    kind: Literal["idealized_t15_trapezoid"] = "idealized_t15_trapezoid"
-    shot_ids: tuple[str, ...] = ()
-    corner_smoothing_s: float = 0.05
-
-
-@dataclass(frozen=True, slots=True)
 class SimConfig:
     config_path: Path
     initial_currents_path: Path | None
@@ -117,11 +127,13 @@ class SimConfig:
     angles: int = 32
     max_episode_steps: int = 1000
     initial_ranges: InitialRanges | None = None
+    reset_source: Literal["initial_ranges", "csv_initial_states"] = "initial_ranges"
+    csv_initial_state_library: Path | None = None
+    csv_initial_state_split: Literal["train", "holdout", "all"] = "train"
     current_safety_limits: CurrentSafetyLimits | None = None
     current_limit_scale: float = 1.0
     derivative_limit_scale: float = 1.0
     action_scale: float = 1.0
-    shot_fragments: ShotFragmentConfig | None = None
     terminate_on_boundary_loss: bool = True
     terminate_on_current_limit: bool = True
     current_termination_over_limit_a: float = 5000.0
@@ -174,6 +186,7 @@ class TrainingConfig:
     actor_workers: int = 1
     actor_devices: tuple[str, ...] = ()
     distributed_mode: Literal["single", "local_replay"] = "single"
+    production_mode: bool = False
 
 
 @dataclass(frozen=True, slots=True)

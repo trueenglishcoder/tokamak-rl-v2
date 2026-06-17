@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import math
 from pathlib import Path
 
 import numpy as np
@@ -16,14 +17,14 @@ from tokamak_control.io.config_io import load_config
 
 from tokamak_rl_v2.config.schema import ExperimentConfig
 from tokamak_rl_v2.env.references import ReferenceBatch, generate_reference_batch, sample_initial_conditions
-from tokamak_rl_v2.env.replay_start_states import ReplayStartStateLibrary
-from tokamak_rl_v2.env.shot_fragments import ShotFragmentLibrary
+from tokamak_rl_v2.env.t15_csv_initial_states import CsvInitialStateLibrary
 from tokamak_rl_v2.rewards import T15PhysicalReward
 
 
 @dataclass(slots=True)
 class BatchStep:
     obs: Tensor
+    critic_obs: Tensor
     applied_action: Tensor
     reward: Tensor
     terminated: Tensor
@@ -38,8 +39,9 @@ class ResetPayload:
     sol0: np.ndarray
     params0: np.ndarray
     reference_seed: int
-    ip_reference: np.ndarray | None = None
     shot_ids: tuple[str, ...] = ()
+    source_indices: tuple[int, ...] = ()
+    source_times_s: tuple[float, ...] = ()
 
 
 class TokamakMagneticControlEnv:
@@ -51,6 +53,10 @@ class TokamakMagneticControlEnv:
         self.device = torch.device(device)
         self.rng = np.random.default_rng(int(seed))
         self.cfg = load_config(config.sim.config_path, initial_currents_path=config.sim.initial_currents_path)
+        if not math.isclose(float(config.reference.t_step), float(self.cfg.physics.t_step), rel_tol=0.0, abs_tol=1.0e-12):
+            raise ValueError(
+                "reference.t_step must match tokamak-sim physics.t_step exactly for runtime consistency"
+            )
         if config.sim.compute_backend == "gpu":
             self.cfg = replace(self.cfg, compute=ComputeSettings(backend="gpu", gpu_device=config.sim.gpu_device))
             self.cfg.compute.validate(require_available=True)
@@ -63,7 +69,9 @@ class TokamakMagneticControlEnv:
             raise ValueError("T15 training requires limiter geometry")
         self.angles = np.linspace(-np.pi, np.pi, int(config.sim.angles), endpoint=False, dtype=float)
         self.action_dim = self.cfg.pfc.n_coils + self.cfg.sol.n_coils
-        self.obs_dim = self._obs_dim()
+        self.actor_obs_dim = self._actor_obs_dim()
+        self.obs_dim = self.actor_obs_dim
+        self.critic_obs_dim = self._critic_obs_dim()
         self.reward_fn = T15PhysicalReward(config.reward, control_rate_hz=1.0 / float(self.cfg.physics.t_step))
         self.current_limits = torch.as_tensor(_current_limit_vector(config, self.cfg), dtype=torch.float32, device=self.device)
         self.raw_derivative_limits = torch.as_tensor(np.concatenate([_limit_vec(self.cfg.physics.pfc_deriv_limit, self.cfg.pfc.n_coils), _limit_vec(self.cfg.physics.sol_deriv_limit, self.cfg.sol.n_coils)]), dtype=torch.float32, device=self.device)
@@ -71,28 +79,22 @@ class TokamakMagneticControlEnv:
         self.previous_action = torch.zeros((self.batch_size, self.action_dim), dtype=torch.float32, device=self.device)
         self.action_offset = torch.zeros((self.batch_size, self.action_dim), dtype=torch.float32, device=self.device)
         self.current_over_limit_steps = torch.zeros((self.batch_size,), dtype=torch.long, device=self.device)
+        self.psi_reset_mean = torch.zeros((self.batch_size,), dtype=torch.float32, device=self.device)
+        self.psi_reset_std = torch.ones((self.batch_size,), dtype=torch.float32, device=self.device)
         self.reference: ReferenceBatch | None = None
+        self._last_critic_obs = torch.zeros((self.batch_size, self.critic_obs_dim), dtype=torch.float32, device=self.device)
         self.step_index = torch.zeros((self.batch_size,), dtype=torch.long, device=self.device)
         self.done = torch.ones((self.batch_size,), dtype=torch.bool, device=self.device)
         self._cpu_models: list[PlasmaModel] = []
         self._gpu_sim: BatchedGpuTokamakSimulator | None = None
-        self._shot_fragments = (
-            ShotFragmentLibrary(
-                config.sim.shot_fragments,
-                dt=float(self.cfg.physics.t_step),
-                config_path=config.sim.config_path,
-            )
-            if config.sim.shot_fragments is not None
-            else None
-        )
-        self._replay_start_states = (
-            ReplayStartStateLibrary(
-                config.sim.config_path,
+        self._csv_initial_states = (
+            CsvInitialStateLibrary(
+                config.sim.csv_initial_state_library,
                 n_pfc=self.cfg.pfc.n_coils,
                 n_sol=self.cfg.sol.n_coils,
-                shot_ids=config.sim.shot_fragments.shot_ids,
+                split=config.sim.csv_initial_state_split,
             )
-            if config.sim.shot_fragments is not None
+            if config.sim.reset_source == "csv_initial_states"
             else None
         )
         self.reset_metadata: list[dict[str, object]] = []
@@ -104,6 +106,9 @@ class TokamakMagneticControlEnv:
     @property
     def sol(self):
         return self.cfg.sol
+
+    def critic_obs(self) -> Tensor:
+        return self._last_critic_obs
 
     def reset(self) -> Tensor:
         payload = self._sample_reset_payload(self.batch_size)
@@ -126,9 +131,11 @@ class TokamakMagneticControlEnv:
                 gpu_device=self.config.sim.gpu_device,
             )
             result = self._gpu_sim.reset(ip=ip0, pfc_currents=pfc0, sol_currents=sol0)
+            self._update_psi_reset_stats(result.state.psi)
             self.reference = self._reference_for_reset_payload(payload=payload, boundary_points=result.boundary.points, boundary_radii=result.boundary.radii)
             return self._obs_gpu(result=result)
         self._cpu_models = [self._new_cpu_model(ip=float(ip0[b]), pfc_currents=pfc0[b], sol_currents=sol0[b]) for b in range(self.batch_size)]
+        self._update_psi_reset_stats_cpu()
         points0, radii0, _found0 = self._cpu_boundary_samples()
         self.reference = self._reference_for_reset_payload(payload=payload, boundary_points=points0, boundary_radii=radii0)
         return self._obs_cpu()
@@ -153,6 +160,7 @@ class TokamakMagneticControlEnv:
         if self.config.sim.compute_backend == "gpu":
             assert self._gpu_sim is not None
             result = self._gpu_sim.reset_indices(indices, ip=ip0, pfc_currents=pfc0, sol_currents=sol0)
+            self._update_psi_reset_stats(result.state.psi, indices=indices_t)
             idx_for_boundary = indices_t.to(device=result.boundary.points.device)
             reference = self._reference_for_reset_payload(payload=payload, boundary_points=result.boundary.points[idx_for_boundary], boundary_radii=result.boundary.radii[idx_for_boundary])
             self._write_reference_indices(indices_t, reference)
@@ -160,6 +168,7 @@ class TokamakMagneticControlEnv:
             return self._obs_gpu(result=result)
         for local, env_index in enumerate(indices):
             self._cpu_models[env_index] = self._new_cpu_model(ip=float(ip0[local]), pfc_currents=pfc0[local], sol_currents=sol0[local])
+        self._update_psi_reset_stats_cpu(indices=indices)
         points0, radii0, _found0 = self._cpu_boundary_samples(indices=indices)
         reference = self._reference_for_reset_payload(payload=payload, boundary_points=points0, boundary_radii=radii0)
         self._write_reference_indices(indices_t, reference)
@@ -167,24 +176,17 @@ class TokamakMagneticControlEnv:
         return self._obs_cpu()
 
     def _sample_reset_payload(self, count: int) -> ResetPayload:
-        if self._shot_fragments is not None:
-            assert self._replay_start_states is not None
-            reset = self._replay_start_states.sample(self.rng, count=int(count))
-            shot = self._shot_fragments.sample(
-                self.rng,
-                count=int(count),
-                steps=int(self.config.sim.max_episode_steps),
-                initial_ip=reset.ip0,
-                shot_ids=reset.shot_ids,
-            )
+        if self._csv_initial_states is not None:
+            reset = self._csv_initial_states.sample(self.rng, count=int(count))
             return ResetPayload(
                 ip0=reset.ip0,
                 pfc0=reset.pfc0,
                 sol0=reset.sol0,
-                params0=reset.params0,
+                params0=np.zeros((int(count), 5), dtype=float),
                 reference_seed=int(self.rng.integers(0, 2**31 - 1)),
-                ip_reference=shot.ip_reference,
                 shot_ids=reset.shot_ids,
+                source_indices=reset.source_indices,
+                source_times_s=reset.source_times_s,
             )
         if self.config.sim.initial_ranges is None:
             raise ValueError("training config must provide replay-bounded initial_ranges")
@@ -202,8 +204,6 @@ class TokamakMagneticControlEnv:
         if self.config.reference.boundary.kind == "hold_reset_boundary":
             kwargs["initial_boundary_points"] = boundary_points
             kwargs["initial_boundary_radii"] = boundary_radii
-        if self.config.reference.ip.kind == "shot_trapezoid_fragment":
-            kwargs["ip_reference"] = payload.ip_reference
         return generate_reference_batch(
             config=self.config.reference,
             initial_ip=payload.ip0,
@@ -224,6 +224,8 @@ class TokamakMagneticControlEnv:
                 "env_index": int(env_indices[i]),
                 "shot_id": str(payload.shot_ids[i]),
                 "initial_ip": float(payload.ip0[i]),
+                "source_index": int(payload.source_indices[i]) if i < len(payload.source_indices) else -1,
+                "source_time_s": float(payload.source_times_s[i]) if i < len(payload.source_times_s) else float("nan"),
             }
             for i in range(len(payload.shot_ids))
         ]
@@ -242,6 +244,43 @@ class TokamakMagneticControlEnv:
             return torch.empty((int(count), self.action_dim), dtype=torch.float32, device=self.device).uniform_(low, high)
         return torch.zeros((int(count), self.action_dim), dtype=torch.float32, device=self.device)
 
+    def _update_psi_reset_stats(self, psi: Tensor, *, indices: Tensor | None = None) -> None:
+        raw = torch.as_tensor(psi, dtype=torch.float32, device=self.device)
+        first_dim = int(raw.shape[0]) if raw.ndim >= 2 else self.batch_size
+        flat = raw.reshape(first_dim, -1)
+        mean = torch.mean(flat, dim=1)
+        std = torch.std(flat, dim=1, unbiased=False).clamp_min(1.0e-6)
+        if indices is None:
+            if first_dim != self.batch_size:
+                raise ValueError(f"reset psi batch size mismatch: expected {self.batch_size}, got {first_dim}")
+            self.psi_reset_mean = mean.detach().clone()
+            self.psi_reset_std = std.detach().clone()
+            return
+        idx = torch.as_tensor(indices, dtype=torch.long, device=self.device).reshape(-1)
+        if first_dim == self.batch_size:
+            self.psi_reset_mean[idx] = mean[idx].detach()
+            self.psi_reset_std[idx] = std[idx].detach()
+        elif first_dim == int(idx.numel()):
+            self.psi_reset_mean[idx] = mean.detach()
+            self.psi_reset_std[idx] = std.detach()
+        else:
+            raise ValueError(f"reset psi batch size mismatch: expected full batch or {int(idx.numel())}, got {first_dim}")
+
+    def _update_psi_reset_stats_cpu(self, *, indices: list[int] | None = None) -> None:
+        selected = list(range(len(self._cpu_models))) if indices is None else [int(i) for i in indices]
+        if not selected:
+            return
+        flat = np.stack([np.asarray(self._cpu_models[i].state.psi, dtype=float).reshape(-1) for i in selected], axis=0)
+        mean = torch.as_tensor(np.mean(flat, axis=1), dtype=torch.float32, device=self.device)
+        std = torch.as_tensor(np.std(flat, axis=1), dtype=torch.float32, device=self.device).clamp_min(1.0e-6)
+        idx = torch.as_tensor(selected, dtype=torch.long, device=self.device)
+        self.psi_reset_mean[idx] = mean.detach()
+        self.psi_reset_std[idx] = std.detach()
+
+    def _normalize_psi_flat(self, psi_flat: Tensor) -> Tensor:
+        psi = torch.as_tensor(psi_flat, dtype=torch.float32, device=self.device).reshape(self.batch_size, -1)
+        return (psi - self.psi_reset_mean[:, None]) / (self.psi_reset_std[:, None] + 1.0e-6)
+
     def _new_cpu_model(self, *, ip: float, pfc_currents: np.ndarray, sol_currents: np.ndarray) -> PlasmaModel:
         pfc = self.cfg.pfc.__class__(name=self.cfg.pfc.name, coils=list(self.cfg.pfc.coils), currents=pfc_currents)
         sol = self.cfg.sol.__class__(name=self.cfg.sol.name, coils=list(self.cfg.sol.coils), currents=sol_currents)
@@ -253,21 +292,23 @@ class TokamakMagneticControlEnv:
         commanded = torch.clamp(action, -1.0, 1.0)
         clipped = torch.clamp(commanded + self.action_offset, -1.0, 1.0)
         physical = clipped * self.derivative_limits[None, :]
+        previous_action = self.previous_action.detach().clone()
         if self.config.sim.compute_backend == "gpu":
             assert self._gpu_sim is not None
             result = self._gpu_sim.step(physical.to(dtype=torch.float64, device=self._gpu_sim.device))
             self.step_index += 1
+            self.previous_action = clipped.detach().clone()
             obs = self._obs_gpu(result=result)
-            reward, terminated, info = self._reward_gpu(result, clipped)
+            reward, terminated, info = self._reward_gpu(result, clipped, previous_action)
         else:
             self._step_cpu(physical)
             self.step_index += 1
+            self.previous_action = clipped.detach().clone()
             obs = self._obs_cpu()
-            reward, terminated, info = self._reward_cpu(clipped)
-        self.previous_action = clipped.detach().clone()
+            reward, terminated, info = self._reward_cpu(clipped, previous_action)
         truncated = self.step_index >= int(self.config.sim.max_episode_steps)
         self.done = terminated | truncated
-        return BatchStep(obs=obs, applied_action=clipped.detach().clone(), reward=reward, terminated=terminated, truncated=truncated, info=info)
+        return BatchStep(obs=obs, critic_obs=self.critic_obs(), applied_action=clipped.detach().clone(), reward=reward, terminated=terminated, truncated=truncated, info=info)
 
     def _pre_step_bank_currents(self) -> tuple[Tensor, Tensor]:
         if self.config.sim.compute_backend == "gpu":
@@ -311,12 +352,23 @@ class TokamakMagneticControlEnv:
             return 0.0
         return float(np.exp(-float(self.cfg.physics.t_step) / tau))
 
-    def _obs_dim(self) -> int:
-        return self._feature_slices()["target_preview"][1]
+    def _constraint_metrics(self, *, current: Tensor, derivs: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        current_scale = torch.where(torch.isfinite(self.current_limits) & (self.current_limits > 0.0), self.current_limits, torch.ones_like(self.current_limits))
+        current_usage_by_coil = torch.abs(current) / current_scale[None, :]
+        current_usage_fraction = torch.max(current_usage_by_coil, dim=1).values
+        current_margin_fraction = torch.min(1.0 - current_usage_by_coil, dim=1).values
+        raw_deriv_scale = torch.where(torch.isfinite(self.raw_derivative_limits) & (self.raw_derivative_limits > 0.0), self.raw_derivative_limits, torch.ones_like(self.raw_derivative_limits))
+        derivative_usage = torch.max(torch.abs(derivs) / raw_deriv_scale[None, :], dim=1).values
+        return current_usage_fraction, current_margin_fraction, derivative_usage
 
-    def _feature_slices(self) -> dict[str, tuple[int, int]]:
+    def _actor_obs_dim(self) -> int:
+        return self._actor_feature_slices()["target_preview"][1]
+
+    def _critic_obs_dim(self) -> int:
+        return self._critic_feature_slices()["derivative_usage"][1]
+
+    def _actor_feature_slices(self) -> dict[str, tuple[int, int]]:
         n_angles = int(self.config.sim.angles)
-        nz, nr = int(self.cfg.grid.z.size), int(self.cfg.grid.r.size)
         preview = int(self.config.observation.target_preview_steps)
         sizes = (
             ("step_norm", 1),
@@ -325,11 +377,11 @@ class TokamakMagneticControlEnv:
             ("ip_error", 1),
             ("active_currents", self.action_dim),
             ("active_current_derivs", self.action_dim),
-            ("psi_flat", nz * nr),
             ("measured_boundary_radii", n_angles),
             ("ref_radii", n_angles),
             ("boundary_radii_error", n_angles),
             ("boundary_found", 1),
+            ("previous_action", self.action_dim),
             ("target_preview", preview * (2 + n_angles)),
         )
         out: dict[str, tuple[int, int]] = {}
@@ -340,8 +392,29 @@ class TokamakMagneticControlEnv:
             start = end
         return out
 
+    def _critic_feature_slices(self) -> dict[str, tuple[int, int]]:
+        start = self.actor_obs_dim
+        nz, nr = int(self.cfg.grid.z.size), int(self.cfg.grid.r.size)
+        sizes = (
+            ("actor_obs", self.actor_obs_dim),
+            ("psi_flat_normalized", nz * nr),
+            ("current_usage_fraction", 1),
+            ("current_margin_fraction", 1),
+            ("derivative_usage", 1),
+        )
+        out: dict[str, tuple[int, int]] = {}
+        start = 0
+        for name, size in sizes:
+            end = start + int(size)
+            out[name] = (start, end)
+            start = end
+        return out
+
     def _feature_order(self) -> list[str]:
-        return list(self._feature_slices().keys())
+        return list(self._actor_feature_slices().keys())
+
+    def _critic_feature_order(self) -> list[str]:
+        return list(self._critic_feature_slices().keys())
 
     def _reference_at(self) -> tuple[Tensor, Tensor, Tensor]:
         assert self.reference is not None
@@ -381,25 +454,43 @@ class TokamakMagneticControlEnv:
         boundary_found = result.boundary.found.to(torch.float32).reshape(self.batch_size, 1)
         current_scale = torch.where(torch.isfinite(self.current_limits) & (self.current_limits > 0.0), self.current_limits, torch.ones_like(self.current_limits))
         deriv_scale = torch.where(torch.isfinite(self.derivative_limits) & (self.derivative_limits > 0.0), self.derivative_limits, torch.ones_like(self.derivative_limits))
-        psi = result.state.psi.to(torch.float32).reshape(self.batch_size, -1)
-        obs = torch.cat([
+        psi = self._normalize_psi_flat(result.state.psi)
+        current_usage_fraction, current_margin_fraction, derivative_usage = self._constraint_metrics(current=currents, derivs=derivs)
+        actor_obs = torch.cat([
             self.step_index.to(torch.float32).reshape(self.batch_size, 1) / max(float(self.config.sim.max_episode_steps), 1.0),
             (ip / 5.0e5).reshape(self.batch_size, 1),
             (ip_ref / 5.0e5).reshape(self.batch_size, 1),
             ((ip - ip_ref) / 5.0e5).reshape(self.batch_size, 1),
             currents / current_scale[None, :],
             derivs / deriv_scale[None, :],
-            psi / 1.0,
             measured_radii,
             target_radii,
             target_radii - measured_radii,
             boundary_found,
+            self.previous_action,
             self._preview(),
         ], dim=1)
-        return torch.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
+        actor_obs = torch.nan_to_num(actor_obs, nan=0.0, posinf=0.0, neginf=0.0)
+        self._last_critic_obs = torch.nan_to_num(
+            torch.cat(
+                [
+                    actor_obs,
+                    psi,
+                    current_usage_fraction.reshape(self.batch_size, 1),
+                    current_margin_fraction.reshape(self.batch_size, 1),
+                    derivative_usage.reshape(self.batch_size, 1),
+                ],
+                dim=1,
+            ),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+        return actor_obs
 
     def _obs_cpu(self) -> Tensor:
         obs = []
+        critic_obs = []
         ip_ref, _ref_points, ref_radii = self._reference_at()
         current_scale = np.asarray(self.current_limits.detach().cpu().numpy(), dtype=float)
         current_scale = np.where(np.isfinite(current_scale) & (current_scale > 0.0), current_scale, 1.0)
@@ -427,15 +518,36 @@ class TokamakMagneticControlEnv:
                 np.array([float(self.step_index[b].item()) / max(float(self.config.sim.max_episode_steps), 1.0), measured_ip / 5.0e5, float(ip_ref[b].item()) / 5.0e5, (measured_ip - float(ip_ref[b].item())) / 5.0e5], dtype=float),
                 currents / current_scale,
                 derivs / deriv_scale,
-                np.asarray(model.state.psi, dtype=float).reshape(-1) / 1.0,
                 np.nan_to_num(measured_radii, nan=0.0, posinf=0.0, neginf=0.0),
                 target_radii,
                 target_radii - np.nan_to_num(measured_radii, nan=0.0, posinf=0.0, neginf=0.0),
                 np.array([boundary_found], dtype=float),
+                self.previous_action[b].detach().cpu().numpy().astype(float, copy=False),
                 preview[b],
             ]
-            obs.append(np.concatenate(parts))
-        return torch.nan_to_num(torch.as_tensor(np.stack(obs, axis=0), dtype=torch.float32, device=self.device), nan=0.0, posinf=0.0, neginf=0.0)
+            actor = np.concatenate(parts)
+            current_usage_by_coil = np.abs(currents) / current_scale
+            raw_deriv_scale = np.asarray(self.raw_derivative_limits.detach().cpu().numpy(), dtype=float)
+            raw_deriv_scale = np.where(np.isfinite(raw_deriv_scale) & (raw_deriv_scale > 0.0), raw_deriv_scale, 1.0)
+            critic = np.concatenate(
+                [
+                    actor,
+                    ((np.asarray(model.state.psi, dtype=float).reshape(-1) - float(self.psi_reset_mean[b].item())) / (float(self.psi_reset_std[b].item()) + 1.0e-6)),
+                    np.array(
+                        [
+                            float(np.max(current_usage_by_coil)),
+                            float(np.min(1.0 - current_usage_by_coil)),
+                            float(np.max(np.abs(derivs) / raw_deriv_scale)),
+                        ],
+                        dtype=float,
+                    ),
+                ]
+            )
+            obs.append(actor)
+            critic_obs.append(critic)
+        actor_t = torch.nan_to_num(torch.as_tensor(np.stack(obs, axis=0), dtype=torch.float32, device=self.device), nan=0.0, posinf=0.0, neginf=0.0)
+        self._last_critic_obs = torch.nan_to_num(torch.as_tensor(np.stack(critic_obs, axis=0), dtype=torch.float32, device=self.device), nan=0.0, posinf=0.0, neginf=0.0)
+        return actor_t
 
     def _cpu_boundary_samples(self, *, indices: list[int] | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         selected = list(range(len(self._cpu_models))) if indices is None else [int(i) for i in indices]
@@ -463,7 +575,7 @@ class TokamakMagneticControlEnv:
         for b, model in enumerate(self._cpu_models):
             model.step(pfc_current_derivs=arr[b, : self.cfg.pfc.n_coils], sol_current_derivs=arr[b, self.cfg.pfc.n_coils :])
 
-    def _reward_gpu(self, result, action: Tensor) -> tuple[Tensor, Tensor, dict[str, object]]:
+    def _reward_gpu(self, result, action: Tensor, previous_action: Tensor) -> tuple[Tensor, Tensor, dict[str, object]]:
         ip_ref, ref_points, _ref_radii = self._reference_at()
         current = torch.cat([result.state.pfc_currents, result.state.sol_currents], dim=1).to(torch.float32)
         deriv = torch.cat([result.state.pfc_current_derivs, result.state.sol_current_derivs], dim=1).to(torch.float32)
@@ -481,7 +593,7 @@ class TokamakMagneticControlEnv:
         current_terminated, current_hard_terminated, current_grace_terminated = self._current_termination(current_over_limit=current_over_limit, current_usage_fraction=current_usage_fraction)
         terminated = boundary_terminated | current_terminated
         episode_progress = self.step_index.to(torch.float32) / max(float(self.config.sim.max_episode_steps), 1.0)
-        rb = self.reward_fn(ip=result.state.Ip.to(torch.float32), ip_ref=ip_ref, boundary_points=boundary_points, reference_points=ref, action=action, previous_action=self.previous_action, current_over_limit_a=current_over_limit, current_usage_fraction=current_usage_fraction, current_margin_fraction=current_margin_fraction, derivative_usage=derivative_usage, boundary_found=found, terminated=terminated, episode_progress=episode_progress)
+        rb = self.reward_fn(ip=result.state.Ip.to(torch.float32), ip_ref=ip_ref, boundary_points=boundary_points, reference_points=ref, action=action, previous_action=previous_action, current_over_limit_a=current_over_limit, current_usage_fraction=current_usage_fraction, current_margin_fraction=current_margin_fraction, derivative_usage=derivative_usage, boundary_found=found, terminated=terminated, episode_progress=episode_progress)
         components = dict(rb.components)
         components["terminated_boundary"] = boundary_terminated.to(dtype=rb.reward.dtype)
         components["terminated_current"] = current_terminated.to(dtype=rb.reward.dtype)
@@ -490,7 +602,7 @@ class TokamakMagneticControlEnv:
         components["current_over_limit_steps"] = self.current_over_limit_steps.to(dtype=rb.reward.dtype)
         return rb.reward, terminated, {"reward_components": {k: v.detach() for k, v in components.items()}}
 
-    def _reward_cpu(self, action: Tensor) -> tuple[Tensor, Tensor, dict[str, object]]:
+    def _reward_cpu(self, action: Tensor, previous_action: Tensor) -> tuple[Tensor, Tensor, dict[str, object]]:
         ip_ref, ref_points, _ref_radii = self._reference_at()
         boundary_points = []
         found = []
@@ -524,7 +636,7 @@ class TokamakMagneticControlEnv:
         current_terminated, current_hard_terminated, current_grace_terminated = self._current_termination(current_over_limit=current_over_limit, current_usage_fraction=current_usage_fraction)
         terminated = boundary_terminated | current_terminated
         episode_progress = self.step_index.to(torch.float32) / max(float(self.config.sim.max_episode_steps), 1.0)
-        rb = self.reward_fn(ip=torch.as_tensor(ips, dtype=torch.float32, device=self.device), ip_ref=ip_ref, boundary_points=torch.nan_to_num(torch.as_tensor(np.stack(boundary_points), dtype=torch.float32, device=self.device)), reference_points=ref_points[:, : int(self.config.sim.angles)].to(torch.float32), action=action, previous_action=self.previous_action, current_over_limit_a=current_over_limit, current_usage_fraction=current_usage_fraction, current_margin_fraction=current_margin_fraction, derivative_usage=derivative_usage, boundary_found=found_t, terminated=terminated, episode_progress=episode_progress)
+        rb = self.reward_fn(ip=torch.as_tensor(ips, dtype=torch.float32, device=self.device), ip_ref=ip_ref, boundary_points=torch.nan_to_num(torch.as_tensor(np.stack(boundary_points), dtype=torch.float32, device=self.device)), reference_points=ref_points[:, : int(self.config.sim.angles)].to(torch.float32), action=action, previous_action=previous_action, current_over_limit_a=current_over_limit, current_usage_fraction=current_usage_fraction, current_margin_fraction=current_margin_fraction, derivative_usage=derivative_usage, boundary_found=found_t, terminated=terminated, episode_progress=episode_progress)
         components = dict(rb.components)
         components["terminated_boundary"] = boundary_terminated.to(dtype=rb.reward.dtype)
         components["terminated_current"] = current_terminated.to(dtype=rb.reward.dtype)
@@ -535,8 +647,10 @@ class TokamakMagneticControlEnv:
 
     def export_schema(self) -> dict[str, object]:
         return {
-            "observation_kind": "joint_state_v1",
-            "obs_dim": self.obs_dim,
+            "observation_kind": self.config.observation.actor_kind,
+            "critic_observation_kind": self.config.observation.critic_kind,
+            "obs_dim": self.actor_obs_dim,
+            "critic_obs_dim": self.critic_obs_dim,
             "action_dim": self.action_dim,
             "n_active_total": self.action_dim,
             "n_pfc": self.cfg.pfc.n_coils,
@@ -545,7 +659,9 @@ class TokamakMagneticControlEnv:
             "angles_rad": np.asarray(self.angles, dtype=float).tolist(),
             "grid_shape": [int(self.cfg.grid.z.size), int(self.cfg.grid.r.size)],
             "feature_order": self._feature_order(),
-            "feature_slices": {name: [int(start), int(end)] for name, (start, end) in self._feature_slices().items()},
+            "feature_slices": {name: [int(start), int(end)] for name, (start, end) in self._actor_feature_slices().items()},
+            "critic_feature_order": self._critic_feature_order(),
+            "critic_feature_slices": {name: [int(start), int(end)] for name, (start, end) in self._critic_feature_slices().items()},
             "target_preview_steps": int(self.config.observation.target_preview_steps),
             "target_preview_stride": int(self.config.observation.target_preview_stride),
             "action_scale": float(self.config.sim.action_scale),
@@ -555,9 +671,9 @@ class TokamakMagneticControlEnv:
         return {
             "ip_scale": 5.0e5,
             "radius_scale": 1.0,
-            "psi_scale": 1.0,
             "current_scale": self.current_limits.detach().cpu().numpy().astype(float).tolist(),
             "derivative_scale": self.derivative_limits.detach().cpu().numpy().astype(float).tolist(),
+            "critic_psi_normalization": "per_reset_standardization",
             "t_step": float(self.cfg.physics.t_step),
             "actuator_tau": float(self.cfg.physics.actuator_tau),
         }
@@ -582,6 +698,8 @@ class TokamakMagneticControlEnv:
             "previous_action": self.previous_action.detach().cpu(),
             "action_offset": self.action_offset.detach().cpu(),
             "current_over_limit_steps": self.current_over_limit_steps.detach().cpu(),
+            "psi_reset_mean": self.psi_reset_mean.detach().cpu(),
+            "psi_reset_std": self.psi_reset_std.detach().cpu(),
         }
         if self.config.sim.compute_backend == "gpu":
             assert self._gpu_sim is not None
@@ -619,6 +737,8 @@ class TokamakMagneticControlEnv:
         self.previous_action = torch.as_tensor(state["previous_action"], dtype=torch.float32, device=self.device).clone()
         self.action_offset = torch.as_tensor(state["action_offset"], dtype=torch.float32, device=self.device).clone()
         self.current_over_limit_steps = torch.as_tensor(state.get("current_over_limit_steps", torch.zeros((self.batch_size,), dtype=torch.long)), dtype=torch.long, device=self.device).clone()
+        self.psi_reset_mean = torch.as_tensor(state.get("psi_reset_mean", torch.zeros((self.batch_size,), dtype=torch.float32)), dtype=torch.float32, device=self.device).clone()
+        self.psi_reset_std = torch.as_tensor(state.get("psi_reset_std", torch.ones((self.batch_size,), dtype=torch.float32)), dtype=torch.float32, device=self.device).clone().clamp_min(1.0e-6)
         if self.config.sim.compute_backend == "gpu":
             if self._gpu_sim is None:
                 self._gpu_sim = BatchedGpuTokamakSimulator(

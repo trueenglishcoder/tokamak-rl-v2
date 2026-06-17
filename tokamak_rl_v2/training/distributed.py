@@ -104,9 +104,10 @@ def _actor_loop(
     actor = FeedForwardGaussianActor(env.obs_dim, env.action_dim, worker_config.network.hidden_dim, min_std=worker_config.network.actor_min_std, initial_std=worker_config.network.actor_initial_std).to(dev)
     actor.load_state_dict({k: torch.as_tensor(v, device=dev) for k, v in params_q.get().items()})
     obs = env.reset()
+    critic_obs = env.critic_obs()
     while not stop.is_set():
         _drain_params(actor, params_q, dev)
-        chunk = {"obs": [], "action": [], "reward": [], "discount": [], "next_obs": [], "done": []}
+        chunk = {"obs": [], "critic_obs": [], "action": [], "reward": [], "discount": [], "next_obs": [], "next_critic_obs": [], "done": []}
         reward_components: dict[str, list[torch.Tensor]] = {}
         for _ in range(int(rollout_chunk_length)):
             if stop.is_set():
@@ -116,16 +117,19 @@ def _actor_loop(
             out = env.step(action)
             done = out.terminated | out.truncated
             chunk["obs"].append(obs.detach().cpu())
+            chunk["critic_obs"].append(critic_obs.detach().cpu())
             chunk["action"].append(out.applied_action.detach().cpu())
             chunk["reward"].append(out.reward.detach().cpu())
             chunk["discount"].append(torch.full_like(out.reward.detach().cpu(), float(worker_config.learner.discount)))
             chunk["next_obs"].append(out.obs.detach().cpu())
+            chunk["next_critic_obs"].append(out.critic_obs.detach().cpu())
             chunk["done"].append(done.detach().cpu())
             comps = out.info.get("reward_components", {}) if isinstance(out.info, dict) else {}
             if isinstance(comps, dict):
                 for name, value in comps.items():
                     reward_components.setdefault(str(name), []).append(torch.as_tensor(value, dtype=torch.float32).detach().cpu())
             obs = env.reset_indices(done) if bool(torch.any(done).item()) else out.obs
+            critic_obs = env.critic_obs() if bool(torch.any(done).item()) else out.critic_obs
         if not chunk["reward"]:
             break
         payload = {k: torch.stack(v, dim=0).numpy() for k, v in chunk.items()}

@@ -110,6 +110,12 @@ def math_isfinite(value: float) -> bool:
     return bool(np.isfinite(float(value)))
 
 
+def _eval_max_steps_for_config(config: ExperimentConfig) -> int:
+    if bool(config.training.production_mode):
+        return int(config.sim.max_episode_steps)
+    return int(config.training.eval_max_steps)
+
+
 class Trainer:
     def __init__(self, config: ExperimentConfig, *, steps: int | None = None, num_envs: int | None = None, device: str | None = None, output_dir: str | Path | None = None, wandb_run=None, resume_checkpoint: str | Path | None = None) -> None:
         self.distributed_mode = str(config.training.distributed_mode)
@@ -143,14 +149,14 @@ class Trainer:
         self.env = TokamakMagneticControlEnv(config, batch_size=self.num_envs, device=self.device, seed=rank_seed)
         torch.manual_seed(base_seed)
         self.actor = FeedForwardGaussianActor(self.env.obs_dim, self.env.action_dim, config.network.hidden_dim, min_std=config.network.actor_min_std, initial_std=config.network.actor_initial_std).to(self.device)
-        self.critic = RecurrentQCritic(self.env.obs_dim, self.env.action_dim, config.network.critic_hidden_dim, config.network.critic_mlp_hidden_dim).to(self.device)
+        self.critic = RecurrentQCritic(self.env.critic_obs_dim, self.env.action_dim, config.network.critic_hidden_dim, config.network.critic_mlp_hidden_dim).to(self.device)
         self.target_actor = FeedForwardGaussianActor(self.env.obs_dim, self.env.action_dim, config.network.hidden_dim, min_std=config.network.actor_min_std, initial_std=config.network.actor_initial_std).to(self.device)
-        self.target_critic = RecurrentQCritic(self.env.obs_dim, self.env.action_dim, config.network.critic_hidden_dim, config.network.critic_mlp_hidden_dim).to(self.device)
+        self.target_critic = RecurrentQCritic(self.env.critic_obs_dim, self.env.action_dim, config.network.critic_hidden_dim, config.network.critic_mlp_hidden_dim).to(self.device)
         self.learner = MaximumAPosterioriPolicyOptimiser(actor=self.actor, critic=self.critic, target_actor=self.target_actor, target_critic=self.target_critic, config=config.learner, device=self.device, distributed=self.distributed_mode == "local_replay")
         if self.distributed_mode == "local_replay":
             self._broadcast_trainable_state()
             torch.manual_seed(rank_seed + 17)
-        self.replay = FIFOSequenceReplay(capacity_episodes=int(config.learner.replay_capacity_episodes), max_episode_steps=int(config.sim.max_episode_steps), active_envs=self.num_envs, obs_dim=self.env.obs_dim, action_dim=self.env.action_dim, device=self.device)
+        self.replay = FIFOSequenceReplay(capacity_episodes=int(config.learner.replay_capacity_episodes), max_episode_steps=int(config.sim.max_episode_steps), active_envs=self.num_envs, obs_dim=self.env.obs_dim, critic_obs_dim=self.env.critic_obs_dim, action_dim=self.env.action_dim, device=self.device)
         self.schema = self.env.export_schema()
         self.normalization = self.env.normalization()
         self.best_eval = -float("inf")
@@ -169,6 +175,28 @@ class Trainer:
                 self.wandb_run.define_metric(prefix, step_metric="global_step")
         except Exception as exc:
             print(f"warning: failed to configure W&B metrics: {exc}", file=sys.stderr)
+
+    def _failure_result(self, status: str, *, env_steps: int, updates: int, details: Mapping[str, object] | None = None) -> dict[str, Any]:
+        final = {
+            "status": str(status),
+            "start_step": self.start_step,
+            "steps": int(env_steps),
+            "env_steps": int(env_steps),
+            "updates": int(updates),
+            "best_eval": self.best_eval,
+            "best_eval_details": self.best_eval_details,
+            "device": str(self.device),
+            "output_dir": str(self.output_dir),
+            "distributed_mode": self.distributed_mode,
+            "rank": int(self.distributed_rank),
+            "world_size": int(self.distributed_world_size),
+            "local_envs_per_rank": int(self.num_envs),
+            "total_training_envs": int(self.global_num_envs),
+            "failure_details": dict(details or {}),
+        }
+        if self._rank0():
+            (self.output_dir / "metrics.json").write_text(json.dumps(final, indent=2), encoding="utf-8")
+        return final
 
     def _configure_local_replay_runtime(self, config: ExperimentConfig, *, requested_num_envs: int, requested_device: str) -> tuple[ExperimentConfig, str, int]:
         rank = int(os.environ.get("RANK", "0"))
@@ -313,8 +341,10 @@ class Trainer:
             if self.resume_checkpoint is None and self.replay.size > 0:
                 self.replay.start_new_episodes()
             obs = self.env.reset()
+            critic_obs = self.env.critic_obs()
             if self.resume_checkpoint is not None:
                 obs = self._load_checkpoint(self.resume_checkpoint)
+                critic_obs = self.env.critic_obs()
             start = time.time()
             updates = int(self.start_updates)
             last_update_step = int(self.start_step)
@@ -325,8 +355,9 @@ class Trainer:
                 batch_step = self.env.step(action)
                 discount = torch.full((self.num_envs,), float(self.config.learner.discount), dtype=torch.float32, device=self.device)
                 done = batch_step.terminated | batch_step.truncated
-                self.replay.add_batch(obs, batch_step.applied_action, batch_step.reward, discount, batch_step.obs, done)
+                self.replay.add_batch(obs, batch_step.applied_action, batch_step.reward, discount, batch_step.obs, done, critic_obs=critic_obs, next_critic_obs=batch_step.critic_obs)
                 obs = self.env.reset_indices(done) if bool(torch.any(done).item()) else batch_step.obs
+                critic_obs = self.env.critic_obs() if bool(torch.any(done).item()) else batch_step.critic_obs
                 metrics = None
                 if step % int(self.config.learner.rollout_chunk_length) == 0:
                     replay_health = self._replay_health(step=step, updates=updates, last_update_step=last_update_step)
@@ -358,7 +389,7 @@ class Trainer:
                 if self._save_checkpoints_enabled() and step % int(self.config.training.checkpoint_interval_steps) == 0:
                     self._save_checkpoint("latest.pt", step=step, updates=updates)
                 if step % int(self.config.training.eval_interval_steps) == 0:
-                    eval_metrics = self.evaluate_detailed(max_steps=int(self.config.training.eval_max_steps), episodes=int(self.config.training.eval_episodes))
+                    eval_metrics = self.evaluate_detailed(max_steps=_eval_max_steps_for_config(self.config), episodes=int(self.config.training.eval_episodes))
                     score = self._selection_score(eval_metrics)
                     eval_metrics["selection_score"] = score
                     _append_csv_row(eval_path, {"step": step, "env_step": step * self.num_envs, **eval_metrics})
@@ -425,6 +456,7 @@ class Trainer:
             health_writer.writeheader()
 
         obs = self.env.reset()
+        critic_obs = self.env.critic_obs()
         start = time.time()
         updates = 0
         local_step = 0
@@ -432,18 +464,22 @@ class Trainer:
         last_update_step = 0
         last_checkpoint_step = 0
         last_eval_step = 0
+        rollout_chunks_seen = 0
         reward_acc = _RewardComponentAccumulator(self.device)
         progress = tqdm(total=max(self.steps, 0), desc="local-replay-train", unit="env-step", dynamic_ncols=True) if self._rank0() else None
 
         try:
             while env_steps < self.steps:
+                assert obs is not None
+                assert critic_obs is not None
                 with torch.no_grad():
                     action, _logp, _mean = self.actor.sample(obs)
                 batch_step = self.env.step(action)
                 discount = torch.full((self.num_envs,), float(self.config.learner.discount), dtype=torch.float32, device=self.device)
                 done = batch_step.terminated | batch_step.truncated
-                self.replay.add_batch(obs, batch_step.applied_action, batch_step.reward, discount, batch_step.obs, done)
+                self.replay.add_batch(obs, batch_step.applied_action, batch_step.reward, discount, batch_step.obs, done, critic_obs=critic_obs, next_critic_obs=batch_step.critic_obs)
                 obs = self.env.reset_indices(done) if bool(torch.any(done).item()) else batch_step.obs
+                critic_obs = self.env.critic_obs() if bool(torch.any(done).item()) else batch_step.critic_obs
 
                 local_step += 1
                 previous_env_steps = env_steps
@@ -459,6 +495,7 @@ class Trainer:
                 chunk_due = local_step % int(self.config.learner.rollout_chunk_length) == 0 or env_steps >= self.steps
                 if not chunk_due:
                     continue
+                rollout_chunks_seen += 1
 
                 reward_means = reward_acc.means(distributed=self._distributed_initialized(), reset=True)
                 if self._rank0() and reward_means:
@@ -484,6 +521,11 @@ class Trainer:
                     assert health_f is not None
                     health_f.flush()
                     self._wandb_log({f"train/{k}": v for k, v in replay_health.items()}, step=env_steps)
+
+                if rollout_chunks_seen >= 2 and not ready_all:
+                    status = "failed_replay_health"
+                    details = {"env_steps": int(env_steps), "rollout_chunks_seen": int(rollout_chunks_seen), "replay_health": replay_health}
+                    return self._failure_result(status, env_steps=env_steps, updates=updates, details=details)
 
                 metrics = None
                 if ready_all:
@@ -512,7 +554,7 @@ class Trainer:
                     last_checkpoint_step = env_steps
 
                 if self._rank0() and env_steps - last_eval_step >= max(int(self.config.training.eval_interval_steps), 1):
-                    eval_metrics = self.evaluate_detailed(max_steps=int(self.config.training.eval_max_steps), episodes=int(self.config.training.eval_episodes))
+                    eval_metrics = self.evaluate_detailed(max_steps=_eval_max_steps_for_config(self.config), episodes=int(self.config.training.eval_episodes))
                     score = self._selection_score(eval_metrics)
                     eval_metrics["selection_score"] = score
                     _append_csv_row(eval_path, {"step": env_steps, "env_step": env_steps, **eval_metrics})
@@ -554,6 +596,7 @@ class Trainer:
                 "local_envs_per_rank": int(self.num_envs),
                 "total_training_envs": int(self.global_num_envs),
                 "save_checkpoints": self._save_checkpoints_enabled(),
+                "status": "completed",
             }
             metrics_path.write_text(json.dumps(final, indent=2), encoding="utf-8")
         else:
@@ -636,6 +679,8 @@ class Trainer:
                             torch.as_tensor(payload["next_obs"][t], dtype=torch.float32, device=self.device),
                             torch.as_tensor(payload["done"][t], dtype=torch.bool, device=self.device),
                             lane_indices=worker_lanes,
+                            critic_obs=torch.as_tensor(payload.get("critic_obs", payload["obs"])[t], dtype=torch.float32, device=self.device),
+                            next_critic_obs=torch.as_tensor(payload.get("next_critic_obs", payload["next_obs"])[t], dtype=torch.float32, device=self.device),
                         )
                     env_steps += T * B
                     reward_components = payload.get("reward_components", {})
@@ -669,7 +714,7 @@ class Trainer:
                         self._save_checkpoint("latest.pt", step=env_steps, updates=updates)
                         last_checkpoint_step = env_steps
                     if env_steps - last_eval_step >= max(int(self.config.training.eval_interval_steps), 1):
-                        eval_metrics = self.evaluate_detailed(max_steps=int(self.config.training.eval_max_steps), episodes=int(self.config.training.eval_episodes))
+                        eval_metrics = self.evaluate_detailed(max_steps=_eval_max_steps_for_config(self.config), episodes=int(self.config.training.eval_episodes))
                         score = self._selection_score(eval_metrics)
                         eval_metrics["selection_score"] = score
                         _append_csv_row(eval_path, {"step": env_steps, "env_step": env_steps, **eval_metrics})
@@ -760,7 +805,8 @@ class Trainer:
         if policy not in {"actor", "no_control"}:
             raise ValueError(f"unsupported evaluation policy: {policy}")
         batch_size = max(1, min(int(episodes), self.num_envs))
-        env = TokamakMagneticControlEnv(self.config, batch_size=batch_size, device=self.device, seed=int(self.config.training.seed) + int(seed_offset))
+        eval_config = self._evaluation_config()
+        env = TokamakMagneticControlEnv(eval_config, batch_size=batch_size, device=self.device, seed=int(eval_config.training.seed) + int(seed_offset))
         obs = env.reset()
         returns: list[float] = []
         episode_steps: list[int] = []
@@ -828,16 +874,19 @@ class Trainer:
             "max_abs_action",
             "action_rms",
             "delta_action_rms",
-            "base_physical_cost",
             "physical_cost",
-            "shape_loss",
+            "shape_mean_loss",
+            "shape_max_loss",
             "ip_loss",
-            "current_limit_loss",
+            "current_loss",
+            "derivative_loss",
+            "action_loss",
+            "delta_action_loss",
             "terminated_boundary",
             "terminated_current",
             "current_over_limit_steps",
         }
-        min_metrics = {"current_margin_fraction", "boundary_found", "shape_quality", "ip_quality", "current_quality", "combined_quality"}
+        min_metrics = {"current_margin_fraction", "boundary_found"}
         for name, values in component_values.items():
             arr = np.asarray(values, dtype=float)
             if arr.size:
@@ -849,7 +898,7 @@ class Trainer:
                 if name == "current_over_limit_a":
                     metrics["current_over_limit_fraction"] = float(np.nanmean(arr > 0.0))
         profile_metrics = max_metrics | min_metrics | {"episode_progress"}
-        drift_metrics = {"shape_error_mean_m", "shape_error_max_m", "ip_error_a", "physical_cost", "base_physical_cost", "current_usage_fraction"}
+        drift_metrics = {"shape_error_mean_m", "shape_error_max_m", "ip_error_a", "physical_cost", "current_usage_fraction"}
         for name in profile_metrics:
             early = np.asarray(early_component_values.get(name, []), dtype=float)
             late = np.asarray(late_component_values.get(name, []), dtype=float)
@@ -866,6 +915,11 @@ class Trainer:
             if early.size and late.size and name in drift_metrics:
                 metrics[f"{name}_late_minus_early"] = float(np.nanmean(late) - np.nanmean(early))
         return metrics
+
+    def _evaluation_config(self) -> ExperimentConfig:
+        if str(self.config.sim.reset_source) != "csv_initial_states":
+            return self.config
+        return replace(self.config, sim=replace(self.config.sim, csv_initial_state_split="holdout"))
 
     @staticmethod
     def _selection_score(metrics: dict[str, float]) -> float:

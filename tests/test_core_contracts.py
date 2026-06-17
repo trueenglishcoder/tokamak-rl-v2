@@ -12,8 +12,6 @@ import torch
 from tokamak_rl_v2.config import load_experiment_config
 from tokamak_rl_v2.config.schema import IpReferenceConfig, LearnerConfig, RewardConfig
 from tokamak_rl_v2.env import BatchStep, TokamakMagneticControlEnv
-from tokamak_rl_v2.env.replay_start_states import MAIN_7_REPLAY_START_SHOT_IDS, ReplayStartStateLibrary
-from tokamak_rl_v2.env.shot_fragments import ShotFragmentLibrary
 from tokamak_rl_v2.networks import FeedForwardGaussianActor, RecurrentQCritic
 from tokamak_rl_v2.rewards import T15PhysicalReward
 from tokamak_rl_v2.export.cli import main as export_cli_main
@@ -27,7 +25,6 @@ from tokamak_rl_v2.training.cli import _device_list
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "configs/experiments/t15_static_boundary.yaml"
-SHOT_FRAGMENT_CONFIG = ROOT / "configs/experiments/t15_shot_fragment_boundary_ip_500_gpu.yaml"
 
 
 def _small_config(tmp_path: Path):
@@ -37,6 +34,31 @@ def _small_config(tmp_path: Path):
     cfg = replace(cfg, learner=replace(cfg.learner, batch_size=4, unroll_length=2, rollout_chunk_length=2, updates_per_rollout_chunk=1, action_samples=4))
     cfg = replace(cfg, training=replace(cfg.training, output_dir=tmp_path, steps=8, num_envs=2, checkpoint_interval_steps=8, eval_interval_steps=8, eval_episodes=2, eval_max_steps=4))
     return cfg
+
+
+def _sequence_batch(
+    *,
+    obs: torch.Tensor,
+    action: torch.Tensor,
+    reward: torch.Tensor,
+    discount: torch.Tensor,
+    next_obs: torch.Tensor,
+    done: torch.Tensor,
+    mask: torch.Tensor,
+    critic_obs: torch.Tensor | None = None,
+    next_critic_obs: torch.Tensor | None = None,
+) -> SequenceBatch:
+    return SequenceBatch(
+        obs=obs,
+        critic_obs=obs if critic_obs is None else critic_obs,
+        action=action,
+        reward=reward,
+        discount=discount,
+        next_obs=next_obs,
+        next_critic_obs=next_obs if next_critic_obs is None else next_critic_obs,
+        done=done,
+        mask=mask,
+    )
 
 
 def test_network_shapes() -> None:
@@ -77,7 +99,7 @@ def test_critic_reads_normalized_env_actions_without_extra_squash() -> None:
     assert not torch.allclose(lstm_input[3:], torch.tanh(action[0]))
 
 
-def test_tcv_style_reward_tracks_errors_without_action_cost() -> None:
+def test_physical_reward_tracks_errors_and_action_cost() -> None:
     reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0), control_rate_hz=1000.0)
     ref = torch.zeros((2, 32, 2), dtype=torch.float32)
     boundary = ref.clone()
@@ -100,10 +122,9 @@ def test_tcv_style_reward_tracks_errors_without_action_cost() -> None:
     zero = reward_fn(action=zero_action, **common)
     active = reward_fn(action=active_action, **common)
     assert zero.reward[0] > zero.reward[1]
-    assert active.reward[0] > zero.reward[1]
-    assert float(active.reward[0].item()) == pytest.approx(float(zero.reward[0].item()))
+    assert active.reward[0] < zero.reward[0]
     assert float(active.components["action_rms"][0].item()) > float(zero.components["action_rms"][0].item())
-    assert float(zero.components["combined_quality"][0].item()) == pytest.approx(1.0)
+    assert float(zero.components["physical_cost"][0].item()) == pytest.approx(0.0)
 
 
 def test_reward_components_remain_finite_when_boundary_is_missing() -> None:
@@ -131,7 +152,7 @@ def test_reward_components_remain_finite_when_boundary_is_missing() -> None:
 
 
 def test_physical_reward_makes_missing_boundary_expensive() -> None:
-    reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0, shape_bad_m=0.025, boundary_missing_error_m=0.1), control_rate_hz=1000.0)
+    reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0, shape_mean_scale_m=0.025, boundary_missing_error_m=0.1), control_rate_hz=1000.0)
     rb = reward_fn(
         ip=torch.tensor([200000.0]),
         ip_ref=torch.tensor([200000.0]),
@@ -147,13 +168,12 @@ def test_physical_reward_makes_missing_boundary_expensive() -> None:
         terminated=torch.zeros((1,), dtype=torch.bool),
     )
     assert float(rb.components["shape_error_mean_m"].item()) == pytest.approx(0.1)
-    assert float(rb.components["shape_quality"].item()) < 0.05
-    assert float(rb.components["shape_loss"].item()) > 0.95
-    assert float(rb.components["physical_cost"].item()) > 0.80
+    assert float(rb.components["shape_mean_loss"].item()) > 3.0
+    assert float(rb.components["physical_cost"].item()) > 10.0
 
 
 def test_physical_reward_improves_when_tracking_errors_improve() -> None:
-    reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0, shape_bad_m=0.03, ip_bad_a=40000.0), control_rate_hz=1000.0)
+    reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0, shape_mean_scale_m=0.03, ip_scale_a=40000.0), control_rate_hz=1000.0)
     ref = torch.zeros((2, 32, 2), dtype=torch.float32)
     boundary = ref.clone()
     boundary[1, :, 0] = 0.06
@@ -173,13 +193,11 @@ def test_physical_reward_improves_when_tracking_errors_improve() -> None:
         terminated=torch.zeros((2,), dtype=torch.bool),
     )
     assert rb.reward[0] > rb.reward[1]
-    assert rb.components["shape_loss"][0] < rb.components["shape_loss"][1]
+    assert rb.components["shape_mean_loss"][0] < rb.components["shape_mean_loss"][1]
     assert rb.components["ip_loss"][0] < rb.components["ip_loss"][1]
-    assert rb.components["shape_quality"][0] > rb.components["shape_quality"][1]
-    assert rb.components["ip_quality"][0] > rb.components["ip_quality"][1]
 
 
-def test_tcv_style_reward_worst_boundary_point_matters() -> None:
+def test_physical_reward_worst_boundary_point_matters() -> None:
     reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0), control_rate_hz=1000.0)
     ref = torch.zeros((2, 32, 2), dtype=torch.float32)
     boundary = ref.clone()
@@ -201,7 +219,7 @@ def test_tcv_style_reward_worst_boundary_point_matters() -> None:
         terminated=torch.zeros((2,), dtype=torch.bool),
     )
     assert rb.components["shape_error_mean_m"][1] < rb.components["shape_error_mean_m"][0]
-    assert rb.components["shape_quality"][1] < rb.components["shape_quality"][0]
+    assert rb.components["shape_max_loss"][1] > rb.components["shape_max_loss"][0]
 
 
 def test_physical_reward_terminal_penalty_applies_to_hard_failures() -> None:
@@ -226,7 +244,7 @@ def test_physical_reward_terminal_penalty_applies_to_hard_failures() -> None:
     assert float((rb.reward[0] - rb.reward[1]).item()) == pytest.approx(100.0)
 
 
-def test_tcv_style_reward_penalizes_current_usage() -> None:
+def test_physical_reward_penalizes_current_usage() -> None:
     reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0), control_rate_hz=1000.0)
     ref = torch.zeros((2, 32, 2), dtype=torch.float32)
     action = torch.zeros((2, 9), dtype=torch.float32)
@@ -247,12 +265,11 @@ def test_tcv_style_reward_penalizes_current_usage() -> None:
     )
     assert rb.reward[0] > rb.reward[1]
     assert rb.components["current_over_limit_a"][1] > rb.components["current_over_limit_a"][0]
-    assert rb.components["current_quality"][0] > 0.99
-    assert rb.components["current_quality"][1] < 0.01
-    assert rb.components["current_limit_loss"][1] > rb.components["current_limit_loss"][0]
+    assert float(rb.components["current_loss"][0].item()) == pytest.approx(0.0)
+    assert rb.components["current_loss"][1] > rb.components["current_loss"][0]
     assert rb.components["derivative_usage"][1] > rb.components["derivative_usage"][0]
     assert rb.components["max_abs_action"][1] > rb.components["max_abs_action"][0]
-    for removed in ("current_margin_loss", "derivative_loss", "action_saturation_loss", "delta_action_loss", "time_weight"):
+    for removed in ("shape_quality", "ip_quality", "current_quality", "combined_quality", "current_limit_loss", "time_weight"):
         assert removed not in rb.components
 
 
@@ -261,19 +278,30 @@ def test_environment_reset_step_contract() -> None:
     cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=4))
     env = TokamakMagneticControlEnv(cfg, batch_size=2, device="cpu", seed=1)
     schema = env.export_schema()
-    assert schema["observation_kind"] == "joint_state_v1"
+    assert schema["observation_kind"] == "controller_state_v2"
+    assert schema["critic_observation_kind"] == "privileged_training_state_v1"
     assert "diagnostics" not in schema
-    assert "psi_flat" in schema["feature_order"]
+    assert "psi_flat" not in schema["feature_order"]
+    assert "psi_flat_normalized" in schema["critic_feature_order"]
+    assert "previous_action" in schema["feature_order"]
     assert "measured_boundary_radii" in schema["feature_order"]
     assert "boundary_radii_error" in schema["feature_order"]
     assert env.obs_dim == schema["feature_slices"]["target_preview"][1]
+    assert env.critic_obs_dim == schema["critic_feature_slices"]["derivative_usage"][1]
     assert "flux_scale" not in env.normalization()
     assert "field_scale" not in env.normalization()
     assert "bdot_scale" not in env.normalization()
+    assert env.normalization()["critic_psi_normalization"] == "per_reset_standardization"
     obs = env.reset()
     assert obs.shape == (2, env.obs_dim)
+    assert env.critic_obs().shape == (2, env.critic_obs_dim)
+    psi0, psi1 = schema["critic_feature_slices"]["psi_flat_normalized"]
+    psi = env.critic_obs()[:, int(psi0) : int(psi1)]
+    assert torch.allclose(torch.mean(psi, dim=1), torch.zeros((2,), dtype=torch.float32), atol=1.0e-5)
+    assert torch.allclose(torch.std(psi, dim=1, unbiased=False), torch.ones((2,), dtype=torch.float32), atol=1.0e-4)
     result = env.step(torch.zeros((2, env.action_dim)))
     assert result.obs.shape == (2, env.obs_dim)
+    assert result.critic_obs.shape == (2, env.critic_obs_dim)
     assert result.applied_action.shape == (2, env.action_dim)
     assert result.reward.shape == (2,)
     assert torch.isfinite(result.reward).all()
@@ -557,6 +585,8 @@ def test_trainer_replay_stores_applied_env_action(tmp_path: Path, monkeypatch: p
     applied_action = torch.full_like(raw_action, 0.25)
     obs0 = torch.zeros((trainer.num_envs, trainer.env.obs_dim), dtype=torch.float32, device=trainer.device)
     obs1 = torch.ones_like(obs0)
+    critic0 = torch.zeros((trainer.num_envs, trainer.env.critic_obs_dim), dtype=torch.float32, device=trainer.device)
+    critic1 = torch.ones_like(critic0)
 
     def fake_sample(_obs):
         return raw_action.clone(), None, None
@@ -564,6 +594,7 @@ def test_trainer_replay_stores_applied_env_action(tmp_path: Path, monkeypatch: p
     def fake_step(_action):
         return BatchStep(
             obs=obs1.clone(),
+            critic_obs=critic1.clone(),
             applied_action=applied_action.clone(),
             reward=torch.zeros((trainer.num_envs,), dtype=torch.float32, device=trainer.device),
             terminated=torch.zeros((trainer.num_envs,), dtype=torch.bool, device=trainer.device),
@@ -573,6 +604,7 @@ def test_trainer_replay_stores_applied_env_action(tmp_path: Path, monkeypatch: p
 
     monkeypatch.setattr(trainer.actor, "sample", fake_sample)
     monkeypatch.setattr(trainer.env, "reset", lambda: obs0.clone())
+    monkeypatch.setattr(trainer.env, "critic_obs", lambda: critic0.clone())
     monkeypatch.setattr(trainer.env, "step", fake_step)
     monkeypatch.setattr(trainer, "_export", lambda *args, **kwargs: None)
 
@@ -639,72 +671,8 @@ def test_hold_reset_ip_reference_uses_actual_reset_ip() -> None:
     assert torch.allclose(batch.ip[1], torch.full((21,), 125100.0, dtype=torch.float64))
 
 
-def test_replay_start_state_library_loads_expected_real_shots() -> None:
-    cfg = load_experiment_config(SHOT_FRAGMENT_CONFIG)
-    assert cfg.sim.shot_fragments is not None
-    assert cfg.sim.shot_fragments.shot_ids == MAIN_7_REPLAY_START_SHOT_IDS
-    library = ReplayStartStateLibrary(
-        cfg.sim.config_path,
-        n_pfc=6,
-        n_sol=3,
-        shot_ids=cfg.sim.shot_fragments.shot_ids,
-    )
-    assert tuple(row.shot_id for row in library.rows) == MAIN_7_REPLAY_START_SHOT_IDS
-    sample = library.sample(np.random.default_rng(123), count=12)
-    assert sample.ip0.shape == (12,)
-    assert sample.pfc0.shape == (12, 6)
-    assert sample.sol0.shape == (12, 3)
-    assert sample.params0.shape == (12, 5)
-    rows_by_id = {row.shot_id: row for row in library.rows}
-    for idx, shot_id in enumerate(sample.shot_ids):
-        row = rows_by_id[shot_id]
-        assert float(sample.ip0[idx]) == pytest.approx(row.ip0)
-        assert np.allclose(sample.pfc0[idx], row.pfc0)
-        assert np.allclose(sample.sol0[idx], row.sol0)
-        assert np.allclose(sample.params0[idx], row.params0)
-
-
-def test_shot_fragment_library_anchors_ip_reference_to_reset_ip() -> None:
-    cfg = load_experiment_config(SHOT_FRAGMENT_CONFIG)
-    assert cfg.sim.shot_fragments is not None
-    library = ShotFragmentLibrary(cfg.sim.shot_fragments, dt=0.001, config_path=cfg.sim.config_path)
-    reset_library = ReplayStartStateLibrary(
-        cfg.sim.config_path,
-        n_pfc=6,
-        n_sol=3,
-        shot_ids=cfg.sim.shot_fragments.shot_ids,
-    )
-    sampled_reset = reset_library.sample(np.random.default_rng(123), count=6)
-    initial_ip = np.asarray(sampled_reset.ip0, dtype=float)
-    sample = library.sample(
-        np.random.default_rng(123),
-        count=6,
-        steps=1000,
-        initial_ip=initial_ip,
-        shot_ids=sampled_reset.shot_ids,
-    )
-    assert sample.ip_reference.shape == (6, 1001)
-    assert np.all(sample.ip_reference > 0.0)
-    assert np.all(np.isfinite(sample.ip_reference))
-    assert np.allclose(sample.ip_reference[:, 0], initial_ip)
-    step_delta = np.diff(sample.ip_reference, axis=1)
-    assert np.min(step_delta) >= -1.0e-6
-    family_1s = [library.templates[shot_id].ip_at_1s for shot_id in cfg.sim.shot_fragments.shot_ids]
-    assert float(np.min(sample.ip_reference[:, -1])) >= float(min(family_1s)) - 1.0
-    assert float(np.max(sample.ip_reference[:, -1])) <= float(max(family_1s)) + 1.0
-    for idx, shot_id in enumerate(sampled_reset.shot_ids):
-        template = library.templates[shot_id]
-        assert sample.shot_ids[idx] == shot_id
-        assert sample.ip_reference[idx, -1] == pytest.approx(template.plateau_ip, rel=1.0e-4)
-        assert sample.ip_reference[idx, 0] == pytest.approx(float(sampled_reset.ip0[idx]))
-        ramp_end_idx = int(np.ceil(template.ramp_up_end_s / 0.001))
-        ramp_end_idx = min(ramp_end_idx, sample.ip_reference.shape[1] - 1)
-        tail = sample.ip_reference[idx, ramp_end_idx:]
-        assert np.max(np.abs(tail - tail[0])) < 2500.0
-
-
 def test_sim_limit_scales_expand_current_and_derivative_limits() -> None:
-    cfg = load_experiment_config(SHOT_FRAGMENT_CONFIG)
+    cfg = load_experiment_config(CONFIG)
     base_cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", current_limit_scale=1.0, derivative_limit_scale=1.0))
     scaled_cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", current_limit_scale=1.2, derivative_limit_scale=1.2))
     base_env = TokamakMagneticControlEnv(base_cfg, batch_size=1, device="cpu", seed=123)
@@ -714,80 +682,6 @@ def test_sim_limit_scales_expand_current_and_derivative_limits() -> None:
     assert np.allclose(scaled_env.derivative_limits.cpu().numpy(), base_env.derivative_limits.cpu().numpy() * 1.2)
     assert scaled_env.cfg.physics.pfc_deriv_limit == pytest.approx(float(base_env.cfg.physics.pfc_deriv_limit) * 1.2)
     assert scaled_env.cfg.physics.sol_deriv_limit == pytest.approx(float(base_env.cfg.physics.sol_deriv_limit) * 1.2)
-
-
-def test_shot_fragment_reference_requires_concrete_ip_reference() -> None:
-    cfg = load_experiment_config(SHOT_FRAGMENT_CONFIG)
-    with pytest.raises(ValueError, match="ip_reference"):
-        generate_reference_batch(
-            config=cfg.reference,
-            initial_ip=np.asarray([125000.0]),
-            initial_parameters=np.asarray([[1.4, 0.0, 0.55, 1.2, 0.2]]),
-            steps=10,
-            device="cpu",
-            seed=123,
-        )
-    ip_reference = np.linspace(125000.0, 130000.0, 11, dtype=float).reshape(1, -1)
-    batch = generate_reference_batch(
-        config=replace(cfg.reference, boundary=replace(cfg.reference.boundary, kind="static_initial_parameters")),
-        initial_ip=np.asarray([125000.0]),
-        initial_parameters=np.asarray([[1.4, 0.0, 0.55, 1.2, 0.2]]),
-        steps=10,
-        device="cpu",
-        seed=123,
-        ip_reference=ip_reference,
-    )
-    assert torch.allclose(batch.ip.cpu(), torch.as_tensor(ip_reference, dtype=torch.float64))
-
-
-def test_shot_fragment_env_reset_uses_sampled_reference() -> None:
-    cfg = load_experiment_config(SHOT_FRAGMENT_CONFIG)
-    cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=12))
-    assert cfg.sim.shot_fragments is not None
-    library = ReplayStartStateLibrary(
-        cfg.sim.config_path,
-        n_pfc=6,
-        n_sol=3,
-        shot_ids=cfg.sim.shot_fragments.shot_ids,
-    )
-    rows_by_id = {row.shot_id: row for row in library.rows}
-    env = TokamakMagneticControlEnv(cfg, batch_size=2, device="cpu", seed=44)
-    obs = env.reset()
-    assert torch.all(torch.isfinite(obs))
-    assert env.reference is not None
-    assert env.reference.ip.shape == (2, 13)
-    assert torch.all(env.reference.ip > 0.0)
-    assert env.reset_metadata
-    assert all("shot_id" in item for item in env.reset_metadata)
-    for b, model in enumerate(env._cpu_models):
-        shot_id = str(env.reset_metadata[b]["shot_id"])
-        row = rows_by_id[shot_id]
-        assert float(model.state.Ip) == pytest.approx(row.ip0)
-        assert float(env.reference.ip[b, 0].item()) == pytest.approx(row.ip0)
-        assert np.allclose(np.asarray(model.state.pfc_currents, dtype=float), row.pfc0)
-        assert np.allclose(np.asarray(model.state.sol_currents, dtype=float), row.sol0)
-
-
-def test_shot_fragment_loader_rejects_removed_fragment_fields(tmp_path: Path) -> None:
-    raw = json.loads(SHOT_FRAGMENT_CONFIG.read_text(encoding="utf-8"))
-    cases = [
-        ("pfc_currents", {"pfc0": {"start": {"min": 0.0, "max": 1.0}, "plateau": {"min": 0.0, "max": 1.0}, "end": {"min": 0.0, "max": 1.0}}}),
-        ("start_time_min_s", 0.0),
-        ("ip_a", {"plateau": {"min": 380000.0, "max": 400000.0}}),
-    ]
-    for key, value in cases:
-        mutated = json.loads(json.dumps(raw))
-        mutated["sim"]["shot_fragments"][key] = value
-        path = tmp_path / f"invalid_{key}.json"
-        path.write_text(json.dumps(mutated), encoding="utf-8")
-        with pytest.raises(ValueError, match=key):
-            load_experiment_config(path)
-    mutated = json.loads(json.dumps(raw))
-    mutated["sim"]["shot_fragments"]["unexpected"] = 123
-    path = tmp_path / "invalid_fragment_unknown.json"
-    path.write_text(json.dumps(mutated), encoding="utf-8")
-    with pytest.raises(ValueError, match="unsupported keys"):
-        load_experiment_config(path)
 
 
 def test_ip_reference_inserts_hold_between_opposite_ramps() -> None:
@@ -1043,8 +937,12 @@ def test_policy_pipeline_gates_require_learning_signals() -> None:
     tail_losses = {"tail100.policy_weight_max": 0.06, "tail100.sampled_q_spread": 1.0e-4}
     controller_rollout = {
         "status": "ok",
+        "mean_episode_completion": 1.0,
+        "min_episode_completion": 1.0,
         "boundary_found_mean": 1.0,
+        "boundary_found_late_min": 1.0,
         "current_over_limit_a_max": 0.0,
+        "current_over_limit_a_late_max": 0.0,
         "shape_error_mean_m": 0.02,
         "shape_error_late_m": 0.02,
         "ip_error_a": 30000.0,
@@ -1068,6 +966,7 @@ def test_policy_pipeline_gates_require_learning_signals() -> None:
         "always_require_ip_improvement": False,
         "min_policy_weight_extra": 1.0e-4,
         "min_sampled_q_spread": 1.0e-8,
+        "include_mpo_gates": True,
         "require_controller_rollout": True,
         "controller_rollout": controller_rollout,
         "max_controller_shape_error_m": 0.03,
@@ -1181,6 +1080,7 @@ def test_policy_pipeline_shot_family_gates_reject_easy_tasks_and_missing_ip_gain
         always_require_ip_improvement=True,
         min_policy_weight_extra=1.0e-4,
         min_sampled_q_spread=1.0e-8,
+        include_mpo_gates=True,
         require_controller_rollout=True,
         controller_rollout=controller_rollout,
         max_controller_shape_error_m=0.03,
@@ -1284,7 +1184,7 @@ def test_export_cli_writes_policy_bundle_from_valid_checkpoint(tmp_path: Path) -
     assert (export_dir / "actor.pt").exists()
     assert (export_dir / "policy_weights.npz").exists()
     schema = json.loads((export_dir / "controller_schema.json").read_text())
-    assert schema["observation_kind"] == "joint_state_v1"
+    assert schema["observation_kind"] == "controller_state_v2"
 
 
 def test_distributed_resume_fails_clearly_because_worker_envs_are_not_checkpointed(tmp_path: Path) -> None:
@@ -1337,9 +1237,9 @@ def test_evaluate_detailed_reports_physical_metrics(tmp_path: Path) -> None:
     assert "max_abs_action_max" in metrics
     assert "physical_cost" in metrics
     assert "physical_cost_late" in metrics
-    assert "combined_quality" in metrics
-    assert "combined_quality_min" in metrics
-    assert "current_limit_loss" in metrics
+    assert "shape_mean_loss" in metrics
+    assert "shape_max_loss" in metrics
+    assert "current_loss" in metrics
     assert "shape_error_mean_m_late" in metrics
     assert "shape_error_mean_m_late_minus_early" in metrics
     assert "ip_error_a_late" in metrics
@@ -1402,7 +1302,7 @@ def test_mpo_e_step_keeps_uniform_weights_when_sampled_q_is_uniform() -> None:
         config=LearnerConfig(batch_size=2, unroll_length=2, action_samples=6, mpo_epsilon=0.1),
         device="cpu",
     )
-    batch = SequenceBatch(
+    batch = _sequence_batch(
         obs=torch.randn((2, 2, obs_dim)),
         action=torch.zeros((2, 2, action_dim)),
         reward=torch.zeros((2, 2)),
@@ -1438,7 +1338,7 @@ def test_mpo_e_step_solves_batch_dual_for_distinct_sampled_q() -> None:
         config=LearnerConfig(batch_size=2, unroll_length=2, action_samples=6, mpo_epsilon=0.1),
         device="cpu",
     )
-    batch = SequenceBatch(
+    batch = _sequence_batch(
         obs=torch.randn((2, 2, obs_dim)),
         action=torch.zeros((2, 2, action_dim)),
         reward=torch.zeros((2, 2)),
@@ -1479,7 +1379,7 @@ def test_mpo_update_accepts_padded_short_terminal_sequence() -> None:
         config=LearnerConfig(batch_size=2, unroll_length=6, action_samples=4),
         device="cpu",
     )
-    batch = SequenceBatch(
+    batch = _sequence_batch(
         obs=torch.randn((2, 6, obs_dim)),
         action=torch.zeros((2, 6, action_dim)),
         reward=torch.randn((2, 6)),
@@ -1510,7 +1410,7 @@ def test_mpo_actor_update_honors_chunk_size(monkeypatch: pytest.MonkeyPatch) -> 
         config=LearnerConfig(batch_size=2, unroll_length=3, action_samples=4, actor_update_chunk_size=2),
         device="cpu",
     )
-    batch = SequenceBatch(
+    batch = _sequence_batch(
         obs=torch.randn((2, 3, obs_dim)),
         action=torch.zeros((2, 3, action_dim)),
         reward=torch.zeros((2, 3)),
@@ -1606,7 +1506,7 @@ def test_actor_update_changes_policy_parameters_on_sequence_batch() -> None:
         config=LearnerConfig(batch_size=4, unroll_length=3, action_samples=5),
         device="cpu",
     )
-    batch = SequenceBatch(
+    batch = _sequence_batch(
         obs=torch.randn((4, 3, obs_dim)),
         action=torch.tanh(torch.randn((4, 3, action_dim))),
         reward=torch.randn((4, 3)),

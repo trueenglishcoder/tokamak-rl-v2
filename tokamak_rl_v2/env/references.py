@@ -7,6 +7,7 @@ import torch
 from torch import Tensor
 
 from tokamak_rl_v2.config.schema import BoundaryReferenceConfig, InitialRanges, IpReferenceConfig, ReferenceConfig
+from tokamak_rl_v2.env.t15_reference_limits import load_reference_limits
 
 PARAMETER_ORDER = ("R0", "Z0", "A0", "kappa", "delta")
 
@@ -54,7 +55,6 @@ def generate_reference_batch(
     seed: int,
     initial_boundary_points: Tensor | np.ndarray | None = None,
     initial_boundary_radii: Tensor | np.ndarray | None = None,
-    ip_reference: Tensor | np.ndarray | None = None,
 ) -> ReferenceBatch:
     dev = torch.device(device)
     rng = np.random.default_rng(int(seed))
@@ -62,17 +62,11 @@ def generate_reference_batch(
     ip = np.zeros((B, int(steps) + 1), dtype=np.float64)
     params = np.zeros((B, int(steps) + 1, 5), dtype=np.float64)
     theta = torch.linspace(-torch.pi, torch.pi, int(config.theta_count) + 1, dtype=torch.float64, device=dev)[:-1]
-    ip_reference_arr = None
-    if config.ip.kind == "shot_trapezoid_fragment":
-        if ip_reference is None:
-            raise ValueError("shot_trapezoid_fragment requires ip_reference")
-        ip_reference_arr = np.asarray(ip_reference, dtype=float).reshape(B, int(steps) + 1)
     for b in range(B):
-        if config.ip.kind == "shot_trapezoid_fragment":
-            assert ip_reference_arr is not None
-            ip[b] = ip_reference_arr[b]
-        elif config.ip.kind == "hold_reset":
+        if config.ip.kind == "hold_reset":
             ip[b] = float(initial_ip[b])
+        elif config.ip.kind == "segmented_profile":
+            ip[b] = _segmented_profile_ip(config.ip, float(initial_ip[b]), int(steps), rng, dt=float(config.t_step))
         else:
             ip[b] = _segmented_ip(config.ip, float(initial_ip[b]), int(steps), rng, dt=float(config.t_step))
         if config.boundary.kind != "hold_reset_boundary":
@@ -125,6 +119,204 @@ def _segmented_ip(cfg: IpReferenceConfig, start: float, steps: int, rng: np.rand
         previous_ramp_direction = ramp_direction
         k += int(seg_len)
     return values
+
+
+def _segmented_profile_ip(cfg: IpReferenceConfig, start: float, steps: int, rng: np.random.Generator, *, dt: float) -> np.ndarray:
+    if cfg.limits_path is None:
+        raise ValueError("segmented_profile requires limits_path")
+    limits = load_reference_limits(cfg.limits_path)
+    lo = float(limits.ip_p01_a)
+    hi = float(limits.ip_p99_a)
+    start_ip = float(start)
+    if not (lo <= start_ip <= hi):
+        raise ValueError(f"segmented_profile reset Ip {start_ip:g} is outside production bounds [{lo:g}, {hi:g}]")
+    width = max(hi - lo, 1.0)
+    max_delta = float(cfg.max_delta_fraction) * width
+    positive_rate_max = float(cfg.ramp_up_rate_fraction) * float(limits.positive_dipdt_p95_a_per_s)
+    negative_rate_max = float(cfg.ramp_down_rate_fraction) * float(limits.negative_dipdt_abs_p95_a_per_s)
+    # Cosine-eased ramps have a peak derivative of pi/2 times their mean
+    # derivative. Budget slightly below that so the final signed-rate contract
+    # remains true after discretization.
+    ramp_peak_factor = 1.7 if bool(cfg.smooth_ramps) else 1.0
+    min_hold = max(1, int(cfg.hold_min_steps))
+    max_hold = max(min_hold, int(cfg.hold_max_steps))
+    final_hold = min(max(0, int(cfg.final_hold_min_steps)), max(0, int(steps) - 1))
+    available = int(steps) - final_hold
+
+    for _attempt in range(512):
+        if available < 2:
+            continue
+        lengths = _segment_lengths(cfg, int(available), rng)
+        if int(lengths.size) < 2:
+            continue
+        kinds = _sample_segment_kinds(cfg, lengths, rng)
+        if kinds is None:
+            continue
+        out = np.full((int(steps) + 1,), np.nan, dtype=float)
+        current = start_ip
+        cursor = 0
+        saw_hold = False
+        saw_nonzero_ramp = False
+        valid = True
+        for seg_len, kind in zip(lengths.tolist(), kinds.tolist(), strict=True):
+            segment_steps = int(seg_len)
+            if kind == 0:
+                out[cursor : cursor + segment_steps + 1] = current
+                cursor += segment_steps
+                saw_hold = True
+                continue
+            delta = _profile_ramp_delta(
+                cfg,
+                current=current,
+                direction=int(kind),
+                steps=segment_steps,
+                lo=lo,
+                hi=hi,
+                max_delta=max_delta,
+                positive_rate_max=positive_rate_max,
+                negative_rate_max=negative_rate_max,
+                ramp_peak_factor=ramp_peak_factor,
+                dt=dt,
+                rng=rng,
+            )
+            if delta is None or delta <= 1.0e-6:
+                valid = False
+                break
+            target = float(current + float(kind) * delta)
+            out[cursor : cursor + segment_steps + 1] = _monotone_ramp(current, target, segment_steps, smooth=bool(cfg.smooth_ramps))
+            cursor += segment_steps
+            current = target
+            saw_nonzero_ramp = True
+        if not valid or not saw_hold or not saw_nonzero_ramp:
+            continue
+        out[cursor:] = current
+        if (
+            np.all(np.isfinite(out))
+            and np.all(out > 0.0)
+            and np.nanmin(out) >= lo
+            and np.nanmax(out) <= hi
+            and _reference_signed_rate_ok(out, max_positive_rate=positive_rate_max, max_negative_abs_rate=negative_rate_max, dt=dt)
+        ):
+            return out
+    raise ValueError("failed to sample a segmented_profile Ip reference that fits the episode")
+
+
+def _sample_segment_kinds(cfg: IpReferenceConfig, lengths: np.ndarray, rng: np.random.Generator) -> np.ndarray | None:
+    count = int(np.asarray(lengths).size)
+    if count < 2:
+        return None
+    hold_min = max(1, int(cfg.hold_min_steps))
+    hold_max = max(hold_min, int(cfg.hold_max_steps))
+    lengths_arr = np.asarray(lengths, dtype=int).reshape(-1)
+    hold_candidates = np.flatnonzero((lengths_arr >= hold_min) & (lengths_arr <= hold_max))
+    if hold_candidates.size == 0:
+        return None
+    kinds = np.zeros((count,), dtype=np.int8)
+    forced_hold = int(rng.choice(hold_candidates))
+    hold_mask = np.zeros((count,), dtype=bool)
+    hold_mask[forced_hold] = True
+    for idx in hold_candidates.tolist():
+        if idx != forced_hold and rng.random() < float(cfg.hold_probability):
+            hold_mask[int(idx)] = True
+    if bool(np.all(hold_mask)):
+        ramp_candidates = np.flatnonzero(~hold_mask)
+        if ramp_candidates.size == 0:
+            ramp_candidates = np.flatnonzero(np.arange(count) != forced_hold)
+        if ramp_candidates.size == 0:
+            return None
+        hold_mask[int(rng.choice(ramp_candidates))] = False
+    last_ramp_direction = 0
+    hold_since_last_ramp = True
+    for idx in range(count):
+        if bool(hold_mask[idx]):
+            kinds[idx] = 0
+            hold_since_last_ramp = True
+            continue
+        options = (-1, 1)
+        if last_ramp_direction != 0 and not hold_since_last_ramp:
+            options = (last_ramp_direction,)
+        direction = int(rng.choice(options))
+        kinds[idx] = np.int8(direction)
+        last_ramp_direction = direction
+        hold_since_last_ramp = False
+    if not np.any(kinds == 0) or not np.any(kinds != 0):
+        return None
+    return kinds
+
+
+def _profile_ramp_delta(
+    cfg: IpReferenceConfig,
+    *,
+    current: float,
+    direction: int,
+    steps: int,
+    lo: float,
+    hi: float,
+    max_delta: float,
+    positive_rate_max: float,
+    negative_rate_max: float,
+    ramp_peak_factor: float,
+    dt: float,
+    rng: np.random.Generator,
+) -> float | None:
+    step_count = max(1, int(steps))
+    if int(direction) > 0:
+        room = max(float(hi) - float(current), 0.0)
+        delta_high = min(
+            float(max_delta) * float(cfg.plateau_max_fraction),
+            room,
+            float(positive_rate_max) * float(dt) * float(step_count) / float(ramp_peak_factor),
+        )
+        delta_low = min(float(max_delta) * float(cfg.plateau_min_fraction), delta_high)
+    else:
+        room = max(float(current) - float(lo), 0.0)
+        delta_high = min(
+            float(max_delta) * float(cfg.end_max_fraction),
+            room,
+            float(negative_rate_max) * float(dt) * float(step_count) / float(ramp_peak_factor),
+        )
+        delta_low = min(float(max_delta) * float(cfg.end_min_fraction), delta_high)
+    if not np.isfinite(delta_high) or delta_high <= 1.0e-6:
+        return None
+    delta_low = max(float(delta_low), 1.0e-6)
+    if delta_low > delta_high:
+        return None
+    return float(rng.uniform(delta_low, delta_high))
+
+
+def _monotone_ramp(start: float, end: float, steps: int, *, smooth: bool) -> np.ndarray:
+    n = max(1, int(steps))
+    t = np.linspace(0.0, 1.0, n + 1, dtype=float)
+    if smooth:
+        t = 0.5 - 0.5 * np.cos(np.pi * t)
+    return float(start) + (float(end) - float(start)) * t
+
+
+def _smooth_reference_corners(values: np.ndarray, *, smoothing_steps: int) -> np.ndarray:
+    width = max(0, int(smoothing_steps))
+    if width < 2 or values.size < 2 * width + 3:
+        return np.asarray(values, dtype=float)
+    out = np.asarray(values, dtype=float).copy()
+    # Light zero-phase smoothing with edge padding preserves the first value
+    # after we restore it in the caller and removes actuator-hostile corners.
+    w = width if width % 2 == 1 else width + 1
+    pad = w // 2
+    kernel_x = np.linspace(-np.pi, np.pi, w)
+    kernel = 0.5 + 0.5 * np.cos(kernel_x)
+    kernel = kernel / np.sum(kernel)
+    padded = np.pad(out, (pad, pad), mode="edge")
+    return np.convolve(padded, kernel, mode="valid")
+
+
+def _reference_signed_rate_ok(values: np.ndarray, *, max_positive_rate: float, max_negative_abs_rate: float, dt: float) -> bool:
+    rates = np.diff(np.asarray(values, dtype=float)) / max(float(dt), 1.0e-12)
+    if not np.all(np.isfinite(rates)):
+        return False
+    positive = rates[rates > 0.0]
+    negative = -rates[rates < 0.0]
+    positive_ok = positive.size == 0 or float(np.nanmax(positive)) <= float(max_positive_rate) * (1.0 + 1.0e-6)
+    negative_ok = negative.size == 0 or float(np.nanmax(negative)) <= float(max_negative_abs_rate) * (1.0 + 1.0e-6)
+    return bool(positive_ok and negative_ok)
 
 
 def _direction(value: float, *, atol: float = 1.0e-9) -> int:

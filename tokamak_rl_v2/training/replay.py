@@ -9,10 +9,12 @@ from torch import Tensor
 @dataclass(frozen=True, slots=True)
 class SequenceBatch:
     obs: Tensor
+    critic_obs: Tensor
     action: Tensor
     reward: Tensor
     discount: Tensor
     next_obs: Tensor
+    next_critic_obs: Tensor
     done: Tensor
     mask: Tensor
 
@@ -35,6 +37,7 @@ class FIFOSequenceReplay:
         obs_dim: int,
         action_dim: int,
         device: torch.device | str,
+        critic_obs_dim: int | None = None,
         capacity_steps: int | None = None,
     ) -> None:
         if capacity_episodes is None:
@@ -55,13 +58,16 @@ class FIFOSequenceReplay:
         if self.capacity_episodes < self.active_envs:
             raise ValueError("replay_capacity_episodes must be at least the active environment count")
         self.device = torch.device(device)
+        critic_dim = int(obs_dim if critic_obs_dim is None else critic_obs_dim)
 
         shape = (self.capacity_episodes, self.max_episode_steps)
         self.obs = torch.zeros((*shape, int(obs_dim)), dtype=torch.float32, device=self.device)
+        self.critic_obs = torch.zeros((*shape, critic_dim), dtype=torch.float32, device=self.device)
         self.action = torch.zeros((*shape, int(action_dim)), dtype=torch.float32, device=self.device)
         self.reward = torch.zeros(shape, dtype=torch.float32, device=self.device)
         self.discount = torch.zeros(shape, dtype=torch.float32, device=self.device)
         self.next_obs = torch.zeros((*shape, int(obs_dim)), dtype=torch.float32, device=self.device)
+        self.next_critic_obs = torch.zeros((*shape, critic_dim), dtype=torch.float32, device=self.device)
         self.done = torch.ones(shape, dtype=torch.bool, device=self.device)
         self.valid = torch.zeros(shape, dtype=torch.bool, device=self.device)
 
@@ -101,7 +107,19 @@ class FIFOSequenceReplay:
             self.active_generation[env_index] = self.generation
             protected.add(new_slot)
 
-    def add_batch(self, obs: Tensor, action: Tensor, reward: Tensor, discount: Tensor, next_obs: Tensor, done: Tensor, lane_indices: Tensor | list[int] | None = None) -> None:
+    def add_batch(
+        self,
+        obs: Tensor,
+        action: Tensor,
+        reward: Tensor,
+        discount: Tensor,
+        next_obs: Tensor,
+        done: Tensor,
+        lane_indices: Tensor | list[int] | None = None,
+        *,
+        critic_obs: Tensor | None = None,
+        next_critic_obs: Tensor | None = None,
+    ) -> None:
         B = int(obs.shape[0])
         if lane_indices is None:
             if B != self.active_envs:
@@ -113,6 +131,8 @@ class FIFOSequenceReplay:
                 raise ValueError("lane_indices length must match batch size")
             if torch.any((lanes < 0) | (lanes >= self.active_envs)):
                 raise ValueError("lane_indices contain an out-of-range replay lane")
+        critic_obs_t = obs if critic_obs is None else critic_obs
+        next_critic_obs_t = next_obs if next_critic_obs is None else next_critic_obs
         slots = self.active_slots[lanes]
         if bool(torch.any(slots < 0).item()):
             for lane in lanes[slots < 0].detach().cpu().tolist():
@@ -127,10 +147,12 @@ class FIFOSequenceReplay:
             positions = self.episode_lengths[slots]
 
         self.obs[slots, positions] = obs.detach()
+        self.critic_obs[slots, positions] = critic_obs_t.detach()
         self.action[slots, positions] = action.detach()
         self.reward[slots, positions] = reward.detach()
         self.discount[slots, positions] = discount.detach()
         self.next_obs[slots, positions] = next_obs.detach()
+        self.next_critic_obs[slots, positions] = next_critic_obs_t.detach()
         self.done[slots, positions] = done.detach()
         self.valid[slots, positions] = True
         self.episode_lengths[slots] += 1
@@ -165,10 +187,12 @@ class FIFOSequenceReplay:
         mask = self.valid[slots[:, None], idx].to(torch.float32)
         return SequenceBatch(
             obs=self.obs[slots[:, None], idx],
+            critic_obs=self.critic_obs[slots[:, None], idx],
             action=self.action[slots[:, None], idx],
             reward=self.reward[slots[:, None], idx],
             discount=self.discount[slots[:, None], idx],
             next_obs=self.next_obs[slots[:, None], idx],
+            next_critic_obs=self.next_critic_obs[slots[:, None], idx],
             done=self.done[slots[:, None], idx],
             mask=mask,
         )
@@ -195,10 +219,12 @@ class FIFOSequenceReplay:
             "max_episode_steps": self.max_episode_steps,
             "active_envs": self.active_envs,
             "obs": self.obs.detach().cpu(),
+            "critic_obs": self.critic_obs.detach().cpu(),
             "action": self.action.detach().cpu(),
             "reward": self.reward.detach().cpu(),
             "discount": self.discount.detach().cpu(),
             "next_obs": self.next_obs.detach().cpu(),
+            "next_critic_obs": self.next_critic_obs.detach().cpu(),
             "done": self.done.detach().cpu(),
             "valid": self.valid.detach().cpu(),
             "episode_lengths": self.episode_lengths.detach().cpu(),
@@ -219,6 +245,8 @@ class FIFOSequenceReplay:
             raise ValueError(f"replay state shape mismatch: expected {expected}, got {got}")
         for name in ("obs", "action", "reward", "discount", "next_obs", "done", "valid", "episode_lengths", "episode_closed", "episode_generation", "active_slots", "active_generation"):
             getattr(self, name).copy_(torch.as_tensor(state[name], device=self.device))
+        self.critic_obs.copy_(torch.as_tensor(state.get("critic_obs", state["obs"]), device=self.device))
+        self.next_critic_obs.copy_(torch.as_tensor(state.get("next_critic_obs", state["next_obs"]), device=self.device))
         self.write_episode = int(state["write_episode"])
         self.size = int(state["size"])
         self.completed_episodes = int(state["completed_episodes"])
@@ -257,10 +285,12 @@ class FIFOSequenceReplay:
         if previous_length > 0:
             self.size = max(0, int(self.size) - previous_length)
         self.obs[slot].zero_()
+        self.critic_obs[slot].zero_()
         self.action[slot].zero_()
         self.reward[slot].zero_()
         self.discount[slot].zero_()
         self.next_obs[slot].zero_()
+        self.next_critic_obs[slot].zero_()
         self.done[slot].fill_(True)
         self.valid[slot].zero_()
         self.episode_lengths[slot] = 0

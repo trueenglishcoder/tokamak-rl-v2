@@ -1,49 +1,173 @@
 # tokamak-rl-v2
 
-Magnetic-control training stack for `tokamak-sim` using the published TCV training structure where it applies to this simpler plant: feedforward stochastic actor, recurrent Q critic, Maximum a Posteriori Policy Optimisation, episode-aware sequence replay, target-reference observations, dense physical rewards, deterministic mean-policy export, and actor/learner execution.
+`tokamak-rl-v2` is the reinforcement-learning training stack that sits on top
+of `tokamak-sim`.
 
-The first production objective is T15 initial-boundary hold with segmented Ip tracking from replay-bounded handover-like initial conditions. The actor observation schema is `joint_state_v1`: current/target Ip, active currents and derivatives, full psi grid, reconstructed boundary radii, target radii, boundary-radii error, boundary-found flag, and configurable target preview.
+The maintained production path is intentionally narrow:
 
-## TCV-style Training Path
-
-The maintained path is a fixed-objective actor-critic pipeline:
-
-- many `tokamak-sim` environment copies collect closed-loop rollout trajectories;
-- trajectories are stored in episode-aware sequence replay;
-- a recurrent Q critic is trained from observed rewards and next-state targets;
-- a feedforward Gaussian actor is improved with MPO using critic-scored action samples;
-- deterministic evaluation uses the actor mean action on fixed seeds;
-- only the compact actor is exported for `tokamak-sim` controller rollout validation.
-
-The reward is part of the fixed training objective. It is treated as a physical cost signal for shape error, Ip tracking, current limits, derivative usage, action magnitude, and action smoothness.
-
-## Local Smoke
-
-```bash
-python scripts/train.py   --config configs/experiments/t15_static_boundary.yaml   --steps 1000   --num-envs 8   --device auto
+```text
+CSV initial-state resets
++ aggregate CSV reference limits
++ generated segmented_profile Ip targets
++ hold_reset_boundary
++ dense negative physical-cost reward
++ feedforward actor + recurrent critic + MPO + replay
++ deterministic actor export
++ full-episode actor eval + full-episode exported-controller validation
 ```
 
-For the paper-like policy path, use the gated pipeline. It runs reset sanity, no-control baseline, training, deterministic actor evaluation, MPO health gates, export validation, and a `LearnedMagneticController` rollout check:
+This repository does not own the plant physics. It owns the RL environment,
+reference generation, reward, replay, learner, training pipeline, export, and
+validation logic.
+
+## Production Entry Point
+
+The production config is:
+
+```text
+configs/experiments/t15_csv_initial_segmented_profile_boundary_mpo.yaml
+```
+
+The production entrypoint is:
+
+```text
+scripts/train_policy_pipeline.py
+```
+
+Production mode is strict:
+
+- it requires `sim.reset_source = csv_initial_states`
+- it requires `reference.ip.kind = segmented_profile`
+- it requires `reference.boundary.kind = hold_reset_boundary`
+- it rejects `--allow-failed-gates`
+- it rejects controller-rollout bypasses
+- it evaluates and validates on the full configured episode horizon
+
+The plain trainer CLI is still available for non-production experiments, but it
+refuses `production_mode=true` configs.
+
+## Setup
 
 ```bash
-python scripts/train_policy_pipeline.py \
-  --config configs/experiments/t15_hold_reset_boundary_ip_stage1_gpu.yaml \
-  --steps 10000 \
-  --num-envs 16 \
+cd ~/tokamak/tokamak-rl-v2
+python3 -m venv .venv
+. .venv/bin/activate
+python3 -m pip install -e ".[dev]"
+python3 -m pip install -e ../tokamak-sim
+```
+
+If you already use the simulator virtual environment, you can run tests through
+`../tokamak-sim/.venv/bin/python`.
+
+## Fast Local Checks
+
+```bash
+cd ~/tokamak/tokamak-rl-v2
+PYTHONPATH=.:../tokamak-sim ../tokamak-sim/.venv/bin/python -m pytest -q \
+  tests/test_production_cleanup.py \
+  tests/test_t15_csv_initial_states.py \
+  tests/test_t15_reference_limits.py
+```
+
+Core contracts:
+
+```bash
+cd ~/tokamak/tokamak-rl-v2
+PYTHONPATH=.:../tokamak-sim ../tokamak-sim/.venv/bin/python -m pytest -q tests/test_core_contracts.py
+```
+
+## Production Training
+
+Local launch:
+
+```bash
+cd ~/tokamak/tokamak-rl-v2
+
+PYTHONPATH=.:../tokamak-sim python3 scripts/train_policy_pipeline.py \
+  --config configs/experiments/t15_csv_initial_segmented_profile_boundary_mpo.yaml \
+  --output-dir outputs/t15_csv_initial_segmented_profile_boundary_mpo_local \
+  --steps 1000000 \
+  --num-envs 256 \
   --device cuda:0 \
   --sim-compute-backend gpu \
-  --sim-gpu-device cuda:0
+  --sim-gpu-device cuda:0 \
+  --wandb \
+  --wandb-project tokamak-rl-v2-local \
+  --wandb-name t15_csv_initial_segmented_profile_boundary_mpo_local
 ```
 
-## Maintained Server Jobs
-
-Use these jobs on the Slurm/enroot server:
+Slurm launch:
 
 ```bash
-sbatch jobs/train_t15_hold_reset_boundary_policy_8gpu.sbatch
-sbatch jobs/train_t15_static_boundary.sbatch
+cd /scratch/$USER/tokamak/tokamak-rl-v2
+sbatch jobs/train_t15_csv_initial_segmented_profile_boundary_mpo_1gpu.sbatch
 ```
 
-The repository should contain only fixed-objective training, evaluation, export, and controller-validation paths.
+That job writes to:
 
-Previous checkpoints produced before the MPO learner repair are intentionally incompatible and should not be resumed.
+```text
+outputs/t15_csv_initial_segmented_profile_boundary_mpo_1gpu_<jobid>
+slurm_logs/tokamak-rl-v2-csv-mpo-1gpu-<jobid>.out
+slurm_logs/tokamak-rl-v2-csv-mpo-1gpu-<jobid>.err
+```
+
+## Production Runtime Contract
+
+At runtime, training reads only processed artifacts:
+
+```text
+data/processed/t15_csv_initial_states.npz
+data/processed/t15_reference_limits.json
+```
+
+The environment does not read raw T15 CSV traces during rollout. Raw CSVs are
+used only by the offline builders that produce those processed artifacts.
+
+Boundary targets come from the simulator-found reset boundary. Ip targets are
+generated online as bounded `segmented_profile` programs that start at reset Ip,
+stay positive, stay inside aggregate limits, and obey signed ramp-rate limits.
+
+## Outputs
+
+A normal production run writes:
+
+```text
+config_snapshot.json
+losses.csv
+reward_components.csv
+eval_history.csv
+metrics.json
+policy_validation.json
+closed_loop_rollout_report.json
+exports/best_actor/
+exports/final_actor/
+checkpoints/                 optional
+```
+
+The final decision is in `policy_validation.json`. Physical success is based on
+full-episode actor behavior and full-episode exported-controller behavior, not
+on MPO diagnostic thresholds.
+
+## Manual Export
+
+Manual checkpoint export is supported through:
+
+```bash
+PYTHONPATH=.:../tokamak-sim python3 scripts/export_policy.py \
+  --checkpoint outputs/run/checkpoints/best.pt \
+  --out outputs/run/exports/manual_best_actor
+```
+
+Manual export accepts only checkpoints with the production actor schema:
+
+```text
+controller_state_v2
+```
+
+## More Detail
+
+- [Configuration](docs/configuration.md)
+- [Workflows](docs/workflows.md)
+- [Architecture](docs/architecture.md)
+- [Repository Layout](docs/repository-layout.md)
+- [Artifacts And Metrics](docs/artifacts-and-metrics.md)

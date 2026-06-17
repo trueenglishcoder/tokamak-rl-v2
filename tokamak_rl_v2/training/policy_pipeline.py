@@ -18,7 +18,7 @@ from tokamak_rl_v2.config.loader import _validate_experiment_config
 from tokamak_rl_v2.config.schema import ExperimentConfig
 from tokamak_rl_v2.env import TokamakMagneticControlEnv
 from tokamak_rl_v2.training.cli import _device_list
-from tokamak_rl_v2.training.trainer import Trainer
+from tokamak_rl_v2.training.trainer import Trainer, _eval_max_steps_for_config
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -29,100 +29,146 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("holdout_eval_seed_offset must differ from eval_seed_offset")
     cfg = _apply_overrides(load_experiment_config(args.config), args)
     _validate_experiment_config(cfg)
+    if bool(cfg.training.production_mode) and bool(args.skip_controller_rollout_gate):
+        raise ValueError("production_mode rejects --skip-controller-rollout-gate")
+    if bool(cfg.training.production_mode):
+        controller_rollout_steps = int(args.controller_rollout_steps)
+        if controller_rollout_steps not in (0, int(cfg.sim.max_episode_steps)):
+            raise ValueError("production_mode requires --controller-rollout-steps to be 0 or exactly sim.max_episode_steps")
     output_dir = Path(args.output_dir or cfg.training.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    if bool(cfg.training.production_mode) and bool(args.allow_failed_gates):
+        raise ValueError("production_mode rejects --allow-failed-gates")
     wandb_run = _start_wandb(args, cfg, output_dir=output_dir)
     gate_profile = _gate_profile_for_config(cfg)
+    production_mode = bool(cfg.training.production_mode)
     rank0 = _distributed_rank() == 0
     runtime_device = _rank_runtime_device(args.device or cfg.training.device, cfg)
     runtime_cfg = _rank_runtime_config(cfg, runtime_device)
     previous_signal_handlers = _install_shutdown_signal_handlers()
     try:
-        reset_report = run_reset_sanity(runtime_cfg, device=runtime_device, num_envs=args.num_envs)
-        if rank0:
-            _wandb_log(wandb_run, "pipeline/reset", reset_report, step=0)
-        reset_gate = reset_report["max_abs_boundary_radii_error_m"] <= float(args.reset_error_tolerance_m) and reset_report["boundary_found_mean"] >= float(args.min_boundary_found)
-        if not reset_gate:
+        artifact_failure = _preflight_artifact_failure(runtime_cfg)
+        if artifact_failure is not None:
             if rank0:
                 report = {
-                    "status": "failed_reset_sanity",
-                    "reset_sanity": reset_report,
-                    "gates": [{"name": "reset_sanity", "passed": False}],
-                }
-                _write_json(output_dir / "policy_validation.json", report)
-                _wandb_log(wandb_run, "pipeline", {"passed": 0.0, "failed_reset_sanity": 1.0}, step=0)
-            return 2 if not args.allow_failed_gates else 0
-
-        trainer = Trainer(cfg, steps=args.steps, num_envs=args.num_envs, device=args.device, output_dir=output_dir, wandb_run=wandb_run, resume_checkpoint=args.resume_checkpoint)
-        selection_seed_offset = int(args.eval_seed_offset)
-        holdout_seed_offset = int(args.holdout_eval_seed_offset)
-        baseline = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=int(cfg.training.eval_max_steps), policy="no_control", seed_offset=selection_seed_offset)
-        holdout_baseline = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=int(cfg.training.eval_max_steps), policy="no_control", seed_offset=holdout_seed_offset)
-        if rank0:
-            _write_baseline_report(
-                output_dir,
-                reset_sanity=reset_report,
-                no_control_selection=baseline,
-                no_control=holdout_baseline,
-                selection_seed_offset=selection_seed_offset,
-                holdout_seed_offset=holdout_seed_offset,
-            )
-            _wandb_log(wandb_run, "pipeline/no_control_selection", baseline, step=0)
-            _wandb_log(wandb_run, "pipeline/no_control_holdout", holdout_baseline, step=0)
-        baseline_difficulty = _baseline_difficulty_report(
-            holdout_baseline,
-            min_ip_error_a=float(gate_profile["min_baseline_ip_error_a"]),
-            min_ip_error_late_a=float(gate_profile["min_baseline_ip_error_late_a"]),
-        )
-        if rank0:
-            _wandb_log(wandb_run, "pipeline/no_control_difficulty", baseline_difficulty, step=0)
-        if bool(gate_profile["enforce_baseline_difficulty"]) and not bool(baseline_difficulty["passed"]):
-            if rank0:
-                report = {
-                    "status": "failed_baseline_difficulty",
+                    "status": artifact_failure["status"],
                     "config": str(Path(args.config).resolve()),
                     "output_dir": str(output_dir),
-                    "evaluation_seed_offsets": {
-                        "selection": selection_seed_offset,
-                        "holdout": holdout_seed_offset,
-                    },
-                    "reset_sanity": reset_report,
-                    "no_control_selection": baseline,
-                    "no_control": holdout_baseline,
-                    "baseline_difficulty": baseline_difficulty,
-                    "gates": [
-                        {
-                            "name": "baseline_difficulty",
-                            "passed": False,
-                            "value": {
-                                "ip_error_a": holdout_baseline.get("ip_error_a"),
-                                "ip_error_a_late": holdout_baseline.get("ip_error_a_late"),
-                            },
-                            "threshold": {
-                                "ip_error_a": f">= {float(gate_profile['min_baseline_ip_error_a']):g}",
-                                "ip_error_a_late": f">= {float(gate_profile['min_baseline_ip_error_late_a']):g}",
-                            },
-                        }
-                    ],
+                    "artifact_preflight": artifact_failure,
+                    "gates": [{"name": artifact_failure["name"], "passed": False, "value": artifact_failure["path"], "threshold": "exists"}],
                 }
                 _write_json(output_dir / "policy_validation.json", report)
-                _wandb_log(wandb_run, "pipeline", {"passed": 0.0, "failed_baseline_difficulty": 1.0}, step=0)
+                _wandb_log(wandb_run, "pipeline", {"passed": 0.0, artifact_failure["status"]: 1.0}, step=0)
             return 2 if not args.allow_failed_gates else 0
+
+        reset_report: dict[str, float] = {}
+        baseline: Mapping[str, float] = {}
+        holdout_baseline: Mapping[str, float] = {}
+        baseline_difficulty: dict[str, float] = {}
+        selection_seed_offset = int(args.eval_seed_offset)
+        holdout_seed_offset = int(args.holdout_eval_seed_offset)
+        if not production_mode:
+            reset_report = run_reset_sanity(runtime_cfg, device=runtime_device, num_envs=args.num_envs)
+            if rank0:
+                _wandb_log(wandb_run, "pipeline/reset", reset_report, step=0)
+            reset_gate = reset_report["max_abs_boundary_radii_error_m"] <= float(args.reset_error_tolerance_m) and reset_report["boundary_found_mean"] >= float(args.min_boundary_found)
+            if not reset_gate:
+                if rank0:
+                    report = {
+                        "status": "failed_reset_sanity",
+                        "reset_sanity": reset_report,
+                        "gates": [{"name": "reset_sanity", "passed": False}],
+                    }
+                    _write_json(output_dir / "policy_validation.json", report)
+                    _wandb_log(wandb_run, "pipeline", {"passed": 0.0, "failed_reset_sanity": 1.0}, step=0)
+                return 2 if not args.allow_failed_gates else 0
+
+        trainer = Trainer(cfg, steps=args.steps, num_envs=args.num_envs, device=args.device, output_dir=output_dir, wandb_run=wandb_run, resume_checkpoint=args.resume_checkpoint)
+        if not production_mode:
+            baseline = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=_eval_max_steps_for_config(cfg), policy="no_control", seed_offset=selection_seed_offset)
+            holdout_baseline = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=_eval_max_steps_for_config(cfg), policy="no_control", seed_offset=holdout_seed_offset)
+            if rank0:
+                _write_baseline_report(
+                    output_dir,
+                    reset_sanity=reset_report,
+                    no_control_selection=baseline,
+                    no_control=holdout_baseline,
+                    selection_seed_offset=selection_seed_offset,
+                    holdout_seed_offset=holdout_seed_offset,
+                )
+                _wandb_log(wandb_run, "pipeline/no_control_selection", baseline, step=0)
+                _wandb_log(wandb_run, "pipeline/no_control_holdout", holdout_baseline, step=0)
+            baseline_difficulty = _baseline_difficulty_report(
+                holdout_baseline,
+                min_ip_error_a=float(gate_profile["min_baseline_ip_error_a"]),
+                min_ip_error_late_a=float(gate_profile["min_baseline_ip_error_late_a"]),
+            )
+            if rank0:
+                _wandb_log(wandb_run, "pipeline/no_control_difficulty", baseline_difficulty, step=0)
+            if bool(gate_profile["enforce_baseline_difficulty"]) and not bool(baseline_difficulty["passed"]):
+                if rank0:
+                    report = {
+                        "status": "failed_baseline_difficulty",
+                        "config": str(Path(args.config).resolve()),
+                        "output_dir": str(output_dir),
+                        "evaluation_seed_offsets": {
+                            "selection": selection_seed_offset,
+                            "holdout": holdout_seed_offset,
+                        },
+                        "reset_sanity": reset_report,
+                        "no_control_selection": baseline,
+                        "no_control": holdout_baseline,
+                        "baseline_difficulty": baseline_difficulty,
+                        "gates": [
+                            {
+                                "name": "baseline_difficulty",
+                                "passed": False,
+                                "value": {
+                                    "ip_error_a": holdout_baseline.get("ip_error_a"),
+                                    "ip_error_a_late": holdout_baseline.get("ip_error_a_late"),
+                                },
+                                "threshold": {
+                                    "ip_error_a": f">= {float(gate_profile['min_baseline_ip_error_a']):g}",
+                                    "ip_error_a_late": f">= {float(gate_profile['min_baseline_ip_error_late_a']):g}",
+                                },
+                            }
+                        ],
+                    }
+                    _write_json(output_dir / "policy_validation.json", report)
+                    _wandb_log(wandb_run, "pipeline", {"passed": 0.0, "failed_baseline_difficulty": 1.0}, step=0)
+                return 2 if not args.allow_failed_gates else 0
         train_result = trainer.train()
         if cfg.training.distributed_mode == "local_replay" and not rank0:
             return 0
+        train_status = str(train_result.get("status", "completed")) if isinstance(train_result, Mapping) else "completed"
+        if train_status.startswith("failed_"):
+            if rank0:
+                report = {
+                    "status": train_status,
+                    "config": str(Path(args.config).resolve()),
+                    "output_dir": str(output_dir),
+                    "reset_sanity": reset_report,
+                    "no_control_selection": baseline,
+                    "no_control": holdout_baseline,
+                    "train_result": train_result,
+                    "gates": [{"name": train_status, "passed": False, "value": train_result.get("failure_details", {}) if isinstance(train_result, Mapping) else {}, "threshold": "training fail-fast must pass"}],
+                }
+                _write_json(output_dir / "policy_validation.json", report)
+                _wandb_log(wandb_run, "pipeline", {"passed": 0.0, train_status: 1.0}, step=_train_env_step(train_result, cfg))
+            return 2 if not args.allow_failed_gates else 0
 
         selected_checkpoint = _selected_checkpoint(output_dir)
         if selected_checkpoint is not None and selected_checkpoint.name == "best.pt":
             _load_actor_weights(trainer, selected_checkpoint)
         elif selected_checkpoint is None:
             trainer.restore_best_actor()
-        actor_eval = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=int(cfg.training.eval_max_steps), policy="actor", seed_offset=holdout_seed_offset)
+        actor_eval = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=_eval_max_steps_for_config(cfg), policy="actor", seed_offset=holdout_seed_offset)
         train_env_step = _train_env_step(train_result, cfg)
         _wandb_log(wandb_run, "pipeline/actor_eval_holdout", actor_eval, step=train_env_step)
         losses = summarize_training_losses(output_dir / "losses.csv")
         selected_export = _selected_export_dir(output_dir)
-        rollout_report = validate_exported_controller(selected_export, cfg, steps=int(args.controller_rollout_steps)) if selected_export is not None else {"status": "missing_export"}
+        controller_steps = int(args.controller_rollout_steps) if int(args.controller_rollout_steps) > 0 else int(cfg.sim.max_episode_steps)
+        rollout_report = validate_exported_controller(selected_export, cfg, steps=controller_steps) if selected_export is not None else {"status": "missing_export"}
 
         gate_report = evaluate_policy_gates(
             actor_eval=actor_eval,
@@ -145,6 +191,7 @@ def main(argv: list[str] | None = None) -> int:
             always_require_ip_improvement=bool(gate_profile["always_require_ip_improvement"]),
             min_policy_weight_extra=float(args.min_policy_weight_extra),
             min_sampled_q_spread=float(args.min_sampled_q_spread),
+            include_mpo_gates=not production_mode,
             require_controller_rollout=not bool(args.skip_controller_rollout_gate),
             controller_rollout=rollout_report,
             max_controller_shape_error_m=float(args.max_controller_shape_error_m),
@@ -277,6 +324,7 @@ def evaluate_policy_gates(
     always_require_ip_improvement: bool,
     min_policy_weight_extra: float,
     min_sampled_q_spread: float,
+    include_mpo_gates: bool,
     require_controller_rollout: bool,
     controller_rollout: Mapping[str, object],
     max_controller_shape_error_m: float,
@@ -377,21 +425,27 @@ def evaluate_policy_gates(
         threshold=f"mean >= {min_mean_episode_completion:g}, min >= {min_episode_completion:g}",
     )
 
-    policy_weight_max = _metric(tail_losses, "tail100.policy_weight_max")
-    uniform = 1.0 / max(int(action_samples), 1)
-    policy_weight_threshold = uniform + float(min_policy_weight_extra)
-    add("mpo_policy_weights_nonuniform", _finite(policy_weight_max) and policy_weight_max > policy_weight_threshold, value=policy_weight_max, threshold=f"> {policy_weight_threshold:g}")
+    if include_mpo_gates:
+        policy_weight_max = _metric(tail_losses, "tail100.policy_weight_max")
+        uniform = 1.0 / max(int(action_samples), 1)
+        policy_weight_threshold = uniform + float(min_policy_weight_extra)
+        add("mpo_policy_weights_nonuniform", _finite(policy_weight_max) and policy_weight_max > policy_weight_threshold, value=policy_weight_max, threshold=f"> {policy_weight_threshold:g}")
 
-    q_spread = _metric(tail_losses, "tail100.sampled_q_spread")
-    add("mpo_sampled_q_spread", _finite(q_spread) and q_spread >= min_sampled_q_spread, value=q_spread, threshold=f">= {min_sampled_q_spread:g}")
+        q_spread = _metric(tail_losses, "tail100.sampled_q_spread")
+        add("mpo_sampled_q_spread", _finite(q_spread) and q_spread >= min_sampled_q_spread, value=q_spread, threshold=f">= {min_sampled_q_spread:g}")
 
     if require_controller_rollout:
         status = str(controller_rollout.get("status", "missing"))
         add("controller_rollout", status == "ok", value=status, threshold="ok")
+        controller_mean_completion = _metric(controller_rollout, "mean_episode_completion")
+        controller_min_completion = _metric(controller_rollout, "min_episode_completion")
+        add("controller_episode_completion", status == "ok" and _finite(controller_mean_completion) and controller_mean_completion >= min_mean_episode_completion and _finite(controller_min_completion) and controller_min_completion >= min_episode_completion, value={"mean": controller_mean_completion, "min": controller_min_completion}, threshold=f"mean >= {min_mean_episode_completion:g}, min >= {min_episode_completion:g}")
         controller_boundary = _metric(controller_rollout, "boundary_found_mean")
-        add("controller_boundary_found", status == "ok" and _finite(controller_boundary) and controller_boundary >= min_boundary_found, value=controller_boundary, threshold=f">= {min_boundary_found:g}")
+        controller_boundary_late = _metric(controller_rollout, "boundary_found_late_min", default=controller_boundary)
+        add("controller_boundary_found", status == "ok" and _finite(controller_boundary) and controller_boundary >= min_boundary_found and _finite(controller_boundary_late) and controller_boundary_late >= min_boundary_found, value={"mean": controller_boundary, "late_min": controller_boundary_late}, threshold=f"mean/late >= {min_boundary_found:g}")
         controller_current = _metric(controller_rollout, "current_over_limit_a_max")
-        add("controller_current_limit", status == "ok" and _finite(controller_current) and controller_current <= max_current_over_limit_a, value=controller_current, threshold=f"<= {max_current_over_limit_a:g} A")
+        controller_current_late = _metric(controller_rollout, "current_over_limit_a_late_max", default=controller_current)
+        add("controller_current_limit", status == "ok" and _finite(controller_current) and controller_current <= max_current_over_limit_a and _finite(controller_current_late) and controller_current_late <= max_current_over_limit_a, value={"max": controller_current, "late_max": controller_current_late}, threshold=f"max/late <= {max_current_over_limit_a:g} A")
         controller_shape = _metric(controller_rollout, "shape_error_mean_m")
         controller_shape_late = _metric(controller_rollout, "shape_error_late_m", default=controller_shape)
         add("controller_shape_error", status == "ok" and _finite(controller_shape) and controller_shape <= max_controller_shape_error_m and _finite(controller_shape_late) and controller_shape_late <= max_controller_shape_error_m, value={"mean_m": controller_shape, "late_m": controller_shape_late}, threshold=f"mean/late <= {max_controller_shape_error_m:g} m")
@@ -460,81 +514,115 @@ def validate_exported_controller(export_dir: Path | None, config: ExperimentConf
         from tokamak_control.geometry.boundary import BoundaryNotFoundError, find_plasma_boundary_with_status
         from tokamak_control.geometry.coordinates import radii_from_polyline_ray_intersections
 
-        rollout_config = replace(config, sim=replace(config.sim, compute_backend="cpu", gpu_device="cuda:0"))
+        rollout_config = replace(config, sim=replace(config.sim, compute_backend="cpu", gpu_device="cuda:0", csv_initial_state_split="holdout"))
         env = TokamakMagneticControlEnv(rollout_config, batch_size=1, device="cpu", seed=int(config.training.seed) + 910000)
-        env.reset()
-        if env.reference is None:
-            raise RuntimeError("controller validation environment did not create references")
-        model = env._cpu_models[0]
         controller = LearnedMagneticController(export_dir=export_dir)
-        angles = np.asarray(env.angles, dtype=float)
-        center = (model.R0, model.Z0)
-        ref_ip = env.reference.ip[0].detach().cpu().numpy().astype(float)
-        ref_radii_series = env.reference.radii[0, :, : int(config.sim.angles)].detach().cpu().numpy().astype(float)
-        scenario = _ArrayReferenceScenario(
-            ip=ref_ip,
-            radii=ref_radii_series,
-            dt=float(model.t_step),
-        )
-
-        action_rms: list[float] = []
-        boundary_found: list[float] = []
-        shape_error: list[float] = []
-        ip_error: list[float] = []
-        current_over: list[float] = []
         current_limits = env.current_limits.detach().cpu().numpy().astype(float)
-        for _step in range(max(1, int(steps))):
-            ref_index = min(int(env.step_index[0].item()), ref_ip.shape[0] - 1)
-            ref_radii = np.nan_to_num(ref_radii_series[ref_index], nan=0.0, posinf=0.0, neginf=0.0)
-            ip_target = float(ref_ip[ref_index])
-            psi = model.compute_psi()
-            try:
-                poly, _level, _status = find_plasma_boundary_with_status(psi, model.grid, center, n_levels=80, limiter_shape=env.cfg.limiter_shape, boundary_mode=env.cfg.boundary_mode)
-                found = 1.0
-                radii = radii_from_polyline_ray_intersections(poly, center, angles)
-                shape_error.append(float(np.nanmean(np.abs(np.nan_to_num(radii) - ref_radii))))
-            except BoundaryNotFoundError:
-                poly = None
-                found = 0.0
-                shape_error.append(float(config.reward.boundary_missing_error_m))
-            ip_error.append(abs(float(model.state.Ip) - ip_target))
-            action = controller.compute_control(
-                model=model,
-                psi=psi,
-                boundary_poly=poly,
-                center=center,
-                measure_angles=angles,
-                ref_radii=ref_radii,
-                Ip_ref=ip_target,
-                scenario=scenario,
-                max_episode_steps=int(config.sim.max_episode_steps),
-            )
-            pfc_derivs = np.asarray(action.pfc_derivs, dtype=float)
-            sol_derivs = np.asarray(action.sol_derivs, dtype=float)
-            if not np.all(np.isfinite(pfc_derivs)) or not np.all(np.isfinite(sol_derivs)):
-                raise ValueError("controller emitted non-finite derivatives")
-            deriv = np.concatenate([pfc_derivs, sol_derivs])
-            action_rms.append(float(np.sqrt(np.mean(np.square(deriv)))) if deriv.size else 0.0)
-            boundary_found.append(found)
-            model.step(pfc_derivs, sol_derivs)
-            env.step_index += 1
-            currents = np.concatenate([np.asarray(model.state.pfc_currents, dtype=float), np.asarray(model.state.sol_currents, dtype=float)])
-            current_over.append(float(np.nanmax(np.maximum(np.abs(currents) - current_limits, 0.0))))
+        episode_count = max(1, int(config.training.eval_episodes))
+        step_count = max(1, int(steps))
+        action_rms_all: list[float] = []
+        completion: list[float] = []
+        boundary_found_all: list[float] = []
+        shape_error_all: list[float] = []
+        ip_error_all: list[float] = []
+        current_over_all: list[float] = []
+        boundary_late: list[float] = []
+        shape_late: list[float] = []
+        ip_late: list[float] = []
+        current_late: list[float] = []
+
+        for _episode in range(episode_count):
+            controller.reset()
+            env.reset()
+            if env.reference is None:
+                raise RuntimeError("controller validation environment did not create references")
+            model = env._cpu_models[0]
+            angles = np.asarray(env.angles, dtype=float)
+            center = (model.R0, model.Z0)
+            ref_ip = env.reference.ip[0].detach().cpu().numpy().astype(float)
+            ref_radii_series = env.reference.radii[0, :, : int(config.sim.angles)].detach().cpu().numpy().astype(float)
+            scenario = _ArrayReferenceScenario(ip=ref_ip, radii=ref_radii_series, dt=float(model.t_step))
+            first_failure_step: int | None = None
+            ep_boundary: list[float] = []
+            ep_shape: list[float] = []
+            ep_ip: list[float] = []
+            ep_current: list[float] = []
+            for step_index in range(step_count):
+                ref_index = min(step_index, ref_ip.shape[0] - 1)
+                ref_radii = np.nan_to_num(ref_radii_series[ref_index], nan=0.0, posinf=0.0, neginf=0.0)
+                ip_target = float(ref_ip[ref_index])
+                psi = model.compute_psi()
+                try:
+                    poly, _level, _status = find_plasma_boundary_with_status(psi, model.grid, center, n_levels=80, limiter_shape=env.cfg.limiter_shape, boundary_mode=env.cfg.boundary_mode)
+                    found = 1.0
+                    radii = radii_from_polyline_ray_intersections(poly, center, angles)
+                    shape = float(np.nanmean(np.abs(np.nan_to_num(radii) - ref_radii)))
+                except BoundaryNotFoundError:
+                    poly = None
+                    found = 0.0
+                    shape = float(config.reward.boundary_missing_error_m)
+                ip_err = abs(float(model.state.Ip) - ip_target)
+                action = controller.compute_control(
+                    model=model,
+                    psi=psi,
+                    boundary_poly=poly,
+                    center=center,
+                    measure_angles=angles,
+                    ref_radii=ref_radii,
+                    Ip_ref=ip_target,
+                    scenario=scenario,
+                    max_episode_steps=int(config.sim.max_episode_steps),
+                )
+                pfc_derivs = np.asarray(action.pfc_derivs, dtype=float)
+                sol_derivs = np.asarray(action.sol_derivs, dtype=float)
+                if not np.all(np.isfinite(pfc_derivs)) or not np.all(np.isfinite(sol_derivs)):
+                    raise ValueError("controller emitted non-finite derivatives")
+                deriv = np.concatenate([pfc_derivs, sol_derivs])
+                action_rms_all.append(float(np.sqrt(np.mean(np.square(deriv)))) if deriv.size else 0.0)
+                model.step(pfc_derivs, sol_derivs)
+                currents = np.concatenate([np.asarray(model.state.pfc_currents, dtype=float), np.asarray(model.state.sol_currents, dtype=float)])
+                current_over = float(np.nanmax(np.maximum(np.abs(currents) - current_limits, 0.0)))
+                if first_failure_step is None and (found < 0.5 or current_over > 0.0):
+                    first_failure_step = step_index + 1
+                ep_boundary.append(found)
+                ep_shape.append(shape)
+                ep_ip.append(ip_err)
+                ep_current.append(current_over)
+            if first_failure_step is None:
+                first_failure_step = step_count
+            completion.append(float(first_failure_step) / float(step_count))
+            late_start = max(0, int(0.8 * step_count))
+            boundary_found_all.extend(ep_boundary)
+            shape_error_all.extend(ep_shape)
+            ip_error_all.extend(ep_ip)
+            current_over_all.extend(ep_current)
+            boundary_late.extend(ep_boundary[late_start:])
+            shape_late.extend(ep_shape[late_start:])
+            ip_late.extend(ep_ip[late_start:])
+            current_late.extend(ep_current[late_start:])
+
+        completion_arr = np.asarray(completion, dtype=float)
         return {
             "status": "ok",
             "export_dir": str(export_dir),
-            "steps": int(max(1, int(steps))),
+            "episodes": int(episode_count),
+            "steps": int(step_count),
             "reference_kind": {
                 "boundary": str(config.reference.boundary.kind),
                 "ip": str(config.reference.ip.kind),
             },
-            "physical_derivative_rms": float(np.nanmean(np.asarray(action_rms, dtype=float))),
-            "boundary_found_mean": float(np.nanmean(np.asarray(boundary_found, dtype=float))),
-            "shape_error_mean_m": float(np.nanmean(np.asarray(shape_error, dtype=float))),
-            "shape_error_late_m": float(np.nanmean(np.asarray(shape_error[-max(1, len(shape_error) // 5) :], dtype=float))),
-            "ip_error_a": float(np.nanmean(np.asarray(ip_error, dtype=float))),
-            "ip_error_late_a": float(np.nanmean(np.asarray(ip_error[-max(1, len(ip_error) // 5) :], dtype=float))),
-            "current_over_limit_a_max": float(np.nanmax(np.asarray(current_over, dtype=float))) if current_over else 0.0,
+            "mean_episode_completion": float(np.nanmean(completion_arr)),
+            "min_episode_completion": float(np.nanmin(completion_arr)),
+            "physical_derivative_rms": float(np.nanmean(np.asarray(action_rms_all, dtype=float))),
+            "action_rms": float(np.nanmean(np.asarray(action_rms_all, dtype=float))),
+            "boundary_found_mean": float(np.nanmean(np.asarray(boundary_found_all, dtype=float))),
+            "boundary_found_late_min": float(np.nanmin(np.asarray(boundary_late, dtype=float))) if boundary_late else float("nan"),
+            "shape_error_mean_m": float(np.nanmean(np.asarray(shape_error_all, dtype=float))),
+            "shape_error_late_m": float(np.nanmean(np.asarray(shape_late, dtype=float))) if shape_late else float("nan"),
+            "ip_error_a": float(np.nanmean(np.asarray(ip_error_all, dtype=float))),
+            "ip_error_late_a": float(np.nanmean(np.asarray(ip_late, dtype=float))) if ip_late else float("nan"),
+            "current_over_limit_a_max": float(np.nanmax(np.asarray(current_over_all, dtype=float))) if current_over_all else 0.0,
+            "current_over_limit_a_late_max": float(np.nanmax(np.asarray(current_late, dtype=float))) if current_late else 0.0,
         }
     except Exception as exc:
         return {"status": "error", "export_dir": str(export_dir), "error": repr(exc)}
@@ -646,7 +734,7 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--max-controller-ip-error-a", type=float, default=40000.0)
     ap.add_argument("--min-policy-weight-extra", type=float, default=1.0e-4)
     ap.add_argument("--min-sampled-q-spread", type=float, default=1.0e-8)
-    ap.add_argument("--controller-rollout-steps", type=int, default=8)
+    ap.add_argument("--controller-rollout-steps", type=int, default=0)
     ap.add_argument("--skip-controller-rollout-gate", action="store_true")
     ap.add_argument("--allow-failed-gates", action="store_true")
     ap.add_argument("--wandb", action="store_true")
@@ -669,29 +757,29 @@ def _cap_training_intervals(cfg: ExperimentConfig) -> ExperimentConfig:
 
 
 def _gate_profile_for_config(cfg: ExperimentConfig) -> dict[str, float | bool | None]:
-    is_shot_family = cfg.sim.shot_fragments is not None and str(cfg.reference.ip.kind) == "shot_trapezoid_fragment"
-    if not is_shot_family:
+    is_production_csv = bool(cfg.training.production_mode) and str(cfg.sim.reset_source) == "csv_initial_states" and str(cfg.reference.ip.kind) == "segmented_profile"
+    if is_production_csv:
         return {
             "enforce_baseline_difficulty": False,
             "min_baseline_ip_error_a": 0.0,
             "min_baseline_ip_error_late_a": 0.0,
             "always_require_ip_improvement": False,
-            "max_ip_error_a": None,
-            "max_ip_error_late_a": None,
+            "max_ip_error_a": 25000.0,
+            "max_ip_error_late_a": 25000.0,
             "min_mean_episode_completion": 0.95,
-            "min_episode_completion": 0.95,
-            "max_controller_ip_error_a": 40000.0,
+            "min_episode_completion": 0.90,
+            "max_controller_ip_error_a": 25000.0,
         }
     return {
-        "enforce_baseline_difficulty": True,
-        "min_baseline_ip_error_a": 100000.0,
-        "min_baseline_ip_error_late_a": 100000.0,
-        "always_require_ip_improvement": True,
-        "max_ip_error_a": 25000.0,
-        "max_ip_error_late_a": 25000.0,
+        "enforce_baseline_difficulty": False,
+        "min_baseline_ip_error_a": 0.0,
+        "min_baseline_ip_error_late_a": 0.0,
+        "always_require_ip_improvement": False,
+        "max_ip_error_a": None,
+        "max_ip_error_late_a": None,
         "min_mean_episode_completion": 0.95,
-        "min_episode_completion": 0.90,
-        "max_controller_ip_error_a": 25000.0,
+        "min_episode_completion": 0.95,
+        "max_controller_ip_error_a": 40000.0,
     }
 
 
@@ -716,6 +804,97 @@ def _baseline_difficulty_report(
         "min_ip_error_a": float(min_ip_error_a),
         "min_ip_error_a_late": float(min_ip_error_late_a),
     }
+
+
+def _preflight_artifact_failure(cfg: ExperimentConfig) -> dict[str, object] | None:
+    if str(cfg.sim.reset_source) == "csv_initial_states":
+        path = cfg.sim.csv_initial_state_library
+        if path is None or not Path(path).exists():
+            return {"status": "failed_initial_state_library", "name": "initial_state_library", "path": "" if path is None else str(path)}
+        summary_path = Path(path).with_suffix(".json")
+        try:
+            _validate_initial_state_summary(summary_path)
+            from tokamak_rl_v2.env.t15_csv_initial_states import CsvInitialStateLibrary, validate_split_nonoverlap
+
+            with np.load(path, allow_pickle=False) as data:
+                expected_arrays = {"shot_id", "source_index", "time_s", "ip0", "pfc0", "sol0", "split"}
+                if set(data.files) != expected_arrays:
+                    raise ValueError(f"initial-state library arrays must be exactly {sorted(expected_arrays)}, got {sorted(data.files)}")
+                shot_id = np.asarray(data["shot_id"]).astype(str).reshape(-1)
+                time_s = np.asarray(data["time_s"], dtype=float).reshape(-1)
+                split = np.asarray(data["split"]).astype(str).reshape(-1)
+                n_pfc = int(np.asarray(data["pfc0"]).shape[1])
+                n_sol = int(np.asarray(data["sol0"]).shape[1])
+                ip0 = np.asarray(data["ip0"], dtype=float).reshape(-1)
+            episode_duration_s = float(cfg.sim.max_episode_steps) * float(cfg.reference.t_step)
+            validate_split_nonoverlap(shot_id, time_s, split, min_gap_s=episode_duration_s)
+            CsvInitialStateLibrary(path, n_pfc=n_pfc, n_sol=n_sol, split="train")
+            CsvInitialStateLibrary(path, n_pfc=n_pfc, n_sol=n_sol, split="holdout")
+        except Exception as exc:
+            return {"status": "failed_initial_state_library", "name": "initial_state_library", "path": str(path), "reason": repr(exc)}
+    else:
+        ip0 = np.asarray([], dtype=float)
+    if str(cfg.reference.ip.kind) == "segmented_profile":
+        path = cfg.reference.ip.limits_path
+        if path is None or not Path(path).exists():
+            return {"status": "failed_reference_limits", "name": "reference_limits", "path": "" if path is None else str(path)}
+        try:
+            _validate_reference_limits_summary(Path(path))
+            from tokamak_rl_v2.env.t15_reference_limits import load_reference_limits
+
+            limits = load_reference_limits(Path(path))
+            if ip0.size and (float(np.nanmin(ip0)) < float(limits.ip_p01_a) or float(np.nanmax(ip0)) > float(limits.ip_p99_a)):
+                raise ValueError("initial-state library contains reset Ip outside production reference bounds")
+        except Exception as exc:
+            return {"status": "failed_reference_limits", "name": "reference_limits", "path": str(path), "reason": repr(exc)}
+    return None
+
+
+def _validate_initial_state_summary(path: Path) -> None:
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("initial-state summary must be a JSON object")
+    required = {
+        "accepted_rows": 1000,
+        "train_rows": 1000,
+        "holdout_rows": 100,
+    }
+    for key, minimum in required.items():
+        value = int(raw.get(key, 0))
+        if value < minimum:
+            raise ValueError(f"{key} must be >= {minimum}, got {value}")
+    split_by_shot = raw.get("split_by_shot", {})
+    accepted_by_shot = raw.get("accepted_by_shot", {})
+    if not isinstance(split_by_shot, dict) or not isinstance(accepted_by_shot, dict) or not split_by_shot:
+        raise ValueError("initial-state summary must contain accepted_by_shot and split_by_shot")
+    for shot, accepted in accepted_by_shot.items():
+        counts = split_by_shot.get(str(shot), {})
+        if int(accepted) < 100 or int(counts.get("train", 0)) < 80 or int(counts.get("holdout", 0)) < 10:
+            raise ValueError(f"shot {shot} does not satisfy accepted/train/holdout split gates")
+
+
+def _validate_reference_limits_summary(path: Path) -> None:
+    from tokamak_rl_v2.env.t15_reference_limits import load_reference_limits
+
+    load_reference_limits.cache_clear()
+    limits = load_reference_limits(path)
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    for key in (
+        "ip_min_a",
+        "ip_max_a",
+        "ip_p01_a",
+        "ip_p99_a",
+        "positive_dipdt_p95_a_per_s",
+        "positive_dipdt_p99_a_per_s",
+        "negative_dipdt_abs_p95_a_per_s",
+        "negative_dipdt_abs_p99_a_per_s",
+        "shot_ids",
+        "sample_count",
+    ):
+        if key not in raw:
+            raise ValueError(f"reference limits missing {key}")
+    if limits.sample_count < 1000:
+        raise ValueError(f"reference limits sample_count must be >= 1000, got {limits.sample_count}")
 
 
 def _selected_checkpoint(output_dir: Path) -> Path | None:

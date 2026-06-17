@@ -121,14 +121,14 @@ class MaximumAPosterioriPolicyOptimiser:
 
     def _critic_update(self, batch: SequenceBatch) -> tuple[float, float, float]:
         mask = batch.mask.to(dtype=torch.float32)
-        q, _ = self.critic(batch.obs, batch.action, mask=mask)
+        q, _ = self.critic(batch.critic_obs, batch.action, mask=mask)
         with torch.no_grad():
             B, T, O = batch.next_obs.shape
             next_action = self.target_actor.deterministic(batch.next_obs.reshape(B * T, O)).reshape(B, T, -1)
             q_next = self.target_critic.evaluate_query_actions_with_history(
-                history_obs=batch.obs,
+                history_obs=batch.critic_obs,
                 history_action=batch.action,
-                query_obs=batch.next_obs,
+                query_obs=batch.next_critic_obs,
                 query_action=next_action,
                 mask=mask,
                 include_current_history=True,
@@ -155,7 +155,7 @@ class MaximumAPosterioriPolicyOptimiser:
             K = int(self.config.action_samples)
             raw = old.distribution.rsample((K,)).reshape(K, B, T, -1)
             sampled = torch.tanh(raw)
-            q_values = self._sampled_q_values(obs_seq, batch.action.detach(), sampled, mask=mask).detach()
+            q_values = self._sampled_q_values(batch.critic_obs.detach(), batch.action.detach(), sampled, mask=mask).detach()
             q_centered = q_values - torch.max(q_values, dim=0, keepdim=True).values
             eta = self._solve_e_step_temperature(q_centered, mask=mask, epsilon=float(self.config.mpo_epsilon))
             weights = torch.softmax(q_centered / eta, dim=0).detach()
@@ -289,16 +289,16 @@ class MaximumAPosterioriPolicyOptimiser:
         self.last_temperature.copy_(eta.to(dtype=self.last_temperature.dtype))
         return eta
 
-    def _sampled_q_values(self, obs: Tensor, history_action: Tensor, sampled_actions: Tensor, *, mask: Tensor | None = None) -> Tensor:
+    def _sampled_q_values(self, critic_obs: Tensor, history_action: Tensor, sampled_actions: Tensor, *, mask: Tensor | None = None) -> Tensor:
         """Evaluate sampled-action Q values using replay history hidden states."""
-        if obs.ndim != 3 or sampled_actions.ndim != 4:
-            raise ValueError("_sampled_q_values expects obs [B,T,O] and sampled_actions [K,B,T,A]")
-        if history_action.shape[:2] != obs.shape[:2]:
+        if critic_obs.ndim != 3 or sampled_actions.ndim != 4:
+            raise ValueError("_sampled_q_values expects critic_obs [B,T,O] and sampled_actions [K,B,T,A]")
+        if history_action.shape[:2] != critic_obs.shape[:2]:
             raise ValueError("history_action must have shape [B,T,A] matching obs")
         return self.critic.evaluate_query_actions_with_history(
-            history_obs=obs,
+            history_obs=critic_obs,
             history_action=history_action,
-            query_obs=obs,
+            query_obs=critic_obs,
             query_action=sampled_actions,
             mask=mask,
             include_current_history=False,

@@ -91,6 +91,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.num_envs is not None and int(args.num_envs) <= 0:
         raise ValueError("--num-envs must be positive")
     _validate_experiment_config(cfg)
+    if bool(cfg.training.production_mode):
+        raise ValueError("training.production_mode configs must be launched through scripts/train_policy_pipeline.py")
     wandb_run = None
     rank = int(os.environ.get("RANK", "0"))
     if args.wandb and args.wandb_mode != "disabled" and rank == 0:

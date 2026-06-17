@@ -23,7 +23,6 @@ from tokamak_rl_v2.config.schema import (
     Range,
     ReferenceConfig,
     RewardConfig,
-    ShotFragmentConfig,
     SimConfig,
     TrainingConfig,
 )
@@ -35,12 +34,15 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
     raw = json.loads(text) if yaml is None else yaml.safe_load(text)
     if not isinstance(raw, Mapping):
         raise ValueError(f"experiment config must be a mapping: {source}")
+    if "curriculum" in raw:
+        raise ValueError("curriculum is no longer supported")
+    _reject_unknown_keys(raw, _TOP_LEVEL_KEYS, prefix="config")
     base = source.parent
     sim = _sim(_mapping(raw.get("sim"), "sim"), base)
     cfg = ExperimentConfig(
         name=str(raw.get("name", source.stem)),
         sim=sim,
-        reference=_reference(_mapping(raw.get("reference"), "reference")),
+        reference=_reference(_mapping(raw.get("reference"), "reference"), base),
         observation=_observation(_mapping(raw.get("observation", {}), "observation")),
         reward=_reward(_mapping(raw.get("reward", {}), "reward")),
         randomization=_randomization(_mapping(raw.get("randomization", {}), "randomization")),
@@ -64,6 +66,12 @@ def _reject_stale_keys(raw: Mapping[str, Any], stale_keys: set[str], *, prefix: 
     stale = sorted(set(raw) & stale_keys)
     if stale:
         raise ValueError(f"{prefix} contains stale keys from the removed projection layer: " + ", ".join(stale))
+
+
+def _reject_unknown_keys(raw: Mapping[str, Any], allowed_keys: set[str], *, prefix: str) -> None:
+    unknown = sorted(set(raw) - set(allowed_keys))
+    if unknown:
+        raise ValueError(f"{prefix} contains unsupported keys: " + ", ".join(unknown))
 
 
 def _range(raw: Mapping[str, Any], name: str) -> Range:
@@ -121,37 +129,11 @@ def _current_safety_limits(raw: Mapping[str, Any] | None) -> CurrentSafetyLimits
     )
 
 
-def _shot_fragments(raw: Mapping[str, Any] | None) -> ShotFragmentConfig | None:
-    if not raw:
-        return None
-    removed = {
-        "pfc_currents",
-        "sol_currents",
-        "ip_a",
-        "ramp_up_s",
-        "hold_s",
-        "ramp_down_s",
-        "start_time_min_s",
-        "start_time_max_s",
-        "trim_end_s",
-    }
-    stale = sorted(set(raw) & removed)
-    if stale:
-        raise ValueError("sim.shot_fragments contains removed fields: " + ", ".join(stale))
-    allowed = {"kind", "shot_ids", "corner_smoothing_s"}
-    unknown = sorted(set(raw) - allowed)
-    if unknown:
-        raise ValueError("sim.shot_fragments contains unsupported keys: " + ", ".join(unknown))
-    kind = str(raw.get("kind", "idealized_t15_trapezoid"))
-    return ShotFragmentConfig(
-        kind=kind,
-        shot_ids=_string_tuple(raw.get("shot_ids"), "sim.shot_fragments.shot_ids"),
-        corner_smoothing_s=float(raw.get("corner_smoothing_s", 0.05)),
-    )
-
-
 def _sim(raw: Mapping[str, Any], base: Path) -> SimConfig:
     _reject_stale_keys(raw, _STALE_SIM_KEYS, prefix="sim")
+    if "shot_fragments" in raw:
+        raise ValueError("sim.shot_fragments is no longer supported")
+    _reject_unknown_keys(raw, set(SimConfig.__dataclass_fields__), prefix="sim")
     defaults = SimConfig(
         config_path=Path("unused"),
         initial_currents_path=None,
@@ -166,11 +148,13 @@ def _sim(raw: Mapping[str, Any], base: Path) -> SimConfig:
         angles=int(raw.get("angles", 32)),
         max_episode_steps=int(raw.get("max_episode_steps", 1000)),
         initial_ranges=_ranges(_mapping(raw.get("initial_ranges", {}), "initial_ranges")),
+        reset_source=str(raw.get("reset_source", "initial_ranges")),
+        csv_initial_state_library=None if raw.get("csv_initial_state_library") is None else _resolve(base, raw.get("csv_initial_state_library")),
+        csv_initial_state_split=str(raw.get("csv_initial_state_split", defaults.csv_initial_state_split)),
         current_safety_limits=_current_safety_limits(_mapping(raw.get("current_safety_limits", {}), "current_safety_limits")),
         current_limit_scale=float(raw.get("current_limit_scale", defaults.current_limit_scale)),
         derivative_limit_scale=float(raw.get("derivative_limit_scale", defaults.derivative_limit_scale)),
         action_scale=float(raw.get("action_scale", 1.0)),
-        shot_fragments=_shot_fragments(_mapping(raw.get("shot_fragments", {}), "shot_fragments")),
         terminate_on_boundary_loss=bool(raw.get("terminate_on_boundary_loss", True)),
         terminate_on_current_limit=bool(raw.get("terminate_on_current_limit", True)),
         current_termination_over_limit_a=float(raw.get("current_termination_over_limit_a", defaults.current_termination_over_limit_a)),
@@ -179,27 +163,59 @@ def _sim(raw: Mapping[str, Any], base: Path) -> SimConfig:
     )
 
 
-def _reference(raw: Mapping[str, Any]) -> ReferenceConfig:
+def _reference(raw: Mapping[str, Any], base: Path) -> ReferenceConfig:
+    _reject_unknown_keys(raw, set(ReferenceConfig.__dataclass_fields__), prefix="reference")
     ip_raw = _mapping(raw.get("ip"), "reference.ip")
     b_raw = _mapping(raw.get("boundary", {}), "reference.boundary")
+    if "corner_smoothing_s" in ip_raw:
+        raise ValueError("reference.ip.corner_smoothing_s is no longer supported; use reference.ip.smooth_ramps")
+    _reject_unknown_keys(ip_raw, set(IpReferenceConfig.__dataclass_fields__), prefix="reference.ip")
+    _reject_unknown_keys(b_raw, set(BoundaryReferenceConfig.__dataclass_fields__), prefix="reference.boundary")
+    kind = str(ip_raw.get("kind", "segmented")).lower()
+    if kind == "segmented_profile":
+        min_value = float(ip_raw.get("min", 1.0))
+        max_value = float(ip_raw.get("max", min_value))
+        rate_limit = float(ip_raw.get("rate_limit", 1.0))
+    else:
+        min_value = float(ip_raw["min"])
+        max_value = float(ip_raw["max"])
+        rate_limit = float(ip_raw["rate_limit"])
     return ReferenceConfig(
         duration_s=float(raw.get("duration_s", 1.0)),
         t_step=float(raw.get("t_step", 0.001)),
         theta_count=int(raw.get("theta_count", 512)),
         seed=int(raw.get("seed", 1)),
         ip=IpReferenceConfig(
-            min=float(ip_raw["min"]), max=float(ip_raw["max"]), rate_limit=float(ip_raw["rate_limit"]),
+            min=min_value,
+            max=max_value,
+            rate_limit=rate_limit,
             segment_min_steps=int(ip_raw.get("segment_min_steps", 50)), segment_max_steps=int(ip_raw.get("segment_max_steps", 300)),
             segment_count_min=int(ip_raw.get("segment_count_min", 3)), segment_count_max=int(ip_raw.get("segment_count_max", 8)),
             hold_probability=float(ip_raw.get("hold_probability", 0.35)),
-            kind=str(ip_raw.get("kind", "segmented")).lower(),
+            kind=kind,
+            limits_path=None if ip_raw.get("limits_path") is None else _resolve(base, ip_raw.get("limits_path")),
+            start_mode=str(ip_raw.get("start_mode", "reset_ip")),
+            plateau_min_fraction=float(ip_raw.get("plateau_min_fraction", 0.25)),
+            plateau_max_fraction=float(ip_raw.get("plateau_max_fraction", 1.0)),
+            end_min_fraction=float(ip_raw.get("end_min_fraction", 0.25)),
+            end_max_fraction=float(ip_raw.get("end_max_fraction", 1.0)),
+            ramp_up_rate_fraction=float(ip_raw.get("ramp_up_rate_fraction", 0.25)),
+            ramp_down_rate_fraction=float(ip_raw.get("ramp_down_rate_fraction", 0.25)),
+            hold_min_steps=int(ip_raw.get("hold_min_steps", 50)),
+            hold_max_steps=int(ip_raw.get("hold_max_steps", 250)),
+            final_hold_min_steps=int(ip_raw.get("final_hold_min_steps", 50)),
+            smooth_ramps=bool(ip_raw.get("smooth_ramps", True)),
+            max_delta_fraction=float(ip_raw.get("max_delta_fraction", 1.0)),
         ),
         boundary=BoundaryReferenceConfig(kind=str(b_raw.get("kind", "static_initial_parameters")), rate_limits={str(k): float(v) for k, v in _mapping(b_raw.get("rate_limits", {}), "rate_limits").items()}),
     )
 
 
 def _observation(raw: Mapping[str, Any]) -> ObservationConfig:
+    _reject_unknown_keys(raw, set(ObservationConfig.__dataclass_fields__), prefix="observation")
     return ObservationConfig(
+        actor_kind=str(raw.get("actor_kind", "controller_state_v2")),
+        critic_kind=str(raw.get("critic_kind", "privileged_training_state_v1")),
         target_preview_steps=int(raw.get("target_preview_steps", 8)),
         target_preview_stride=int(raw.get("target_preview_stride", 10)),
     )
@@ -218,11 +234,13 @@ def _reward(raw: Mapping[str, Any]) -> RewardConfig:
 
 
 def _randomization(raw: Mapping[str, Any]) -> RandomizationConfig:
+    _reject_unknown_keys(raw, set(RandomizationConfig.__dataclass_fields__), prefix="randomization")
     defaults = RandomizationConfig()
     return RandomizationConfig(**{field: type(getattr(defaults, field))(raw.get(field, getattr(defaults, field))) for field in RandomizationConfig.__dataclass_fields__})
 
 
 def _network(raw: Mapping[str, Any]) -> NetworkConfig:
+    _reject_unknown_keys(raw, set(NetworkConfig.__dataclass_fields__), prefix="network")
     defaults = NetworkConfig()
     return NetworkConfig(
         hidden_dim=int(raw.get("hidden_dim", defaults.hidden_dim)),
@@ -234,6 +252,7 @@ def _network(raw: Mapping[str, Any]) -> NetworkConfig:
 
 
 def _learner(raw: Mapping[str, Any]) -> LearnerConfig:
+    _reject_unknown_keys(raw, set(LearnerConfig.__dataclass_fields__), prefix="learner")
     defaults = LearnerConfig()
     values = {}
     for field in LearnerConfig.__dataclass_fields__:
@@ -243,6 +262,7 @@ def _learner(raw: Mapping[str, Any]) -> LearnerConfig:
 
 
 def _training(raw: Mapping[str, Any], base: Path) -> TrainingConfig:
+    _reject_unknown_keys(raw, set(TrainingConfig.__dataclass_fields__), prefix="training")
     defaults = TrainingConfig()
     return TrainingConfig(
         steps=int(raw.get("steps", defaults.steps)), num_envs=int(raw.get("num_envs", defaults.num_envs)),
@@ -256,6 +276,7 @@ def _training(raw: Mapping[str, Any], base: Path) -> TrainingConfig:
         actor_workers=int(raw.get("actor_workers", defaults.actor_workers)),
         actor_devices=_string_tuple(raw.get("actor_devices"), "training.actor_devices"),
         distributed_mode=str(raw.get("distributed_mode", defaults.distributed_mode)),
+        production_mode=bool(raw.get("production_mode", defaults.production_mode)),
     )
 
 
@@ -270,6 +291,16 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
         raise ValueError("sim.angles must be positive")
     if int(cfg.sim.max_episode_steps) <= 0:
         raise ValueError("sim.max_episode_steps must be positive")
+    if cfg.sim.reset_source not in {"initial_ranges", "csv_initial_states"}:
+        raise ValueError("sim.reset_source must be initial_ranges or csv_initial_states")
+    if cfg.sim.reset_source == "initial_ranges" and cfg.sim.initial_ranges is None:
+        raise ValueError("sim.reset_source=initial_ranges requires sim.initial_ranges")
+    if cfg.sim.reset_source == "csv_initial_states" and cfg.sim.csv_initial_state_library is None:
+        raise ValueError("sim.reset_source=csv_initial_states requires sim.csv_initial_state_library")
+    if cfg.sim.csv_initial_state_split not in {"train", "holdout", "all"}:
+        raise ValueError("sim.csv_initial_state_split must be train, holdout, or all")
+    if cfg.sim.reset_source == "csv_initial_states" and cfg.reference.boundary.kind != "hold_reset_boundary":
+        raise ValueError("sim.reset_source=csv_initial_states requires reference.boundary.kind=hold_reset_boundary")
     if cfg.sim.initial_ranges is not None:
         expected = {"R0", "Z0", "A0", "kappa", "delta"}
         missing = sorted(expected - set(cfg.sim.initial_ranges.boundary_parameters))
@@ -280,43 +311,58 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
     if int(cfg.reference.theta_count) <= 0:
         raise ValueError("reference.theta_count must be positive")
     ip = cfg.reference.ip
-    if not (math.isfinite(ip.min) and math.isfinite(ip.max) and ip.max >= ip.min):
-        raise ValueError("reference.ip min/max are invalid")
-    if ip.kind not in {"segmented", "hold_reset", "shot_trapezoid_fragment"}:
+    if ip.kind not in {"segmented", "hold_reset", "segmented_profile"}:
         raise ValueError("reference.ip.kind is unsupported")
-    if _range_crosses_or_touches_zero(float(ip.min), float(ip.max)):
-        raise ValueError("reference.ip range must stay strictly on one side of zero")
-    if cfg.sim.initial_ranges is not None:
-        initial_ip = cfg.sim.initial_ranges.ip
-        if _range_crosses_or_touches_zero(float(initial_ip.min), float(initial_ip.max)):
-            raise ValueError("sim.initial_ranges.ip must stay strictly on one side of zero")
-        if _sign(float(initial_ip.min)) != _sign(float(ip.min)):
-            raise ValueError("sim.initial_ranges.ip must have the same sign as reference.ip")
-    if ip.kind == "shot_trapezoid_fragment":
-        if cfg.sim.shot_fragments is None:
-            raise ValueError("reference.ip.kind=shot_trapezoid_fragment requires sim.shot_fragments")
-    elif cfg.sim.shot_fragments is not None:
-        raise ValueError("sim.shot_fragments requires reference.ip.kind=shot_trapezoid_fragment")
-    if cfg.sim.shot_fragments is not None:
-        shots = cfg.sim.shot_fragments
-        if shots.kind != "idealized_t15_trapezoid":
-            raise ValueError("sim.shot_fragments.kind is unsupported")
-        if not shots.shot_ids:
-            raise ValueError("sim.shot_fragments.shot_ids must not be empty")
-        if not math.isfinite(float(shots.corner_smoothing_s)) or float(shots.corner_smoothing_s) < 0.0:
-            raise ValueError("sim.shot_fragments.corner_smoothing_s must be finite and non-negative")
-    if not math.isfinite(ip.rate_limit) or ip.rate_limit < 0.0:
-        raise ValueError("reference.ip.rate_limit must be finite and non-negative")
-    if ip.segment_min_steps <= 0 or ip.segment_max_steps < ip.segment_min_steps:
-        raise ValueError("reference.ip segment step bounds are invalid")
-    if ip.segment_count_min <= 0 or ip.segment_count_max < ip.segment_count_min:
-        raise ValueError("reference.ip segment count bounds are invalid")
-    if not 0.0 <= float(ip.hold_probability) <= 1.0:
-        raise ValueError("reference.ip.hold_probability must be in [0, 1]")
+    if ip.kind != "segmented_profile":
+        if not (math.isfinite(ip.min) and math.isfinite(ip.max) and ip.max >= ip.min):
+            raise ValueError("reference.ip min/max are invalid")
+        if _range_crosses_or_touches_zero(float(ip.min), float(ip.max)):
+            raise ValueError("reference.ip range must stay strictly on one side of zero")
+        if cfg.sim.initial_ranges is not None:
+            initial_ip = cfg.sim.initial_ranges.ip
+            if _range_crosses_or_touches_zero(float(initial_ip.min), float(initial_ip.max)):
+                raise ValueError("sim.initial_ranges.ip must stay strictly on one side of zero")
+            if _sign(float(initial_ip.min)) != _sign(float(ip.min)):
+                raise ValueError("sim.initial_ranges.ip must have the same sign as reference.ip")
+    if ip.kind == "segmented_profile":
+        if ip.limits_path is None:
+            raise ValueError("reference.ip.kind=segmented_profile requires reference.ip.limits_path")
+        if ip.start_mode != "reset_ip":
+            raise ValueError("reference.ip.segmented_profile only supports start_mode=reset_ip")
+        if ip.segment_min_steps <= 0 or ip.segment_max_steps < ip.segment_min_steps:
+            raise ValueError("reference.ip segmented_profile step bounds are invalid")
+        if ip.segment_count_min < 2 or ip.segment_count_max < ip.segment_count_min:
+            raise ValueError("reference.ip segmented_profile count bounds are invalid")
+        for name in ("plateau_min_fraction", "plateau_max_fraction", "end_min_fraction", "end_max_fraction", "ramp_up_rate_fraction", "ramp_down_rate_fraction", "max_delta_fraction"):
+            value = float(getattr(ip, name))
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"reference.ip.{name} must be finite and positive")
+        if float(ip.plateau_min_fraction) > float(ip.plateau_max_fraction):
+            raise ValueError("reference.ip plateau fractions are invalid")
+        if float(ip.end_min_fraction) > float(ip.end_max_fraction):
+            raise ValueError("reference.ip end fractions are invalid")
+        for name in ("hold_min_steps", "hold_max_steps", "final_hold_min_steps"):
+            if int(getattr(ip, name)) < 0:
+                raise ValueError(f"reference.ip.{name} must be non-negative")
+        if int(ip.hold_max_steps) < int(ip.hold_min_steps):
+            raise ValueError("reference.ip hold step bounds are invalid")
+    if ip.kind != "segmented_profile":
+        if not math.isfinite(ip.rate_limit) or ip.rate_limit < 0.0:
+            raise ValueError("reference.ip.rate_limit must be finite and non-negative")
+        if ip.segment_min_steps <= 0 or ip.segment_max_steps < ip.segment_min_steps:
+            raise ValueError("reference.ip segment step bounds are invalid")
+        if ip.segment_count_min <= 0 or ip.segment_count_max < ip.segment_count_min:
+            raise ValueError("reference.ip segment count bounds are invalid")
+        if not 0.0 <= float(ip.hold_probability) <= 1.0:
+            raise ValueError("reference.ip.hold_probability must be in [0, 1]")
     if cfg.reference.boundary.kind not in {"static_initial_parameters", "rate_limited_parameters", "hold_reset_boundary"}:
         raise ValueError("reference.boundary.kind is unsupported")
     if cfg.reference.boundary.kind == "hold_reset_boundary" and int(cfg.reference.theta_count) != int(cfg.sim.angles):
         raise ValueError("reference.theta_count must equal sim.angles for hold_reset_boundary")
+    if cfg.observation.actor_kind != "controller_state_v2":
+        raise ValueError("observation.actor_kind must be controller_state_v2")
+    if cfg.observation.critic_kind != "privileged_training_state_v1":
+        raise ValueError("observation.critic_kind must be privileged_training_state_v1")
     for key, value in cfg.reference.boundary.rate_limits.items():
         if not math.isfinite(float(value)) or float(value) < 0.0:
             raise ValueError(f"reference.boundary.rate_limits.{key} must be finite and non-negative")
@@ -367,6 +413,18 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
         raise ValueError("training.distributed_mode must be single or local_replay")
     if training.distributed_mode == "local_replay" and int(training.actor_workers) != 1:
         raise ValueError("training.distributed_mode=local_replay does not use actor_workers; set actor_workers=1")
+    if training.production_mode:
+        if cfg.sim.reset_source != "csv_initial_states":
+            raise ValueError("training.production_mode requires sim.reset_source=csv_initial_states")
+        if cfg.sim.csv_initial_state_split != "train":
+            raise ValueError("training.production_mode requires sim.csv_initial_state_split=train")
+        if cfg.reference.ip.kind != "segmented_profile":
+            raise ValueError("training.production_mode requires reference.ip.kind=segmented_profile")
+        if cfg.reference.boundary.kind != "hold_reset_boundary":
+            raise ValueError("training.production_mode requires reference.boundary.kind=hold_reset_boundary")
+        expected_duration = float(cfg.sim.max_episode_steps) * float(cfg.reference.t_step)
+        if not math.isclose(float(cfg.reference.duration_s), expected_duration, rel_tol=0.0, abs_tol=1.0e-12):
+            raise ValueError("training.production_mode requires reference.duration_s == sim.max_episode_steps * reference.t_step")
 
 
 def _range_crosses_or_touches_zero(min_value: float, max_value: float) -> bool:
@@ -378,38 +436,42 @@ def _sign(value: float) -> int:
 
 
 def _validate_reward_config(reward: RewardConfig, *, prefix: str) -> None:
-    for name in ("shape_good_m", "shape_bad_m", "ip_good_a", "ip_bad_a", "current_good_fraction", "current_bad_fraction", "max_episode_reward", "reward_scale"):
+    for name in ("shape_mean_scale_m", "shape_max_scale_m", "ip_scale_a", "reward_scale"):
         value = float(getattr(reward, name))
         if not math.isfinite(value) or value <= 0.0:
             raise ValueError(f"{prefix}.{name} must be finite and positive")
-    if float(reward.shape_good_m) >= float(reward.shape_bad_m):
-        raise ValueError(f"{prefix}.shape_good_m must be less than shape_bad_m")
-    if float(reward.ip_good_a) >= float(reward.ip_bad_a):
-        raise ValueError(f"{prefix}.ip_good_a must be less than ip_bad_a")
-    if float(reward.current_good_fraction) >= float(reward.current_bad_fraction):
-        raise ValueError(f"{prefix}.current_good_fraction must be less than current_bad_fraction")
     if not math.isfinite(float(reward.boundary_missing_error_m)) or float(reward.boundary_missing_error_m) < 0.0:
         raise ValueError(f"{prefix}.boundary_missing_error_m must be finite and non-negative")
-    for name in ("shape_weight", "ip_weight", "current_weight"):
+    for name in ("shape_mean_weight", "shape_max_weight", "ip_weight", "current_weight", "derivative_weight", "action_weight", "delta_action_weight"):
         value = float(getattr(reward, name))
-        if not math.isfinite(value) or value <= 0.0:
-            raise ValueError(f"{prefix}.{name} must be finite and positive")
+        if not math.isfinite(value) or value < 0.0:
+            raise ValueError(f"{prefix}.{name} must be finite and non-negative")
+    for name in ("current_soft_fraction", "derivative_soft_fraction"):
+        value = float(getattr(reward, name))
+        if not math.isfinite(value) or not 0.0 <= value < 1.0:
+            raise ValueError(f"{prefix}.{name} must be finite and in [0, 1)")
     if not math.isfinite(float(reward.terminal_reward)):
         raise ValueError(f"{prefix}.terminal_reward must be finite")
 
 
 _STALE_REWARD_KEYS = {
     "mode",
+    "shape_good_m",
+    "shape_bad_m",
     "shape_max_bad_m",
+    "ip_good_a",
+    "ip_bad_a",
+    "shape_weight",
+    "current_good_fraction",
+    "current_bad_fraction",
+    "max_episode_reward",
     "current_good_a",
     "current_bad_a",
     "derivative_good",
     "derivative_bad",
     "action_penalty_weight",
     "delta_action_penalty_weight",
-    "derivative_weight",
     "action_saturation_weight",
-    "delta_action_weight",
     "projection_weight",
     "current_margin_start_fraction",
     "derivative_penalty_start_fraction",
@@ -430,3 +492,6 @@ _STALE_SIM_KEYS = {
     "action_projection_termination_rms",
     "terminate_on_action_projection",
 }
+
+
+_TOP_LEVEL_KEYS = set(ExperimentConfig.__dataclass_fields__)
