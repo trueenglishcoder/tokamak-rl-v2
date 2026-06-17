@@ -51,14 +51,14 @@ srun \
       exit 2
     fi
 
-    python3 - <<PYCUDA
+    python3 - <<\PYCUDA
 import torch
 print("cuda_available", torch.cuda.is_available())
 print("device_count", torch.cuda.device_count())
 print("devices", [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())])
 PYCUDA
 
-    GENERATED_CONFIG=$(python3 - <<PYCFG
+    GENERATED_CONFIG=$(python3 - <<\PYCFG
 import json
 import os
 import pathlib
@@ -80,7 +80,7 @@ run_name = os.environ.get("RUN_NAME") or f"t15_csv_reward_{variant_index}_{varia
 run_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", run_name)
 
 cfg = json.loads(base_path.read_text(encoding="utf-8"))
-cfg["name"] = f"{cfg.get('name', base_path.stem)}_{variant_name}"
+cfg["name"] = str(cfg.get("name", base_path.stem)) + "_" + variant_name
 cfg.setdefault("reward", {}).update(variant["reward"])
 
 generated_path = pathlib.Path("configs/experiments") / f".generated_{run_name}.json"
@@ -100,7 +100,7 @@ print(generated_path)
 PYCFG
 )
 
-    VARIANT_NAME=$(python3 - <<PYVAR
+    VARIANT_NAME=$(python3 - <<\PYVAR
 import json, os
 variant=json.loads(open(os.environ["REWARD_VARIANTS"], encoding="utf-8").read())["variants"][int(os.environ["VARIANT_INDEX"])]
 print(variant["name"])
