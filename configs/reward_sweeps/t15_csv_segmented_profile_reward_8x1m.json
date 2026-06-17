@@ -1,0 +1,110 @@
+{
+  "description": "One-million-step reward direction sweep for CSV-reset segmented-profile production RL.",
+  "base_config": "configs/experiments/t15_csv_initial_segmented_profile_boundary_mpo.yaml",
+  "variants": [
+    {
+      "name": "baseline",
+      "reward": {
+        "shape_mean_weight": 4.0,
+        "shape_max_weight": 1.0,
+        "ip_weight": 3.0,
+        "current_weight": 2.0,
+        "current_soft_fraction": 0.90,
+        "derivative_weight": 0.5,
+        "action_weight": 0.02,
+        "delta_action_weight": 0.05
+      }
+    },
+    {
+      "name": "current4_soft85",
+      "reward": {
+        "shape_mean_weight": 4.0,
+        "shape_max_weight": 1.0,
+        "ip_weight": 3.0,
+        "current_weight": 4.0,
+        "current_soft_fraction": 0.85,
+        "derivative_weight": 0.5,
+        "action_weight": 0.02,
+        "delta_action_weight": 0.05
+      }
+    },
+    {
+      "name": "current8_soft85",
+      "reward": {
+        "shape_mean_weight": 4.0,
+        "shape_max_weight": 1.0,
+        "ip_weight": 3.0,
+        "current_weight": 8.0,
+        "current_soft_fraction": 0.85,
+        "derivative_weight": 0.5,
+        "action_weight": 0.02,
+        "delta_action_weight": 0.05
+      }
+    },
+    {
+      "name": "current8_soft80",
+      "reward": {
+        "shape_mean_weight": 4.0,
+        "shape_max_weight": 1.0,
+        "ip_weight": 3.0,
+        "current_weight": 8.0,
+        "current_soft_fraction": 0.80,
+        "derivative_weight": 0.5,
+        "action_weight": 0.02,
+        "delta_action_weight": 0.05
+      }
+    },
+    {
+      "name": "current12_soft80",
+      "reward": {
+        "shape_mean_weight": 4.0,
+        "shape_max_weight": 1.0,
+        "ip_weight": 3.0,
+        "current_weight": 12.0,
+        "current_soft_fraction": 0.80,
+        "derivative_weight": 0.5,
+        "action_weight": 0.02,
+        "delta_action_weight": 0.05
+      }
+    },
+    {
+      "name": "shape6_current6",
+      "reward": {
+        "shape_mean_weight": 6.0,
+        "shape_max_weight": 2.0,
+        "ip_weight": 3.0,
+        "current_weight": 6.0,
+        "current_soft_fraction": 0.85,
+        "derivative_weight": 0.5,
+        "action_weight": 0.02,
+        "delta_action_weight": 0.05
+      }
+    },
+    {
+      "name": "ip4_current6",
+      "reward": {
+        "shape_mean_weight": 4.0,
+        "shape_max_weight": 1.0,
+        "ip_weight": 4.0,
+        "current_weight": 6.0,
+        "current_soft_fraction": 0.85,
+        "derivative_weight": 0.5,
+        "action_weight": 0.02,
+        "delta_action_weight": 0.05
+      }
+    },
+    {
+      "name": "smooth_current8",
+      "reward": {
+        "shape_mean_weight": 4.0,
+        "shape_max_weight": 1.0,
+        "ip_weight": 3.0,
+        "current_weight": 8.0,
+        "current_soft_fraction": 0.85,
+        "derivative_weight": 1.0,
+        "action_weight": 0.10,
+        "delta_action_weight": 0.10
+      }
+    }
+  ]
+}
