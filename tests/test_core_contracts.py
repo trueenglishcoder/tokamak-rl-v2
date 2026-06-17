@@ -1154,6 +1154,48 @@ def test_checkpoint_save_does_not_hide_single_env_state_errors(tmp_path: Path) -
         trainer._save_checkpoint("bad.pt", step=0, updates=0)
 
 
+def test_eval_checkpoint_retention_keeps_top_k_and_milestones(tmp_path: Path) -> None:
+    cfg = _small_config(tmp_path)
+    cfg = replace(
+        cfg,
+        training=replace(
+            cfg.training,
+            save_checkpoints=True,
+            eval_checkpoint_top_k=2,
+            milestone_checkpoint_interval_steps=4,
+        ),
+    )
+    trainer = Trainer(cfg, device="cpu", output_dir=tmp_path)
+    trainer.env.reset()
+
+    for step, score in ((2, 0.1), (4, -10.0), (6, 0.2), (8, -20.0), (10, 0.3)):
+        trainer._save_retained_eval_checkpoint(
+            step=step,
+            updates=step,
+            score=score,
+            eval_metrics={"selection_score": score, "mean_episode_completion": 1.0},
+        )
+
+    ckpt_dir = tmp_path / "checkpoints"
+    manifest = json.loads((ckpt_dir / "eval_checkpoints.json").read_text())
+    kept = {entry["path"] for entry in manifest["checkpoints"]}
+    assert kept == {
+        "eval_step_000000000004.pt",
+        "eval_step_000000000006.pt",
+        "eval_step_000000000008.pt",
+        "eval_step_000000000010.pt",
+    }
+    assert not (ckpt_dir / "eval_step_000000000002.pt").exists()
+    assert (ckpt_dir / "eval_step_000000000004.pt").exists()
+    assert (ckpt_dir / "eval_step_000000000008.pt").exists()
+
+    best = ckpt_dir / "best.pt"
+    assert best.exists() or best.is_symlink()
+    state = torch.load(best, map_location="cpu", weights_only=False)
+    assert state["training_state"]["step"] == 10
+    assert state["metadata"]["eval_score"] == 0.3
+
+
 def test_export_cli_rejects_malformed_checkpoint(tmp_path: Path) -> None:
     checkpoint = tmp_path / "malformed.pt"
     torch.save(["not", "a", "checkpoint"], checkpoint)

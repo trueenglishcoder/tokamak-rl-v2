@@ -180,6 +180,9 @@ class TrainingConfig:
     output_dir: Path = Path("outputs/run")
     save_checkpoints: bool = False
     checkpoint_interval_steps: int = 10000
+    eval_checkpoint_top_k: int = 0
+    milestone_checkpoint_interval_steps: int = 0
+    keep_latest_checkpoint: bool = True
     eval_interval_steps: int = 10000
     eval_episodes: int = 8
     eval_max_steps: int = 1000

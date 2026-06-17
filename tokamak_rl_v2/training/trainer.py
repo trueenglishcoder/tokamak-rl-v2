@@ -4,6 +4,7 @@ import csv
 import json
 import os
 import queue
+import shutil
 import time
 import random
 import sys
@@ -386,7 +387,7 @@ class Trainer:
                         reward_writer.writeheader()
                     reward_writer.writerow(flat); reward_f.flush()
                     self._wandb_log({f"reward/{k}": v for k, v in flat.items() if k != "step"}, step=step)
-                if self._save_checkpoints_enabled() and step % int(self.config.training.checkpoint_interval_steps) == 0:
+                if self._keep_latest_checkpoint_enabled() and step % int(self.config.training.checkpoint_interval_steps) == 0:
                     self._save_checkpoint("latest.pt", step=step, updates=updates)
                 if step % int(self.config.training.eval_interval_steps) == 0:
                     eval_metrics = self.evaluate_detailed(max_steps=_eval_max_steps_for_config(self.config), episodes=int(self.config.training.eval_episodes))
@@ -394,11 +395,13 @@ class Trainer:
                     eval_metrics["selection_score"] = score
                     _append_csv_row(eval_path, {"step": step, "env_step": step * self.num_envs, **eval_metrics})
                     self._wandb_log({f"eval/{k}": v for k, v in eval_metrics.items()}, step=step)
+                    if self._retained_eval_checkpoints_enabled():
+                        self._save_retained_eval_checkpoint(step=step, updates=updates, score=score, eval_metrics=eval_metrics)
                     if score > self.best_eval:
                         self.best_eval = score
                         self.best_eval_details = dict(eval_metrics)
                         self._remember_best_actor()
-                        if self._save_checkpoints_enabled():
+                        if self._save_checkpoints_enabled() and not self._retained_eval_checkpoints_enabled():
                             self._save_checkpoint("best.pt", step=step, updates=updates)
                         self._export("exports/best_actor", step=step, updates=updates, eval_score=score)
                 progress.update(1)
@@ -417,7 +420,7 @@ class Trainer:
             "total_training_envs": self.num_envs,
             "save_checkpoints": self._save_checkpoints_enabled(),
         }
-        if self._save_checkpoints_enabled():
+        if self._save_final_checkpoint_enabled():
             self._save_checkpoint("final.pt", step=self.steps, updates=updates)
         self._export("exports/final_actor", step=self.steps, updates=updates, eval_score=self.best_eval)
         metrics_path.write_text(json.dumps(final, indent=2), encoding="utf-8")
@@ -549,7 +552,7 @@ class Trainer:
                         loss_f.flush()
                         self._wandb_log({f"train/{k}": v for k, v in row.items() if k != "step"}, step=env_steps)
 
-                if self._rank0() and self._save_checkpoints_enabled() and env_steps - last_checkpoint_step >= max(int(self.config.training.checkpoint_interval_steps), 1):
+                if self._rank0() and self._keep_latest_checkpoint_enabled() and env_steps - last_checkpoint_step >= max(int(self.config.training.checkpoint_interval_steps), 1):
                     self._save_checkpoint("latest.pt", step=env_steps, updates=updates)
                     last_checkpoint_step = env_steps
 
@@ -559,11 +562,13 @@ class Trainer:
                     eval_metrics["selection_score"] = score
                     _append_csv_row(eval_path, {"step": env_steps, "env_step": env_steps, **eval_metrics})
                     self._wandb_log({f"eval/{k}": v for k, v in eval_metrics.items()}, step=env_steps)
+                    if self._retained_eval_checkpoints_enabled():
+                        self._save_retained_eval_checkpoint(step=env_steps, updates=updates, score=score, eval_metrics=eval_metrics)
                     if score > self.best_eval:
                         self.best_eval = score
                         self.best_eval_details = dict(eval_metrics)
                         self._remember_best_actor()
-                        if self._save_checkpoints_enabled():
+                        if self._save_checkpoints_enabled() and not self._retained_eval_checkpoints_enabled():
                             self._save_checkpoint("best.pt", step=env_steps, updates=updates)
                         self._export("exports/best_actor", step=env_steps, updates=updates, eval_score=score)
                     last_eval_step = env_steps
@@ -577,7 +582,7 @@ class Trainer:
                     handle.close()
 
         if self._rank0():
-            if self._save_checkpoints_enabled():
+            if self._save_final_checkpoint_enabled():
                 self._save_checkpoint("final.pt", step=env_steps, updates=updates)
             self._export("exports/final_actor", step=env_steps, updates=updates, eval_score=None)
             final = {
@@ -710,7 +715,7 @@ class Trainer:
                         if updates % 4 == 0:
                             broadcast_actor(param_queues, self.actor.state_dict())
                         break
-                    if self._save_checkpoints_enabled() and env_steps - last_checkpoint_step >= max(int(self.config.training.checkpoint_interval_steps), 1):
+                    if self._keep_latest_checkpoint_enabled() and env_steps - last_checkpoint_step >= max(int(self.config.training.checkpoint_interval_steps), 1):
                         self._save_checkpoint("latest.pt", step=env_steps, updates=updates)
                         last_checkpoint_step = env_steps
                     if env_steps - last_eval_step >= max(int(self.config.training.eval_interval_steps), 1):
@@ -719,11 +724,13 @@ class Trainer:
                         eval_metrics["selection_score"] = score
                         _append_csv_row(eval_path, {"step": env_steps, "env_step": env_steps, **eval_metrics})
                         self._wandb_log({f"eval/{k}": v for k, v in eval_metrics.items()}, step=env_steps)
+                        if self._retained_eval_checkpoints_enabled():
+                            self._save_retained_eval_checkpoint(step=env_steps, updates=updates, score=score, eval_metrics=eval_metrics)
                         if score > self.best_eval:
                             self.best_eval = score
                             self.best_eval_details = dict(eval_metrics)
                             self._remember_best_actor()
-                            if self._save_checkpoints_enabled():
+                            if self._save_checkpoints_enabled() and not self._retained_eval_checkpoints_enabled():
                                 self._save_checkpoint("best.pt", step=env_steps, updates=updates)
                             self._export("exports/best_actor", step=env_steps, updates=updates, eval_score=score)
                         last_eval_step = env_steps
@@ -732,7 +739,7 @@ class Trainer:
                 progress.close()
         finally:
             stop_actor_workers(processes, stop, param_queues=param_queues, data_q=data_q)
-        if self._save_checkpoints_enabled():
+        if self._save_final_checkpoint_enabled():
             self._save_checkpoint("final.pt", step=env_steps, updates=updates)
         self._export("exports/final_actor", step=env_steps, updates=updates, eval_score=None)
         final = {
@@ -993,7 +1000,140 @@ class Trainer:
     def _save_checkpoints_enabled(self) -> bool:
         return bool(self.config.training.save_checkpoints)
 
-    def _save_checkpoint(self, name: str, *, step: int, updates: int) -> Path:
+    def _keep_latest_checkpoint_enabled(self) -> bool:
+        return self._save_checkpoints_enabled() and bool(self.config.training.keep_latest_checkpoint)
+
+    def _retained_eval_checkpoints_enabled(self) -> bool:
+        return self._save_checkpoints_enabled() and (
+            int(self.config.training.eval_checkpoint_top_k) > 0
+            or int(self.config.training.milestone_checkpoint_interval_steps) > 0
+        )
+
+    def _save_final_checkpoint_enabled(self) -> bool:
+        return self._save_checkpoints_enabled() and not self._retained_eval_checkpoints_enabled()
+
+    def _save_retained_eval_checkpoint(self, *, step: int, updates: int, score: float, eval_metrics: Mapping[str, object]) -> Path:
+        ckpt_dir = self.output_dir / "checkpoints"
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_name = f"eval_step_{int(step):012d}.pt"
+        checkpoint_path = self._save_checkpoint(checkpoint_name, step=step, updates=updates, eval_score=score)
+        entry = {
+            "step": int(step),
+            "updates": int(updates),
+            "score": float(score),
+            "path": checkpoint_name,
+            "milestone": self._is_milestone_checkpoint_step(step),
+            "eval_metrics": self._json_scalar_mapping(eval_metrics),
+        }
+        entries_by_path: dict[str, dict[str, object]] = {}
+        for old in self._load_eval_checkpoint_index(ckpt_dir):
+            if not isinstance(old, dict):
+                continue
+            name = str(old.get("path", ""))
+            if not name:
+                continue
+            path = ckpt_dir / name
+            if path.exists() or path.is_symlink() or name == checkpoint_name:
+                entries_by_path[name] = dict(old)
+        entries_by_path[checkpoint_name] = entry
+
+        entries = list(entries_by_path.values())
+        top_k = max(0, int(self.config.training.eval_checkpoint_top_k))
+        top_entries = self._sort_checkpoint_entries(entries)[:top_k] if top_k > 0 else []
+        keep_names = {str(item["path"]) for item in top_entries}
+        keep_names.update(str(item["path"]) for item in entries if bool(item.get("milestone", False)))
+
+        retained: list[dict[str, object]] = []
+        for item in entries:
+            name = str(item.get("path", ""))
+            path = ckpt_dir / name
+            if name in keep_names:
+                if path.exists() or path.is_symlink():
+                    retained.append(item)
+                continue
+            if path.exists() or path.is_symlink():
+                path.unlink()
+
+        retained = self._sort_checkpoint_entries(retained)
+        best = retained[0] if retained else None
+        if best is not None:
+            self._point_best_checkpoint_at(ckpt_dir / str(best["path"]))
+        self._write_eval_checkpoint_index(ckpt_dir, retained)
+        return checkpoint_path
+
+    def _is_milestone_checkpoint_step(self, step: int) -> bool:
+        interval = int(self.config.training.milestone_checkpoint_interval_steps)
+        return interval > 0 and int(step) > 0 and int(step) % interval == 0
+
+    @staticmethod
+    def _load_eval_checkpoint_index(ckpt_dir: Path) -> list[dict[str, object]]:
+        path = ckpt_dir / "eval_checkpoints.json"
+        if not path.exists():
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return []
+        raw = data.get("checkpoints", []) if isinstance(data, dict) else []
+        return [dict(item) for item in raw if isinstance(item, dict)]
+
+    def _write_eval_checkpoint_index(self, ckpt_dir: Path, entries: list[dict[str, object]]) -> None:
+        path = ckpt_dir / "eval_checkpoints.json"
+        data = {
+            "top_k": int(self.config.training.eval_checkpoint_top_k),
+            "milestone_interval_steps": int(self.config.training.milestone_checkpoint_interval_steps),
+            "best_checkpoint": str(entries[0]["path"]) if entries else None,
+            "checkpoints": entries,
+        }
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _sort_checkpoint_entries(entries: list[dict[str, object]]) -> list[dict[str, object]]:
+        def key(item: dict[str, object]) -> tuple[int, float, int]:
+            raw_score = item.get("score", -float("inf"))
+            try:
+                score = float(raw_score)
+            except (TypeError, ValueError):
+                score = -float("inf")
+            finite = 1 if np.isfinite(score) else 0
+            if not finite:
+                score = -float("inf")
+            return finite, score, int(item.get("step", 0))
+
+        return sorted(entries, key=key, reverse=True)
+
+    @staticmethod
+    def _json_scalar_mapping(values: Mapping[str, object]) -> dict[str, object]:
+        out: dict[str, object] = {}
+        for key, value in values.items():
+            if isinstance(value, (str, bool)) or value is None:
+                out[str(key)] = value
+                continue
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            out[str(key)] = number if np.isfinite(number) else None
+        return out
+
+    @staticmethod
+    def _point_best_checkpoint_at(target: Path) -> None:
+        best = target.parent / "best.pt"
+        if best.exists() or best.is_symlink():
+            best.unlink()
+        try:
+            best.symlink_to(target.name)
+            return
+        except OSError:
+            pass
+        try:
+            os.link(target, best)
+            return
+        except OSError:
+            pass
+        shutil.copy2(target, best)
+
+    def _save_checkpoint(self, name: str, *, step: int, updates: int, eval_score: float | None = None) -> Path:
         ckpt_dir = self.output_dir / "checkpoints"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
         path = ckpt_dir / name
@@ -1029,7 +1169,7 @@ class Trainer:
             "best_eval_details": self.best_eval_details,
             "schema": self.schema,
             "normalization": self.normalization,
-            "metadata": self._metadata(step=step, updates=updates),
+            "metadata": self._metadata(step=step, updates=updates, eval_score=eval_score),
             "network": asdict(self.config.network),
             "learner": asdict(self.config.learner),
             "reward": asdict(self.config.reward),

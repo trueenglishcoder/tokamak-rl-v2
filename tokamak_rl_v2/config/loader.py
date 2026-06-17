@@ -270,6 +270,9 @@ def _training(raw: Mapping[str, Any], base: Path) -> TrainingConfig:
         output_dir=_resolve(base, raw.get("output_dir", defaults.output_dir)),
         save_checkpoints=bool(raw.get("save_checkpoints", defaults.save_checkpoints)),
         checkpoint_interval_steps=int(raw.get("checkpoint_interval_steps", defaults.checkpoint_interval_steps)),
+        eval_checkpoint_top_k=int(raw.get("eval_checkpoint_top_k", defaults.eval_checkpoint_top_k)),
+        milestone_checkpoint_interval_steps=int(raw.get("milestone_checkpoint_interval_steps", defaults.milestone_checkpoint_interval_steps)),
+        keep_latest_checkpoint=bool(raw.get("keep_latest_checkpoint", defaults.keep_latest_checkpoint)),
         eval_interval_steps=int(raw.get("eval_interval_steps", defaults.eval_interval_steps)),
         eval_episodes=int(raw.get("eval_episodes", defaults.eval_episodes)),
         eval_max_steps=int(raw.get("eval_max_steps", defaults.eval_max_steps)),
@@ -409,6 +412,9 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
     for name in ("steps", "num_envs", "checkpoint_interval_steps", "eval_interval_steps", "eval_episodes", "eval_max_steps", "actor_workers"):
         if int(getattr(training, name)) <= 0:
             raise ValueError(f"training.{name} must be positive")
+    for name in ("eval_checkpoint_top_k", "milestone_checkpoint_interval_steps"):
+        if int(getattr(training, name)) < 0:
+            raise ValueError(f"training.{name} must be non-negative")
     if training.distributed_mode not in {"single", "local_replay"}:
         raise ValueError("training.distributed_mode must be single or local_replay")
     if training.distributed_mode == "local_replay" and int(training.actor_workers) != 1:
