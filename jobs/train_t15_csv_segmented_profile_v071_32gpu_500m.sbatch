@@ -13,19 +13,49 @@ set -euo pipefail
 cd /scratch/$USER/tokamak/tokamak-rl-v2
 mkdir -p slurm_logs outputs data/processed
 
+export RUN_PRESET=${RUN_PRESET:-full}
 export POLICY_CONFIG=${POLICY_CONFIG:-configs/experiments/t15_csv_initial_segmented_profile_boundary_mpo.yaml}
-export TRAIN_ENV_STEPS=${TRAIN_ENV_STEPS:-500000000}
-export EVAL_ENV_STEPS=${EVAL_ENV_STEPS:-5000000}
-export MILESTONE_CHECKPOINT_ENV_STEPS=${MILESTONE_CHECKPOINT_ENV_STEPS:-10000000}
-export EVAL_CHECKPOINT_TOP_K=${EVAL_CHECKPOINT_TOP_K:-10}
-export CHECKPOINT_ENV_STEPS=${CHECKPOINT_ENV_STEPS:-5000000}
-export KEEP_LATEST_CHECKPOINT=${KEEP_LATEST_CHECKPOINT:-1}
-export SAVE_CHECKPOINTS=${SAVE_CHECKPOINTS:-1}
 export NUM_ENVS=${NUM_ENVS:-8192}
 export REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-512}
 export BATCH_SIZE=${BATCH_SIZE:-256}
 export ROLLOUT_CHUNK_LENGTH=${ROLLOUT_CHUNK_LENGTH:-64}
 export UPDATES_PER_ROLLOUT_CHUNK=${UPDATES_PER_ROLLOUT_CHUNK:-64}
+case "${RUN_PRESET}" in
+  full)
+    export TRAIN_ENV_STEPS=500000000
+    export EVAL_ENV_STEPS=5000000
+    export CHECKPOINT_ENV_STEPS=5000000
+    export MILESTONE_CHECKPOINT_ENV_STEPS=10000000
+    export EVAL_CHECKPOINT_TOP_K=10
+    export KEEP_LATEST_CHECKPOINT=1
+    export SAVE_CHECKPOINTS=1
+    export REWARD_SWEEP_MODE=0
+    ;;
+  smoke)
+    export TRAIN_ENV_STEPS=${TRAIN_ENV_STEPS:-10000000}
+    export EVAL_ENV_STEPS=${EVAL_ENV_STEPS:-5000000}
+    export CHECKPOINT_ENV_STEPS=${CHECKPOINT_ENV_STEPS:-5000000}
+    export MILESTONE_CHECKPOINT_ENV_STEPS=${MILESTONE_CHECKPOINT_ENV_STEPS:-5000000}
+    export EVAL_CHECKPOINT_TOP_K=${EVAL_CHECKPOINT_TOP_K:-2}
+    export KEEP_LATEST_CHECKPOINT=${KEEP_LATEST_CHECKPOINT:-1}
+    export SAVE_CHECKPOINTS=${SAVE_CHECKPOINTS:-1}
+    export REWARD_SWEEP_MODE=${REWARD_SWEEP_MODE:-1}
+    ;;
+  custom)
+    export TRAIN_ENV_STEPS=${TRAIN_ENV_STEPS:?RUN_PRESET=custom requires TRAIN_ENV_STEPS}
+    export EVAL_ENV_STEPS=${EVAL_ENV_STEPS:?RUN_PRESET=custom requires EVAL_ENV_STEPS}
+    export CHECKPOINT_ENV_STEPS=${CHECKPOINT_ENV_STEPS:-${EVAL_ENV_STEPS}}
+    export MILESTONE_CHECKPOINT_ENV_STEPS=${MILESTONE_CHECKPOINT_ENV_STEPS:-0}
+    export EVAL_CHECKPOINT_TOP_K=${EVAL_CHECKPOINT_TOP_K:-0}
+    export KEEP_LATEST_CHECKPOINT=${KEEP_LATEST_CHECKPOINT:-1}
+    export SAVE_CHECKPOINTS=${SAVE_CHECKPOINTS:-1}
+    export REWARD_SWEEP_MODE=${REWARD_SWEEP_MODE:-0}
+    ;;
+  *)
+    echo "RUN_PRESET must be full, smoke, or custom; got ${RUN_PRESET}" >&2
+    exit 2
+    ;;
+esac
 export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 export NNODES=${SLURM_JOB_NUM_NODES:-4}
 export WORLD_SIZE=$(( NNODES * GPUS_PER_NODE ))
@@ -33,7 +63,7 @@ export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=${MASTER_PORT:-29571}
 export TRAIN_OUTPUT=${TRAIN_OUTPUT:-outputs/t15_csv_segmented_profile_v071_32gpu_500m_${SLURM_JOB_ID:-manual}}
 export RUN_NAME=${RUN_NAME:-t15_csv_segmented_profile_v071_32gpu_500m_${SLURM_JOB_ID:-manual}}
-export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-tokamak-rl-v2-v071-32gpu-500m}
+export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-tokamak-rl-v2-v071-32gpu-${RUN_PRESET}}
 export WANDB_MODE=${WANDB_MODE:-online}
 export WANDB__SERVICE_WAIT=${WANDB__SERVICE_WAIT:-60}
 
@@ -117,6 +147,7 @@ cat > "${TRAIN_OUTPUT}/v071_reward.json" <<'JSON'
 JSON
 
 echo "job_id=${SLURM_JOB_ID:-manual}"
+echo "run_preset=${RUN_PRESET}"
 echo "node_list=${SLURM_JOB_NODELIST:-manual}"
 echo "master_addr=${MASTER_ADDR}"
 echo "master_port=${MASTER_PORT}"
@@ -140,9 +171,16 @@ echo "batch_size=${BATCH_SIZE}"
 echo "replay_capacity_episodes=${REPLAY_CAPACITY_EPISODES}"
 echo "rollout_chunk_length=${ROLLOUT_CHUNK_LENGTH}"
 echo "updates_per_rollout_chunk=${UPDATES_PER_ROLLOUT_CHUNK}"
+echo "reward_sweep_mode=${REWARD_SWEEP_MODE}"
 
 if (( NUM_ENVS % WORLD_SIZE != 0 )); then
   echo "NUM_ENVS=${NUM_ENVS} must be divisible by WORLD_SIZE=${WORLD_SIZE}" >&2
+  exit 2
+fi
+
+MIN_LEARNING_ENV_STEPS=$(( NUM_ENVS * 500 + NUM_ENVS ))
+if (( TRAIN_ENV_STEPS < MIN_LEARNING_ENV_STEPS )); then
+  echo "TRAIN_ENV_STEPS=${TRAIN_ENV_STEPS} is too short for 32-GPU learning; need at least ${MIN_LEARNING_ENV_STEPS} global env steps to complete one 500-step episode and create replay updates" >&2
   exit 2
 fi
 
@@ -166,7 +204,7 @@ srun \
     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     export PYTHONPATH=/workspace/tokamak-sim:/workspace/tokamak-rl-v2:${PYTHONPATH:-}
     export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
-    export NCCL_ASYNC_ERROR_HANDLING=1
+    export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
     export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
 
     cd /workspace/tokamak-rl-v2
@@ -189,6 +227,10 @@ PYCUDA
       CHECKPOINT_ARGS=(--save-checkpoints --checkpoint-interval-steps "${CHECKPOINT_ENV_STEPS}")
     else
       CHECKPOINT_ARGS=(--no-save-checkpoints)
+    fi
+    MODE_ARGS=()
+    if [[ "${REWARD_SWEEP_MODE}" == "1" || "${REWARD_SWEEP_MODE}" == "true" ]]; then
+      MODE_ARGS=(--reward-sweep-mode)
     fi
 
     python3 -m torch.distributed.run \
@@ -221,6 +263,7 @@ PYCUDA
         --eval-episodes 128 \
         --eval-max-steps 500 \
         --controller-rollout-steps 0 \
+        "${MODE_ARGS[@]}" \
         --wandb \
         --wandb-project "${WANDB_PROJECT_NAME}" \
         --wandb-name "${RUN_NAME}" \
