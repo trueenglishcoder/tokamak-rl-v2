@@ -11,16 +11,16 @@ set -euo pipefail
 
 cd /scratch/$USER/tokamak
 
-export POLICY_CONFIG=${POLICY_CONFIG:-configs/experiments/t15_csv_initial_segmented_profile_boundary_mpo.yaml}
-export TRAIN_ENV_STEPS=${TRAIN_ENV_STEPS:-1000000}
-export EVAL_ENV_STEPS=${EVAL_ENV_STEPS:-100000}
-export CHECKPOINT_ENV_STEPS=${CHECKPOINT_ENV_STEPS:-500000}
-export SAVE_CHECKPOINTS=${SAVE_CHECKPOINTS:-0}
-export NUM_ENVS=${NUM_ENVS:-256}
-export REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-512}
-export BATCH_SIZE=${BATCH_SIZE:-256}
-export ROLLOUT_CHUNK_LENGTH=${ROLLOUT_CHUNK_LENGTH:-64}
-export UPDATES_PER_ROLLOUT_CHUNK=${UPDATES_PER_ROLLOUT_CHUNK:-32}
+export POLICY_CONFIG=configs/experiments/t15_csv_initial_segmented_profile_boundary_mpo.yaml
+export TRAIN_ENV_STEPS=1000000
+export EVAL_ENV_STEPS=100000
+export CHECKPOINT_ENV_STEPS=500000
+export SAVE_CHECKPOINTS=0
+export NUM_ENVS=256
+export REPLAY_CAPACITY_EPISODES=512
+export BATCH_SIZE=256
+export ROLLOUT_CHUNK_LENGTH=64
+export UPDATES_PER_ROLLOUT_CHUNK=32
 export WANDB_MODE=${WANDB_MODE:-online}
 export WANDB__SERVICE_WAIT=${WANDB__SERVICE_WAIT:-30}
 
@@ -117,7 +117,8 @@ output_dir = sweep_root / folder
 generated_config = sweep_root / "generated_configs" / f"{folder}.json"
 
 cfg = json.loads(base_path.read_text(encoding="utf-8"))
-cfg["name"] = f"{cfg.get('name', base_path.stem)}_{folder}"
+base_name = cfg.get("name", base_path.stem)
+cfg["name"] = f"{base_name}_{folder}"
 cfg.setdefault("reward", {}).update(variant["reward"])
 cfg.setdefault("training", {})["steps"] = train_steps
 cfg["training"]["output_dir"] = str(output_dir)
@@ -141,7 +142,8 @@ generated_config.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 }, indent=2), encoding="utf-8")
 
 print(f"VARIANT_INDEX={variant_index}")
-print(f"VARIANT_NAME={variant['name']}")
+variant_name = variant["name"]
+print(f"VARIANT_NAME={variant_name}")
 print(f"VARIANT_FOLDER={folder}")
 print(f"GENERATED_CONFIG={generated_config}")
 print(f"TRAIN_OUTPUT={output_dir}")
