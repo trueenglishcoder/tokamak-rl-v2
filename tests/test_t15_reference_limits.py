@@ -23,6 +23,8 @@ def _limits(path: Path) -> Path:
                 "positive_dipdt_p99_a_per_s": 2.5e6,
                 "negative_dipdt_abs_p95_a_per_s": 2.0e6,
                 "negative_dipdt_abs_p99_a_per_s": 2.5e6,
+                "positive_ramp_mean_a_per_s": 1.0e6,
+                "negative_ramp_abs_mean_a_per_s": 1.0e6,
                 "sample_count": 1000,
                 "shot_count": 2,
                 "shot_ids": ["3856", "3857"],
@@ -41,6 +43,8 @@ def test_reference_limits_loader_validates_bounds(tmp_path: Path) -> None:
     assert limits.ip_min_a == 80000.0
     assert limits.ip_max_a == 420000.0
     assert limits.ip_width_a == 300000.0
+    assert limits.positive_ramp_mean_a_per_s == 1000000.0
+    assert limits.negative_ramp_abs_mean_a_per_s == 1000000.0
 
 
 def test_segmented_profile_starts_at_reset_ip_and_stays_positive(tmp_path: Path) -> None:
@@ -140,6 +144,55 @@ def test_segmented_profile_can_start_with_either_ramp_direction_under_fixed_seed
         assert nz.size > 0
         first_ramp_directions.add(1 if float(nz[0]) > 0.0 else -1)
     assert first_ramp_directions == {-1, 1}
+
+
+def test_segmented_profile_never_places_ramps_back_to_back(tmp_path: Path) -> None:
+    limits_path = _limits(tmp_path / "limits.json")
+    cfg = ReferenceConfig(
+        duration_s=0.5,
+        t_step=0.001,
+        theta_count=4,
+        seed=1,
+        ip=IpReferenceConfig(
+            kind="segmented_profile",
+            limits_path=limits_path,
+            segment_min_steps=30,
+            segment_max_steps=80,
+            segment_count_min=3,
+            segment_count_max=8,
+            hold_probability=0.0,
+            hold_min_steps=20,
+            hold_max_steps=80,
+            final_hold_min_steps=20,
+            max_delta_fraction=0.25,
+            smooth_ramps=False,
+        ),
+        boundary=BoundaryReferenceConfig(kind="hold_reset_boundary"),
+    )
+    points0 = np.zeros((1, 4, 2), dtype=float)
+    radii0 = np.ones((1, 4), dtype=float)
+    for seed in range(1, 65):
+        ref = generate_reference_batch(
+            config=cfg,
+            initial_ip=np.asarray([250000.0], dtype=float),
+            initial_parameters=np.zeros((1, 5), dtype=float),
+            steps=500,
+            device="cpu",
+            seed=seed,
+            initial_boundary_points=points0,
+            initial_boundary_radii=radii0,
+        )
+        diff = np.diff(ref.ip.detach().cpu().numpy()[0])
+        signs = np.sign(diff).astype(int)
+        signs[np.abs(diff) <= 1.0e-9] = 0
+        runs: list[int] = []
+        for sign in signs.tolist():
+            if not runs or int(sign) != runs[-1]:
+                runs.append(int(sign))
+        assert 0 in runs
+        assert any(sign != 0 for sign in runs)
+        for left, right in zip(runs, runs[1:], strict=False):
+            assert not (left != 0 and right != 0)
 
 
 def test_segmented_profile_rejects_impossible_nonzero_ramp_requests(tmp_path: Path) -> None:

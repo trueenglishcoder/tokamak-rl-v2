@@ -20,108 +20,103 @@ PASS2_12_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_pass2_
 RERUN_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_rerun_1gpu.sbatch"
 
 
-def test_reward_sweep_broad_manifest_has_96_unique_variants() -> None:
+def test_reward_sweep_broad_manifest_has_36_explicit_unique_variants() -> None:
     variants = build_variants("broad")
-    assert len(variants) == 96
-    assert [variant["index"] for variant in variants] == list(range(96))
-    assert len({variant["name"] for variant in variants}) == 96
-    assert len({variant["folder"] for variant in variants}) == 96
-    assert variants[0]["folder"] == "b000_s0_i0_c0_d0"
-    assert variants[-1]["folder"] == "b095_s3_i2_c3_d1"
-    current_by_regime = {
-        variant["current_regime"]: (
+    assert len(variants) == 36
+    assert [variant["index"] for variant in variants] == list(range(36))
+    assert len({variant["name"] for variant in variants}) == 36
+    assert len({variant["folder"] for variant in variants}) == 36
+    assert variants[0]["folder"] == "b000_s0_i0_a0"
+    assert variants[-1]["folder"] == "b035_s3_i2_a2"
+    actuator_by_regime = {
+        variant["actuator_regime"]: (
             variant["reward"]["current_weight"],
+            variant["reward"]["derivative_weight"],
             variant["reward"]["current_soft_fraction"],
             variant["reward"]["current_bad_fraction"],
-        )
-        for variant in variants
-        if variant["shape_regime"] == "s0" and variant["ip_regime"] == "i0" and variant["derivative_regime"] == "d0"
-    }
-    assert current_by_regime == {
-        "c0": (0.25, 1.0, 1.4),
-        "c1": (1.0, 1.0, 1.4),
-        "c2": (3.0, 1.0, 1.4),
-        "c3": (6.0, 1.0, 1.4),
-    }
-    derivative_by_regime = {
-        variant["derivative_regime"]: (
-            variant["reward"]["derivative_weight"],
             variant["reward"]["derivative_soft_fraction"],
             variant["reward"]["derivative_bad_fraction"],
             variant["reward"]["action_weight"],
             variant["reward"]["delta_action_weight"],
         )
         for variant in variants
-        if variant["shape_regime"] == "s0" and variant["ip_regime"] == "i0" and variant["current_regime"] == "c0"
+        if variant["shape_regime"] == "s0" and variant["ip_regime"] == "i0"
     }
-    assert derivative_by_regime == {
-        "d0": (0.05, 1.0, 1.4, 0.0, 0.0),
-        "d1": (0.5, 1.0, 1.4, 0.0, 0.0),
+    assert actuator_by_regime == {
+        "a0": (0.3, 0.3, 1.0, 1.4, 1.0, 1.4, 0.0, 0.0),
+        "a1": (1.2, 0.9, 1.0, 1.4, 1.0, 1.4, 0.0, 0.0),
+        "a2": (2.5, 1.5, 1.0, 1.4, 1.0, 1.4, 0.0, 0.0),
     }
 
 
-def test_reward_sweep_focused_manifest_has_192_unique_variants() -> None:
+def test_reward_sweep_focused_manifest_has_36_explicit_unique_variants() -> None:
     center = {
-        "shape_mean_weight": 8.0,
-        "shape_max_weight": 2.5,
-        "ip_weight": 4.0,
-        "current_weight": 3.0,
-        "derivative_weight": 0.5,
+        "shape_mean_weight": 2.25,
+        "shape_max_weight": 0.5625,
+        "ip_weight": 5.0,
+        "current_weight": 1.2,
+        "derivative_weight": 0.9,
     }
     variants = build_variants("focused", center)
-    assert len(variants) == 192
-    assert [variant["index"] for variant in variants] == list(range(192))
-    assert len({variant["folder"] for variant in variants}) == 192
-    assert variants[0]["folder"] == "f000_sf0_if0_cf0_df0"
-    assert variants[-1]["folder"] == "f191_sf3_if3_cf3_df2"
+    assert len(variants) == 36
+    assert [variant["index"] for variant in variants] == list(range(36))
+    assert len({variant["folder"] for variant in variants}) == 36
+    assert variants[0]["folder"] == "f000_sf0_if0_af0"
+    assert variants[-1]["folder"] == "f035_sf2_if2_af3"
+    assert variants[0]["reward"]["shape_mean_weight"] == 1.6875
+    assert variants[0]["reward"]["ip_weight"] == 4.0
+    assert variants[0]["reward"]["current_weight"] == 0.72
+    assert variants[0]["reward"]["derivative_weight"] == 0.63
     assert variants[0]["reward"]["current_soft_fraction"] == 1.0
     assert variants[0]["reward"]["current_bad_fraction"] == 1.4
     assert variants[0]["reward"]["action_weight"] == 0.0
     assert variants[0]["reward"]["delta_action_weight"] == 0.0
 
 
-def test_reward_sweep_budgeted_manifests_have_36_variants() -> None:
-    broad = build_manifest("broad", variant_budget=36, runs_per_array_task=3, array_task_count=12)
+def test_reward_sweep_manifests_have_36_variants_without_hidden_subsampling() -> None:
+    broad = build_manifest("broad", runs_per_array_task=3, array_task_count=12)
     assert broad["variant_count"] == 36
     assert broad["runs_per_array_task"] == 3
     assert broad["array_task_count"] == 12
     assert broad["variants"][0]["folder"].startswith("b000_")
     assert broad["variants"][-1]["folder"].startswith("b035_")
-    assert "source_index" in broad["variants"][1]
+    assert all("source_index" not in variant for variant in broad["variants"])
 
     center = {
-        "shape_mean_weight": 8.0,
-        "shape_max_weight": 2.5,
-        "ip_weight": 4.0,
-        "current_weight": 3.0,
-        "derivative_weight": 0.5,
+        "shape_mean_weight": 2.25,
+        "shape_max_weight": 0.5625,
+        "ip_weight": 5.0,
+        "current_weight": 1.2,
+        "derivative_weight": 0.9,
     }
-    focused = build_manifest("focused", center, variant_budget=36, runs_per_array_task=3, array_task_count=12)
+    focused = build_manifest("focused", center, runs_per_array_task=3, array_task_count=12)
     assert focused["variant_count"] == 36
     assert focused["runs_per_array_task"] == 3
     assert focused["array_task_count"] == 12
     assert focused["variants"][0]["folder"].startswith("f000_")
     assert focused["variants"][-1]["folder"].startswith("f035_")
+    assert all("source_index" not in variant for variant in focused["variants"])
 
 
 def test_reward_sweep_array_task_mappings() -> None:
     broad = build_variants("broad")
-    for task_id in range(96):
-        assert task_id == broad[task_id]["index"]
+    for task_id in range(12):
+        mapped = [task_id * 3 + local_index for local_index in range(3)]
+        assert mapped == [broad[index]["index"] for index in mapped]
     focused = build_variants(
         "focused",
         {
-            "shape_mean_weight": 8.0,
-            "shape_max_weight": 2.5,
-            "ip_weight": 4.0,
-            "current_weight": 3.0,
-            "derivative_weight": 0.5,
+            "shape_mean_weight": 2.25,
+            "shape_max_weight": 0.5625,
+            "ip_weight": 5.0,
+            "current_weight": 1.2,
+            "derivative_weight": 0.9,
         },
     )
-    for task_id in range(96):
-        mapped = [task_id * 2 + local_index for local_index in range(2)]
+    for task_id in range(12):
+        mapped = [task_id * 3 + local_index for local_index in range(3)]
         assert mapped == [focused[index]["index"] for index in mapped]
-    assert 95 * 2 + 1 == 191
+    assert 11 * 3 + 2 == 35
 
 
 def test_reward_sweep_job_blocks_stale_name_leaks() -> None:
@@ -322,7 +317,7 @@ def test_physical_sweep_regime_summary_groups_reward_axes(tmp_path: Path) -> Non
 
     regimes = list(csv.DictReader((out_dir / "physical_regime_summary.csv").open()))
     assert {row["regime_kind"] for row in regimes} == {"shape", "ip", "current", "derivative"}
-    assert any(row["regime_kind"] == "current" and row["regime"] == "c0" for row in regimes)
+    assert any(row["regime_kind"] == "current" and row["regime"] == "a0" for row in regimes)
 
 
 def test_reward_sweep_rerun_manifest_finds_missing_and_failed_variants(tmp_path: Path) -> None:

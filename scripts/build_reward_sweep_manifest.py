@@ -8,55 +8,41 @@ from typing import Any
 
 
 BROAD_SHAPE_REGIMES = [
-    {"id": "s0", "shape_mean_weight": 3.0, "shape_max_weight": 0.75},
-    {"id": "s1", "shape_mean_weight": 5.0, "shape_max_weight": 1.5},
-    {"id": "s2", "shape_mean_weight": 8.0, "shape_max_weight": 2.5},
-    {"id": "s3", "shape_mean_weight": 12.0, "shape_max_weight": 3.5},
+    {"id": "s0", "shape_mean_weight": 1.5, "shape_max_weight": 0.375},
+    {"id": "s1", "shape_mean_weight": 2.25, "shape_max_weight": 0.5625},
+    {"id": "s2", "shape_mean_weight": 3.5, "shape_max_weight": 0.9},
+    {"id": "s3", "shape_mean_weight": 5.5, "shape_max_weight": 1.5},
 ]
 
 BROAD_IP_REGIMES = [
-    {"id": "i0", "ip_weight": 2.0},
-    {"id": "i1", "ip_weight": 4.0},
-    {"id": "i2", "ip_weight": 6.0},
+    {"id": "i0", "ip_weight": 3.0},
+    {"id": "i1", "ip_weight": 5.0},
+    {"id": "i2", "ip_weight": 7.0},
 ]
 
-BROAD_CURRENT_REGIMES = [
-    {"id": "c0", "current_weight": 0.25},
-    {"id": "c1", "current_weight": 1.0},
-    {"id": "c2", "current_weight": 3.0},
-    {"id": "c3", "current_weight": 6.0},
-]
-
-BROAD_DERIVATIVE_REGIMES = [
-    {"id": "d0", "derivative_weight": 0.05},
-    {"id": "d1", "derivative_weight": 0.5},
+BROAD_ACTUATOR_REGIMES = [
+    {"id": "a0", "current_weight": 0.3, "derivative_weight": 0.3},
+    {"id": "a1", "current_weight": 1.2, "derivative_weight": 0.9},
+    {"id": "a2", "current_weight": 2.5, "derivative_weight": 1.5},
 ]
 
 FOCUS_SHAPE_FACTORS = [
     {"id": "sf0", "factor": 0.75},
-    {"id": "sf1", "factor": 0.90},
-    {"id": "sf2", "factor": 1.10},
-    {"id": "sf3", "factor": 1.30},
+    {"id": "sf1", "factor": 1.00},
+    {"id": "sf2", "factor": 1.25},
 ]
 
 FOCUS_IP_FACTORS = [
-    {"id": "if0", "factor": 0.75},
-    {"id": "if1", "factor": 0.90},
-    {"id": "if2", "factor": 1.10},
-    {"id": "if3", "factor": 1.30},
+    {"id": "if0", "factor": 0.80},
+    {"id": "if1", "factor": 1.00},
+    {"id": "if2", "factor": 1.20},
 ]
 
-FOCUS_CURRENT_FACTORS = [
-    {"id": "cf0", "factor": 0.50},
-    {"id": "cf1", "factor": 0.80},
-    {"id": "cf2", "factor": 1.20},
-    {"id": "cf3", "factor": 1.80},
-]
-
-FOCUS_DERIVATIVE_FACTORS = [
-    {"id": "df0", "factor": 0.50},
-    {"id": "df1", "factor": 1.00},
-    {"id": "df2", "factor": 1.80},
+FOCUS_ACTUATOR_FACTORS = [
+    {"id": "af0", "current_factor": 0.60, "derivative_factor": 0.70},
+    {"id": "af1", "current_factor": 1.00, "derivative_factor": 1.00},
+    {"id": "af2", "current_factor": 1.60, "derivative_factor": 1.40},
+    {"id": "af3", "current_factor": 2.20, "derivative_factor": 1.80},
 ]
 
 FIXED_REWARD = {
@@ -110,30 +96,30 @@ def build_broad_variants() -> list[dict[str, Any]]:
     index = 0
     for shape in BROAD_SHAPE_REGIMES:
         for ip in BROAD_IP_REGIMES:
-            for current in BROAD_CURRENT_REGIMES:
-                for derivative in BROAD_DERIVATIVE_REGIMES:
-                    name = f"{shape['id']}_{ip['id']}_{current['id']}_{derivative['id']}"
-                    reward = {
-                        **FIXED_REWARD,
-                        "shape_mean_weight": shape["shape_mean_weight"],
-                        "shape_max_weight": shape["shape_max_weight"],
-                        "ip_weight": ip["ip_weight"],
-                        "current_weight": current["current_weight"],
-                        "derivative_weight": derivative["derivative_weight"],
-                    }
-                    variants.append(
-                        _variant(
-                            index=index,
-                            prefix="b",
-                            name=name,
-                            shape_regime=str(shape["id"]),
-                            ip_regime=str(ip["id"]),
-                            current_regime=str(current["id"]),
-                            derivative_regime=str(derivative["id"]),
-                            reward=reward,
-                        )
+            for actuator in BROAD_ACTUATOR_REGIMES:
+                name = f"{shape['id']}_{ip['id']}_{actuator['id']}"
+                reward = {
+                    **FIXED_REWARD,
+                    "shape_mean_weight": shape["shape_mean_weight"],
+                    "shape_max_weight": shape["shape_max_weight"],
+                    "ip_weight": ip["ip_weight"],
+                    "current_weight": actuator["current_weight"],
+                    "derivative_weight": actuator["derivative_weight"],
+                }
+                variants.append(
+                    _variant(
+                        index=index,
+                        prefix="b",
+                        name=name,
+                        shape_regime=str(shape["id"]),
+                        ip_regime=str(ip["id"]),
+                        current_regime=str(actuator["id"]),
+                        derivative_regime=str(actuator["id"]),
+                        reward=reward,
+                        extra={"actuator_regime": actuator["id"]},
                     )
-                    index += 1
+                )
+                index += 1
     return variants
 
 
@@ -176,36 +162,36 @@ def build_focused_variants(center_reward: dict[str, float]) -> list[dict[str, An
     index = 0
     for shape in FOCUS_SHAPE_FACTORS:
         for ip in FOCUS_IP_FACTORS:
-            for current in FOCUS_CURRENT_FACTORS:
-                for derivative in FOCUS_DERIVATIVE_FACTORS:
-                    name = f"{shape['id']}_{ip['id']}_{current['id']}_{derivative['id']}"
-                    reward = {
-                        **FIXED_REWARD,
-                        "shape_mean_weight": _rounded(center_reward["shape_mean_weight"] * float(shape["factor"])),
-                        "shape_max_weight": _rounded(center_reward["shape_max_weight"] * float(shape["factor"])),
-                        "ip_weight": _rounded(center_reward["ip_weight"] * float(ip["factor"])),
-                        "current_weight": _rounded(center_reward["current_weight"] * float(current["factor"])),
-                        "derivative_weight": _rounded(center_reward["derivative_weight"] * float(derivative["factor"])),
-                    }
-                    variants.append(
-                        _variant(
-                            index=index,
-                            prefix="f",
-                            name=name,
-                            shape_regime=str(shape["id"]),
-                            ip_regime=str(ip["id"]),
-                            current_regime=str(current["id"]),
-                            derivative_regime=str(derivative["id"]),
-                            reward=reward,
-                            extra={
-                                "shape_factor": shape["factor"],
-                                "ip_factor": ip["factor"],
-                                "current_factor": current["factor"],
-                                "derivative_factor": derivative["factor"],
-                            },
-                        )
+            for actuator in FOCUS_ACTUATOR_FACTORS:
+                name = f"{shape['id']}_{ip['id']}_{actuator['id']}"
+                reward = {
+                    **FIXED_REWARD,
+                    "shape_mean_weight": _rounded(center_reward["shape_mean_weight"] * float(shape["factor"])),
+                    "shape_max_weight": _rounded(center_reward["shape_max_weight"] * float(shape["factor"])),
+                    "ip_weight": _rounded(center_reward["ip_weight"] * float(ip["factor"])),
+                    "current_weight": _rounded(center_reward["current_weight"] * float(actuator["current_factor"])),
+                    "derivative_weight": _rounded(center_reward["derivative_weight"] * float(actuator["derivative_factor"])),
+                }
+                variants.append(
+                    _variant(
+                        index=index,
+                        prefix="f",
+                        name=name,
+                        shape_regime=str(shape["id"]),
+                        ip_regime=str(ip["id"]),
+                        current_regime=str(actuator["id"]),
+                        derivative_regime=str(actuator["id"]),
+                        reward=reward,
+                        extra={
+                            "actuator_regime": actuator["id"],
+                            "shape_factor": shape["factor"],
+                            "ip_factor": ip["factor"],
+                            "current_factor": actuator["current_factor"],
+                            "derivative_factor": actuator["derivative_factor"],
+                        },
                     )
-                    index += 1
+                )
+                index += 1
     return variants
 
 
@@ -252,7 +238,7 @@ def build_manifest(
     array_task_count: int | None = None,
 ) -> dict[str, Any]:
     variants = build_variants(sweep_pass=sweep_pass, center_reward=center_reward, variant_budget=variant_budget)
-    runs_per_task = int(runs_per_array_task if runs_per_array_task is not None else (1 if sweep_pass == "broad" else 2))
+    runs_per_task = int(runs_per_array_task if runs_per_array_task is not None else 3)
     if runs_per_task <= 0:
         raise ValueError("runs_per_array_task must be positive")
     if array_task_count is None:
@@ -277,8 +263,7 @@ def build_manifest(
             {
                 "shape_regimes": BROAD_SHAPE_REGIMES,
                 "ip_regimes": BROAD_IP_REGIMES,
-                "current_regimes": BROAD_CURRENT_REGIMES,
-                "derivative_regimes": BROAD_DERIVATIVE_REGIMES,
+                "actuator_regimes": BROAD_ACTUATOR_REGIMES,
             }
         )
     else:
@@ -287,8 +272,7 @@ def build_manifest(
                 "center_reward": center_reward,
                 "shape_factors": FOCUS_SHAPE_FACTORS,
                 "ip_factors": FOCUS_IP_FACTORS,
-                "current_factors": FOCUS_CURRENT_FACTORS,
-                "derivative_factors": FOCUS_DERIVATIVE_FACTORS,
+                "actuator_factors": FOCUS_ACTUATOR_FACTORS,
             }
         )
     return manifest

@@ -7,7 +7,7 @@ import torch
 from torch import Tensor
 
 from tokamak_rl_v2.config.schema import BoundaryReferenceConfig, InitialRanges, IpReferenceConfig, ReferenceConfig
-from tokamak_rl_v2.env.t15_reference_limits import load_reference_limits
+from tokamak_rl_v2.env.t15_reference_limits import T15ReferenceLimits, load_reference_limits
 
 PARAMETER_ORDER = ("R0", "Z0", "A0", "kappa", "delta")
 
@@ -132,12 +132,17 @@ def _segmented_profile_ip(cfg: IpReferenceConfig, start: float, steps: int, rng:
         raise ValueError(f"segmented_profile reset Ip {start_ip:g} is outside production bounds [{lo:g}, {hi:g}]")
     width = max(hi - lo, 1.0)
     max_delta = float(cfg.max_delta_fraction) * width
-    positive_rate_max = float(cfg.ramp_up_rate_fraction) * float(limits.positive_dipdt_p95_a_per_s)
-    negative_rate_max = float(cfg.ramp_down_rate_fraction) * float(limits.negative_dipdt_abs_p95_a_per_s)
+    positive_rate_base, negative_rate_base = _segmented_profile_rate_bases(cfg, limits)
+    positive_rate_min = float(cfg.ramp_up_rate_min_fraction) * float(positive_rate_base)
+    positive_rate_max = float(cfg.ramp_up_rate_fraction) * float(positive_rate_base)
+    negative_rate_min = float(cfg.ramp_down_rate_min_fraction) * float(negative_rate_base)
+    negative_rate_max = float(cfg.ramp_down_rate_fraction) * float(negative_rate_base)
     # Cosine-eased ramps have a peak derivative of pi/2 times their mean
     # derivative. Budget slightly below that so the final signed-rate contract
     # remains true after discretization.
     ramp_peak_factor = 1.7 if bool(cfg.smooth_ramps) else 1.0
+    positive_peak_rate_max = positive_rate_max * ramp_peak_factor
+    negative_peak_rate_max = negative_rate_max * ramp_peak_factor
     min_hold = max(1, int(cfg.hold_min_steps))
     max_hold = max(min_hold, int(cfg.hold_max_steps))
     final_hold = min(max(0, int(cfg.final_hold_min_steps)), max(0, int(steps) - 1))
@@ -173,9 +178,10 @@ def _segmented_profile_ip(cfg: IpReferenceConfig, start: float, steps: int, rng:
                 lo=lo,
                 hi=hi,
                 max_delta=max_delta,
+                positive_rate_min=positive_rate_min,
                 positive_rate_max=positive_rate_max,
+                negative_rate_min=negative_rate_min,
                 negative_rate_max=negative_rate_max,
-                ramp_peak_factor=ramp_peak_factor,
                 dt=dt,
                 rng=rng,
             )
@@ -195,10 +201,18 @@ def _segmented_profile_ip(cfg: IpReferenceConfig, start: float, steps: int, rng:
             and np.all(out > 0.0)
             and np.nanmin(out) >= lo
             and np.nanmax(out) <= hi
-            and _reference_signed_rate_ok(out, max_positive_rate=positive_rate_max, max_negative_abs_rate=negative_rate_max, dt=dt)
+            and _reference_signed_rate_ok(out, max_positive_rate=positive_peak_rate_max, max_negative_abs_rate=negative_peak_rate_max, dt=dt)
         ):
             return out
     raise ValueError("failed to sample a segmented_profile Ip reference that fits the episode")
+
+
+def _segmented_profile_rate_bases(cfg: IpReferenceConfig, limits: T15ReferenceLimits) -> tuple[float, float]:
+    if cfg.ramp_rate_reference == "robust_mean":
+        if limits.positive_ramp_mean_a_per_s is None or limits.negative_ramp_abs_mean_a_per_s is None:
+            raise ValueError("reference.ip.ramp_rate_reference=robust_mean requires rebuilt t15_reference_limits.json with ramp mean fields")
+        return float(limits.positive_ramp_mean_a_per_s), float(limits.negative_ramp_abs_mean_a_per_s)
+    return float(limits.positive_dipdt_p95_a_per_s), float(limits.negative_dipdt_abs_p95_a_per_s)
 
 
 def _sample_segment_kinds(cfg: IpReferenceConfig, lengths: np.ndarray, rng: np.random.Generator) -> np.ndarray | None:
@@ -213,32 +227,39 @@ def _sample_segment_kinds(cfg: IpReferenceConfig, lengths: np.ndarray, rng: np.r
         return None
     kinds = np.zeros((count,), dtype=np.int8)
     forced_hold = int(rng.choice(hold_candidates))
-    hold_mask = np.zeros((count,), dtype=bool)
-    hold_mask[forced_hold] = True
-    for idx in hold_candidates.tolist():
-        if idx != forced_hold and rng.random() < float(cfg.hold_probability):
-            hold_mask[int(idx)] = True
-    if bool(np.all(hold_mask)):
-        ramp_candidates = np.flatnonzero(~hold_mask)
-        if ramp_candidates.size == 0:
-            ramp_candidates = np.flatnonzero(np.arange(count) != forced_hold)
+    hold_eligible = np.zeros((count,), dtype=bool)
+    hold_eligible[hold_candidates] = True
+    previous_was_ramp = False
+    saw_ramp = False
+    for idx in range(count):
+        if idx == forced_hold:
+            kinds[idx] = 0
+            previous_was_ramp = False
+            continue
+
+        must_hold = previous_was_ramp
+        can_hold = bool(hold_eligible[idx])
+        if must_hold:
+            if not can_hold:
+                return None
+            kinds[idx] = 0
+            previous_was_ramp = False
+            continue
+
+        if can_hold and rng.random() < float(cfg.hold_probability):
+            kinds[idx] = 0
+            previous_was_ramp = False
+            continue
+
+        direction = int(rng.choice((-1, 1)))
+        kinds[idx] = np.int8(direction)
+        previous_was_ramp = True
+        saw_ramp = True
+    if not saw_ramp:
+        ramp_candidates = np.flatnonzero(np.arange(count) != forced_hold)
         if ramp_candidates.size == 0:
             return None
-        hold_mask[int(rng.choice(ramp_candidates))] = False
-    last_ramp_direction = 0
-    hold_since_last_ramp = True
-    for idx in range(count):
-        if bool(hold_mask[idx]):
-            kinds[idx] = 0
-            hold_since_last_ramp = True
-            continue
-        options = (-1, 1)
-        if last_ramp_direction != 0 and not hold_since_last_ramp:
-            options = (last_ramp_direction,)
-        direction = int(rng.choice(options))
-        kinds[idx] = np.int8(direction)
-        last_ramp_direction = direction
-        hold_since_last_ramp = False
+        kinds[int(rng.choice(ramp_candidates))] = np.int8(int(rng.choice((-1, 1))))
     if not np.any(kinds == 0) or not np.any(kinds != 0):
         return None
     return kinds
@@ -253,29 +274,34 @@ def _profile_ramp_delta(
     lo: float,
     hi: float,
     max_delta: float,
+    positive_rate_min: float,
     positive_rate_max: float,
+    negative_rate_min: float,
     negative_rate_max: float,
-    ramp_peak_factor: float,
     dt: float,
     rng: np.random.Generator,
 ) -> float | None:
     step_count = max(1, int(steps))
     if int(direction) > 0:
         room = max(float(hi) - float(current), 0.0)
+        rate_low = float(positive_rate_min)
+        rate_high = float(positive_rate_max)
         delta_high = min(
             float(max_delta) * float(cfg.plateau_max_fraction),
             room,
-            float(positive_rate_max) * float(dt) * float(step_count) / float(ramp_peak_factor),
+            rate_high * float(dt) * float(step_count),
         )
-        delta_low = min(float(max_delta) * float(cfg.plateau_min_fraction), delta_high)
+        delta_low = max(float(max_delta) * float(cfg.plateau_min_fraction), rate_low * float(dt) * float(step_count))
     else:
         room = max(float(current) - float(lo), 0.0)
+        rate_low = float(negative_rate_min)
+        rate_high = float(negative_rate_max)
         delta_high = min(
             float(max_delta) * float(cfg.end_max_fraction),
             room,
-            float(negative_rate_max) * float(dt) * float(step_count) / float(ramp_peak_factor),
+            rate_high * float(dt) * float(step_count),
         )
-        delta_low = min(float(max_delta) * float(cfg.end_min_fraction), delta_high)
+        delta_low = max(float(max_delta) * float(cfg.end_min_fraction), rate_low * float(dt) * float(step_count))
     if not np.isfinite(delta_high) or delta_high <= 1.0e-6:
         return None
     delta_low = max(float(delta_low), 1.0e-6)

@@ -46,6 +46,7 @@ srun \
     cd /workspace/tokamak-rl-v2
     mkdir -p slurm_logs outputs data/processed
     python3 scripts/apply_t15_actuator_limits.py /workspace/tokamak-sim/configs/T15MD_new_data.toml
+    python3 scripts/ensure_t15_reference_limits.py
 
     python3 - <<\PYPREFLIGHT
 import pathlib
@@ -83,7 +84,6 @@ PYPREFLIGHT
     MANIFEST_TMP=${MANIFEST}.${ARRAY_TASK}.$$.tmp
     python3 scripts/build_reward_sweep_manifest.py \
       --pass broad \
-      --variant-budget 36 \
       --runs-per-array-task 3 \
       --array-task-count 12 \
       --output "${MANIFEST_TMP}" >/dev/null
