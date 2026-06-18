@@ -88,8 +88,10 @@ def run_candidate(args: argparse.Namespace) -> int:
     cfg = _load_json(base_path)
     base_name = str(cfg.get("name") or base_path.stem)
     cfg["name"] = f"{base_name}_{folder}"
+    sim_overrides = variant.get("sim") if isinstance(variant.get("sim"), dict) else {}
     cfg.setdefault("sim", {})["config_path"] = str(args.sim_config_path)
     cfg["sim"]["csv_initial_state_library"] = str(args.initial_state_library)
+    cfg["sim"].update(sim_overrides)
     cfg.setdefault("reference", {}).setdefault("ip", {})["limits_path"] = str(args.reference_limits)
     cfg.setdefault("reward", {}).update(variant["reward"])
     cfg.setdefault("training", {})["steps"] = int(args.train_env_steps)

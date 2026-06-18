@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Any
 
 
+PROFILE_LEGAL = "legal"
+PROFILE_CURRENT_CONSTRAINT = "current_constraint"
+
 BROAD_SHAPE_REGIMES = [
     {"id": "s0", "shape_mean_weight": 1.5, "shape_max_weight": 0.375},
     {"id": "s1", "shape_mean_weight": 2.25, "shape_max_weight": 0.5625},
@@ -45,6 +48,92 @@ FOCUS_ACTUATOR_FACTORS = [
     {"id": "af3", "current_factor": 2.20, "derivative_factor": 1.80},
 ]
 
+CURRENT_CONSTRAINT_BROAD_SHAPE_REGIMES = [
+    {"id": "s0", "shape_mean_weight": 8.0, "shape_max_weight": 2.5},
+    {"id": "s1", "shape_mean_weight": 10.0, "shape_max_weight": 3.0},
+    {"id": "s2", "shape_mean_weight": 12.0, "shape_max_weight": 3.5},
+]
+
+CURRENT_CONSTRAINT_BROAD_IP_REGIMES = [
+    {"id": "i0", "ip_weight": 2.5},
+    {"id": "i1", "ip_weight": 3.0},
+    {"id": "i2", "ip_weight": 3.5},
+]
+
+CURRENT_CONSTRAINT_BROAD_SAFETY_REGIMES = [
+    {
+        "id": "a0",
+        "current_weight": 3.0,
+        "current_soft_fraction": 0.90,
+        "derivative_weight": 0.25,
+        "derivative_soft_fraction": 0.90,
+    },
+    {
+        "id": "a1",
+        "current_weight": 4.0,
+        "current_soft_fraction": 0.90,
+        "derivative_weight": 0.25,
+        "derivative_soft_fraction": 0.85,
+    },
+    {
+        "id": "a2",
+        "current_weight": 4.0,
+        "current_soft_fraction": 0.85,
+        "derivative_weight": 0.50,
+        "derivative_soft_fraction": 0.85,
+    },
+    {
+        "id": "a3",
+        "current_weight": 6.0,
+        "current_soft_fraction": 0.85,
+        "derivative_weight": 0.50,
+        "derivative_soft_fraction": 0.85,
+    },
+]
+
+CURRENT_CONSTRAINT_FOCUS_SHAPE_FACTORS = [
+    {"id": "sf0", "factor": 0.80},
+    {"id": "sf1", "factor": 1.00},
+    {"id": "sf2", "factor": 1.20},
+]
+
+CURRENT_CONSTRAINT_FOCUS_IP_FACTORS = [
+    {"id": "if0", "factor": 0.85},
+    {"id": "if1", "factor": 1.00},
+    {"id": "if2", "factor": 1.15},
+]
+
+CURRENT_CONSTRAINT_FOCUS_SAFETY_FACTORS = [
+    {
+        "id": "af0",
+        "current_factor": 0.75,
+        "derivative_factor": 0.75,
+        "current_soft_fraction": 0.90,
+        "derivative_soft_fraction": 0.90,
+    },
+    {
+        "id": "af1",
+        "current_factor": 1.00,
+        "derivative_factor": 1.00,
+        "current_soft_fraction": "center",
+        "derivative_soft_fraction": "center",
+    },
+    {
+        "id": "af2",
+        "current_factor": 1.25,
+        "derivative_factor": 1.25,
+        "current_soft_fraction": 0.85,
+        "derivative_soft_fraction": 0.85,
+    },
+    {
+        "id": "af3",
+        "current_factor": 1.75,
+        "derivative_factor": 1.50,
+        "current_soft_fraction": 0.85,
+        "derivative_soft_fraction": 0.85,
+    },
+]
+
 FIXED_REWARD = {
     "shape_mean_scale_m": 0.03,
     "shape_max_scale_m": 0.08,
@@ -59,9 +148,72 @@ FIXED_REWARD = {
     "delta_action_weight": 0.0,
 }
 
+CURRENT_CONSTRAINT_FIXED_REWARD = {
+    "shape_mean_scale_m": 0.03,
+    "shape_max_scale_m": 0.08,
+    "ip_scale_a": 25000.0,
+    "reward_scale": 1.0,
+    "terminal_reward": -20.0,
+    "current_bad_fraction": 1.05,
+    "derivative_bad_fraction": 1.20,
+    "action_weight": 0.01,
+    "delta_action_weight": 0.025,
+}
+
+CURRENT_CONSTRAINT_FIXED_SIM = {
+    "terminate_on_current_limit": True,
+    "current_termination_over_limit_a": 5000.0,
+    "current_termination_grace_steps": 8,
+    "current_hard_termination_fraction": 1.05,
+}
+
 
 def _rounded(value: float) -> float:
     return float(round(float(value), 8))
+
+
+def _check_profile(profile: str) -> str:
+    if profile not in {PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT}:
+        raise ValueError(f"Unknown reward sweep profile: {profile}")
+    return profile
+
+
+def _fixed_reward(profile: str) -> dict[str, Any]:
+    return dict(CURRENT_CONSTRAINT_FIXED_REWARD if _check_profile(profile) == PROFILE_CURRENT_CONSTRAINT else FIXED_REWARD)
+
+
+def _fixed_sim(profile: str) -> dict[str, Any]:
+    return dict(CURRENT_CONSTRAINT_FIXED_SIM if _check_profile(profile) == PROFILE_CURRENT_CONSTRAINT else {})
+
+
+def _broad_shape_regimes(profile: str) -> list[dict[str, Any]]:
+    return CURRENT_CONSTRAINT_BROAD_SHAPE_REGIMES if _check_profile(profile) == PROFILE_CURRENT_CONSTRAINT else BROAD_SHAPE_REGIMES
+
+
+def _broad_ip_regimes(profile: str) -> list[dict[str, Any]]:
+    return CURRENT_CONSTRAINT_BROAD_IP_REGIMES if _check_profile(profile) == PROFILE_CURRENT_CONSTRAINT else BROAD_IP_REGIMES
+
+
+def _broad_safety_regimes(profile: str) -> list[dict[str, Any]]:
+    return CURRENT_CONSTRAINT_BROAD_SAFETY_REGIMES if _check_profile(profile) == PROFILE_CURRENT_CONSTRAINT else BROAD_ACTUATOR_REGIMES
+
+
+def _focus_shape_factors(profile: str) -> list[dict[str, Any]]:
+    return CURRENT_CONSTRAINT_FOCUS_SHAPE_FACTORS if _check_profile(profile) == PROFILE_CURRENT_CONSTRAINT else FOCUS_SHAPE_FACTORS
+
+
+def _focus_ip_factors(profile: str) -> list[dict[str, Any]]:
+    return CURRENT_CONSTRAINT_FOCUS_IP_FACTORS if _check_profile(profile) == PROFILE_CURRENT_CONSTRAINT else FOCUS_IP_FACTORS
+
+
+def _focus_safety_factors(profile: str) -> list[dict[str, Any]]:
+    return CURRENT_CONSTRAINT_FOCUS_SAFETY_FACTORS if _check_profile(profile) == PROFILE_CURRENT_CONSTRAINT else FOCUS_ACTUATOR_FACTORS
+
+
+def _soft_fraction(value: Any, center_reward: dict[str, float], key: str, default: float) -> float:
+    if value == "center":
+        return float(center_reward.get(key, default))
+    return float(value)
 
 
 def _variant(
@@ -91,21 +243,31 @@ def _variant(
     return payload
 
 
-def build_broad_variants() -> list[dict[str, Any]]:
+def build_broad_variants(profile: str = PROFILE_LEGAL) -> list[dict[str, Any]]:
+    profile = _check_profile(profile)
     variants: list[dict[str, Any]] = []
     index = 0
-    for shape in BROAD_SHAPE_REGIMES:
-        for ip in BROAD_IP_REGIMES:
-            for actuator in BROAD_ACTUATOR_REGIMES:
+    fixed_reward = _fixed_reward(profile)
+    fixed_sim = _fixed_sim(profile)
+    for shape in _broad_shape_regimes(profile):
+        for ip in _broad_ip_regimes(profile):
+            for actuator in _broad_safety_regimes(profile):
                 name = f"{shape['id']}_{ip['id']}_{actuator['id']}"
                 reward = {
-                    **FIXED_REWARD,
+                    **fixed_reward,
                     "shape_mean_weight": shape["shape_mean_weight"],
                     "shape_max_weight": shape["shape_max_weight"],
                     "ip_weight": ip["ip_weight"],
                     "current_weight": actuator["current_weight"],
                     "derivative_weight": actuator["derivative_weight"],
                 }
+                if "current_soft_fraction" in actuator:
+                    reward["current_soft_fraction"] = actuator["current_soft_fraction"]
+                if "derivative_soft_fraction" in actuator:
+                    reward["derivative_soft_fraction"] = actuator["derivative_soft_fraction"]
+                extra = {"actuator_regime": actuator["id"]}
+                if fixed_sim:
+                    extra["sim"] = fixed_sim
                 variants.append(
                     _variant(
                         index=index,
@@ -116,7 +278,7 @@ def build_broad_variants() -> list[dict[str, Any]]:
                         current_regime=str(actuator["id"]),
                         derivative_regime=str(actuator["id"]),
                         reward=reward,
-                        extra={"actuator_regime": actuator["id"]},
+                        extra=extra,
                     )
                 )
                 index += 1
@@ -154,24 +316,51 @@ def load_center_reward(path: Path) -> dict[str, float]:
     missing = [key for key in required if key not in reward]
     if missing:
         raise ValueError(f"Center candidate at {path} is missing reward fields: {', '.join(missing)}")
-    return {key: float(reward[key]) for key in required}
+    optional = ("current_soft_fraction", "derivative_soft_fraction")
+    return {key: float(reward[key]) for key in (*required, *optional) if key in reward}
 
 
-def build_focused_variants(center_reward: dict[str, float]) -> list[dict[str, Any]]:
+def build_focused_variants(center_reward: dict[str, float], profile: str = PROFILE_LEGAL) -> list[dict[str, Any]]:
+    profile = _check_profile(profile)
     variants: list[dict[str, Any]] = []
     index = 0
-    for shape in FOCUS_SHAPE_FACTORS:
-        for ip in FOCUS_IP_FACTORS:
-            for actuator in FOCUS_ACTUATOR_FACTORS:
+    fixed_reward = _fixed_reward(profile)
+    fixed_sim = _fixed_sim(profile)
+    for shape in _focus_shape_factors(profile):
+        for ip in _focus_ip_factors(profile):
+            for actuator in _focus_safety_factors(profile):
                 name = f"{shape['id']}_{ip['id']}_{actuator['id']}"
+                current_soft = _soft_fraction(
+                    actuator.get("current_soft_fraction", fixed_reward.get("current_soft_fraction", 1.0)),
+                    center_reward,
+                    "current_soft_fraction",
+                    float(fixed_reward.get("current_soft_fraction", 1.0)),
+                )
+                derivative_soft = _soft_fraction(
+                    actuator.get("derivative_soft_fraction", fixed_reward.get("derivative_soft_fraction", 1.0)),
+                    center_reward,
+                    "derivative_soft_fraction",
+                    float(fixed_reward.get("derivative_soft_fraction", 1.0)),
+                )
                 reward = {
-                    **FIXED_REWARD,
+                    **fixed_reward,
                     "shape_mean_weight": _rounded(center_reward["shape_mean_weight"] * float(shape["factor"])),
                     "shape_max_weight": _rounded(center_reward["shape_max_weight"] * float(shape["factor"])),
                     "ip_weight": _rounded(center_reward["ip_weight"] * float(ip["factor"])),
                     "current_weight": _rounded(center_reward["current_weight"] * float(actuator["current_factor"])),
                     "derivative_weight": _rounded(center_reward["derivative_weight"] * float(actuator["derivative_factor"])),
+                    "current_soft_fraction": current_soft,
+                    "derivative_soft_fraction": derivative_soft,
                 }
+                extra = {
+                    "actuator_regime": actuator["id"],
+                    "shape_factor": shape["factor"],
+                    "ip_factor": ip["factor"],
+                    "current_factor": actuator["current_factor"],
+                    "derivative_factor": actuator["derivative_factor"],
+                }
+                if fixed_sim:
+                    extra["sim"] = fixed_sim
                 variants.append(
                     _variant(
                         index=index,
@@ -182,13 +371,7 @@ def build_focused_variants(center_reward: dict[str, float]) -> list[dict[str, An
                         current_regime=str(actuator["id"]),
                         derivative_regime=str(actuator["id"]),
                         reward=reward,
-                        extra={
-                            "actuator_regime": actuator["id"],
-                            "shape_factor": shape["factor"],
-                            "ip_factor": ip["factor"],
-                            "current_factor": actuator["current_factor"],
-                            "derivative_factor": actuator["derivative_factor"],
-                        },
+                        extra=extra,
                     )
                 )
                 index += 1
@@ -217,13 +400,20 @@ def _select_evenly(variants: list[dict[str, Any]], count: int) -> list[dict[str,
     return reindexed
 
 
-def build_variants(sweep_pass: str = "broad", center_reward: dict[str, float] | None = None, variant_budget: int | None = None) -> list[dict[str, Any]]:
+def build_variants(
+    sweep_pass: str = "broad",
+    center_reward: dict[str, float] | None = None,
+    variant_budget: int | None = None,
+    *,
+    profile: str = PROFILE_LEGAL,
+) -> list[dict[str, Any]]:
+    profile = _check_profile(profile)
     if sweep_pass == "broad":
-        variants = build_broad_variants()
+        variants = build_broad_variants(profile)
     elif sweep_pass == "focused":
         if center_reward is None:
             raise ValueError("focused sweep requires center_reward")
-        variants = build_focused_variants(center_reward)
+        variants = build_focused_variants(center_reward, profile)
     else:
         raise ValueError(f"Unknown reward sweep pass: {sweep_pass}")
     return _select_evenly(variants, int(variant_budget)) if variant_budget is not None else variants
@@ -233,11 +423,13 @@ def build_manifest(
     sweep_pass: str = "broad",
     center_reward: dict[str, float] | None = None,
     *,
+    profile: str = PROFILE_LEGAL,
     variant_budget: int | None = None,
     runs_per_array_task: int | None = None,
     array_task_count: int | None = None,
 ) -> dict[str, Any]:
-    variants = build_variants(sweep_pass=sweep_pass, center_reward=center_reward, variant_budget=variant_budget)
+    profile = _check_profile(profile)
+    variants = build_variants(sweep_pass=sweep_pass, center_reward=center_reward, variant_budget=variant_budget, profile=profile)
     runs_per_task = int(runs_per_array_task if runs_per_array_task is not None else 3)
     if runs_per_task <= 0:
         raise ValueError("runs_per_array_task must be positive")
@@ -250,29 +442,31 @@ def build_manifest(
     if len(variants) != expected:
         raise ValueError(f"{sweep_pass} manifest has {len(variants)} variants, expected {expected}")
     manifest: dict[str, Any] = {
-        "description": f"{len(variants)}-run T15 CSV segmented-profile legal-actuator reward sweep ({sweep_pass})",
+        "description": f"{len(variants)}-run T15 CSV segmented-profile {profile} reward sweep ({sweep_pass})",
+        "profile": profile,
         "sweep_pass": sweep_pass,
         "variant_count": len(variants),
         "runs_per_array_task": runs_per_task,
         "array_task_count": array_task_count,
-        "fixed_reward": FIXED_REWARD,
+        "fixed_reward": _fixed_reward(profile),
+        "fixed_sim": _fixed_sim(profile),
         "variants": variants,
     }
     if sweep_pass == "broad":
         manifest.update(
             {
-                "shape_regimes": BROAD_SHAPE_REGIMES,
-                "ip_regimes": BROAD_IP_REGIMES,
-                "actuator_regimes": BROAD_ACTUATOR_REGIMES,
+                "shape_regimes": _broad_shape_regimes(profile),
+                "ip_regimes": _broad_ip_regimes(profile),
+                "actuator_regimes": _broad_safety_regimes(profile),
             }
         )
     else:
         manifest.update(
             {
                 "center_reward": center_reward,
-                "shape_factors": FOCUS_SHAPE_FACTORS,
-                "ip_factors": FOCUS_IP_FACTORS,
-                "actuator_factors": FOCUS_ACTUATOR_FACTORS,
+                "shape_factors": _focus_shape_factors(profile),
+                "ip_factors": _focus_ip_factors(profile),
+                "actuator_factors": _focus_safety_factors(profile),
             }
         )
     return manifest
@@ -282,6 +476,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Write deterministic two-pass reward sweep manifests.")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--pass", dest="sweep_pass", choices=("broad", "focused"), default="broad")
+    parser.add_argument("--profile", choices=(PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT), default=PROFILE_LEGAL)
     parser.add_argument("--center", type=Path, default=None, help="physical_best_candidate.json for focused pass")
     parser.add_argument("--variant-budget", type=int, default=None)
     parser.add_argument("--runs-per-array-task", type=int, default=None)
@@ -291,6 +486,7 @@ def main(argv: list[str] | None = None) -> int:
     manifest = build_manifest(
         sweep_pass=args.sweep_pass,
         center_reward=center_reward,
+        profile=args.profile,
         variant_budget=args.variant_budget,
         runs_per_array_task=args.runs_per_array_task,
         array_task_count=args.array_task_count,

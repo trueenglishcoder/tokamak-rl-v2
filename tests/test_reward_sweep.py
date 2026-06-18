@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import csv
 import json
+from argparse import Namespace
 from pathlib import Path
 
 from scripts.aggregate_reward_sweep import aggregate, score_eval_row, write_outputs
 from scripts.audit_reward_sweep_pipeline import audit as audit_reward_sweep_pipeline
-from scripts.build_reward_sweep_manifest import build_manifest, build_variants
+from scripts.build_reward_sweep_manifest import PROFILE_CURRENT_CONSTRAINT, build_manifest, build_variants
 from scripts.build_reward_sweep_rerun_manifest import build as build_rerun_manifest
+from scripts.run_reward_sweep_candidate import run_candidate
 from scripts.summarize_two_pass_reward_sweep_physical import summarize_two_pass
 from scripts.summarize_reward_sweep_physical import summarize
 from scripts.submit_two_pass_reward_sweep import submit_chain
@@ -18,6 +20,8 @@ PASS1_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_96gpu_pass1_bro
 PASS2_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_96gpu_pass2_focused.sbatch"
 PASS1_12_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_pass1_broad.sbatch"
 PASS2_12_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_pass2_focused.sbatch"
+PASS1_CURRENT_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_current_constraint_pass1.sbatch"
+PASS2_CURRENT_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_current_constraint_pass2.sbatch"
 RERUN_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_rerun_1gpu.sbatch"
 
 
@@ -74,6 +78,62 @@ def test_reward_sweep_focused_manifest_has_36_explicit_unique_variants() -> None
     assert variants[0]["reward"]["delta_action_weight"] == 0.0
 
 
+def test_current_constraint_broad_manifest_has_36_and_current_termination() -> None:
+    variants = build_variants("broad", profile=PROFILE_CURRENT_CONSTRAINT)
+    assert len(variants) == 36
+    assert variants[0]["folder"] == "b000_s0_i0_a0"
+    assert variants[-1]["folder"] == "b035_s2_i2_a3"
+    first = variants[0]
+    assert first["reward"]["shape_mean_weight"] == 8.0
+    assert first["reward"]["shape_max_weight"] == 2.5
+    assert first["reward"]["ip_weight"] == 2.5
+    assert first["reward"]["current_weight"] == 3.0
+    assert first["reward"]["current_soft_fraction"] == 0.90
+    assert first["reward"]["current_bad_fraction"] == 1.05
+    assert first["reward"]["derivative_weight"] == 0.25
+    assert first["reward"]["derivative_soft_fraction"] == 0.90
+    assert first["reward"]["derivative_bad_fraction"] == 1.20
+    assert first["reward"]["action_weight"] == 0.01
+    assert first["reward"]["delta_action_weight"] == 0.025
+    assert first["sim"] == {
+        "terminate_on_current_limit": True,
+        "current_termination_over_limit_a": 5000.0,
+        "current_termination_grace_steps": 8,
+        "current_hard_termination_fraction": 1.05,
+    }
+
+
+def test_current_constraint_focused_manifest_uses_center_soft_fractions() -> None:
+    center = {
+        "shape_mean_weight": 10.0,
+        "shape_max_weight": 3.0,
+        "ip_weight": 3.0,
+        "current_weight": 4.0,
+        "current_soft_fraction": 0.90,
+        "derivative_weight": 0.25,
+        "derivative_soft_fraction": 0.85,
+    }
+    variants = build_variants("focused", center, profile=PROFILE_CURRENT_CONSTRAINT)
+    assert len(variants) == 36
+    assert variants[0]["folder"] == "f000_sf0_if0_af0"
+    assert variants[-1]["folder"] == "f035_sf2_if2_af3"
+    assert variants[0]["reward"]["shape_mean_weight"] == 8.0
+    assert variants[0]["reward"]["ip_weight"] == 2.55
+    assert variants[0]["reward"]["current_weight"] == 3.0
+    assert variants[0]["reward"]["derivative_weight"] == 0.1875
+    assert variants[0]["reward"]["current_soft_fraction"] == 0.90
+    assert variants[0]["reward"]["derivative_soft_fraction"] == 0.90
+    center_variant = variants[17]
+    assert center_variant["folder"] == "f017_sf1_if1_af1"
+    assert center_variant["reward"]["shape_mean_weight"] == 10.0
+    assert center_variant["reward"]["ip_weight"] == 3.0
+    assert center_variant["reward"]["current_weight"] == 4.0
+    assert center_variant["reward"]["derivative_weight"] == 0.25
+    assert center_variant["reward"]["current_soft_fraction"] == 0.90
+    assert center_variant["reward"]["derivative_soft_fraction"] == 0.85
+    assert center_variant["sim"]["terminate_on_current_limit"] is True
+
+
 def test_reward_sweep_manifests_have_36_variants_without_hidden_subsampling() -> None:
     broad = build_manifest("broad", runs_per_array_task=3, array_task_count=12)
     assert broad["variant_count"] == 36
@@ -99,6 +159,14 @@ def test_reward_sweep_manifests_have_36_variants_without_hidden_subsampling() ->
     assert all("source_index" not in variant for variant in focused["variants"])
 
 
+def test_current_constraint_manifest_has_exact_36_variants() -> None:
+    broad = build_manifest("broad", profile=PROFILE_CURRENT_CONSTRAINT, runs_per_array_task=3, array_task_count=12)
+    assert broad["profile"] == PROFILE_CURRENT_CONSTRAINT
+    assert broad["variant_count"] == 36
+    assert broad["fixed_sim"]["terminate_on_current_limit"] is True
+    assert broad["fixed_reward"]["action_weight"] == 0.01
+
+
 def test_reward_sweep_array_task_mappings() -> None:
     broad = build_variants("broad")
     for task_id in range(12):
@@ -120,8 +188,62 @@ def test_reward_sweep_array_task_mappings() -> None:
     assert 11 * 3 + 2 == 35
 
 
+def test_reward_sweep_candidate_applies_sim_overrides_to_generated_config(tmp_path: Path, monkeypatch) -> None:
+    variant = build_variants("broad", profile=PROFILE_CURRENT_CONSTRAINT)[0]
+    manifest = tmp_path / "variants.json"
+    manifest.write_text(json.dumps({"variants": [variant]}), encoding="utf-8")
+    base_config = tmp_path / "base.json"
+    base_config.write_text(
+        json.dumps(
+            {
+                "name": "base",
+                "sim": {"terminate_on_current_limit": False},
+                "reference": {"ip": {}},
+                "reward": {},
+                "training": {},
+                "learner": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class Result:
+        returncode = 0
+
+    monkeypatch.setattr("scripts.run_reward_sweep_candidate.subprocess.run", lambda *args, **kwargs: Result())
+    sweep_root = tmp_path / "sweep"
+    args = Namespace(
+        manifest=manifest,
+        variant_index=0,
+        base_config=base_config,
+        sweep_root=sweep_root,
+        train_env_steps=100,
+        eval_env_steps=50,
+        num_envs=4,
+        batch_size=2,
+        replay_capacity_episodes=288,
+        rollout_chunk_length=64,
+        updates_per_rollout_chunk=32,
+        wandb_project="test",
+        wandb_mode="offline",
+        device="cuda:0",
+        sim_config_path=Path("/sim.toml"),
+        initial_state_library=Path("/states.npz"),
+        reference_limits=Path("/limits.json"),
+    )
+
+    assert run_candidate(args) == 0
+    generated = json.loads((sweep_root / "generated_configs" / f"{variant['folder']}.json").read_text(encoding="utf-8"))
+    assert generated["sim"]["terminate_on_current_limit"] is True
+    assert generated["sim"]["current_termination_over_limit_a"] == 5000.0
+    assert generated["sim"]["current_termination_grace_steps"] == 8
+    assert generated["sim"]["current_hard_termination_fraction"] == 1.05
+    assert generated["reward"]["action_weight"] == 0.01
+    assert generated["reward"]["delta_action_weight"] == 0.025
+
+
 def test_reward_sweep_job_blocks_stale_name_leaks() -> None:
-    for path in (PASS1_JOB, PASS2_JOB, PASS1_12_JOB, PASS2_12_JOB, RERUN_JOB):
+    for path in (PASS1_JOB, PASS2_JOB, PASS1_12_JOB, PASS2_12_JOB, PASS1_CURRENT_JOB, PASS2_CURRENT_JOB, RERUN_JOB):
         text = path.read_text(encoding="utf-8")
         assert "unset RUN_NAME" in text
         assert "unset TRAIN_OUTPUT" in text
@@ -137,6 +259,8 @@ def test_reward_sweep_job_blocks_stale_name_leaks() -> None:
     assert "shutil.rmtree(output_dir / \"checkpoints\"" in runner
     assert "REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-288}" in PASS1_12_JOB.read_text(encoding="utf-8")
     assert "REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-288}" in PASS2_12_JOB.read_text(encoding="utf-8")
+    assert "REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-288}" in PASS1_CURRENT_JOB.read_text(encoding="utf-8")
+    assert "REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-288}" in PASS2_CURRENT_JOB.read_text(encoding="utf-8")
     for path in (
         ROOT / "jobs/aggregate_t15_reward_sweep_pass1.sbatch",
         ROOT / "jobs/aggregate_t15_reward_sweep_final.sbatch",
@@ -384,6 +508,30 @@ def test_two_pass_summary_writes_final_recommendation(tmp_path: Path) -> None:
     assert (out_dir / "missing_or_failed_variants.json").exists()
     assert (out_dir / "final_reward_recommendation.json").exists()
     assert (out_dir / "final_reward_selection_report.md").exists()
+
+
+def test_two_pass_summary_keeps_best_available_when_no_hard_filter_passes(tmp_path: Path) -> None:
+    pass1 = tmp_path / "pass1_broad"
+    pass2 = tmp_path / "pass2_focused"
+    pass1.mkdir()
+    pass2.mkdir()
+    pass1_manifest = build_manifest("broad")
+    pass1_manifest["variants"] = pass1_manifest["variants"][:1]
+    pass2_manifest = build_manifest("focused", pass1_manifest["variants"][0]["reward"])
+    pass2_manifest["variants"] = pass2_manifest["variants"][:1]
+    (pass1 / "variants.json").write_text(json.dumps(pass1_manifest), encoding="utf-8")
+    (pass2 / "variants.json").write_text(json.dumps(pass2_manifest), encoding="utf-8")
+    _write_physical_run(pass1, pass1_manifest["variants"][0], completion=0.4, boundary=0.0, shape=0.10, ip=100000.0)
+    _write_physical_run(pass2, pass2_manifest["variants"][0], completion=0.5, boundary=0.0, shape=0.08, ip=90000.0)
+
+    out_dir = tmp_path / "selection"
+    result = summarize_two_pass(tmp_path, out_dir)
+
+    assert result["valid_candidates"] == 0
+    assert result["passes_hard_filters"] is False
+    assert result["recommended_for_long_training"] is False
+    assert result["best_available_candidate"]["sweep_pass"] == "pass2_focused"
+    assert result["recommended_candidate"]["folder"] == pass2_manifest["variants"][0]["folder"]
 
 
 def test_submit_two_pass_chain_uses_slurm_dependencies(tmp_path: Path, monkeypatch) -> None:

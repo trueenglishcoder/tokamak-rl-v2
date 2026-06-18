@@ -62,6 +62,10 @@ SUMMARY_FIELDS = [
     "derivative_bad_fraction",
     "action_weight",
     "delta_action_weight",
+    "terminate_on_current_limit",
+    "current_termination_over_limit_a",
+    "current_termination_grace_steps",
+    "current_hard_termination_fraction",
     "eval_rows",
     "tail_completion",
     "tail_boundary_late_min",
@@ -235,6 +239,7 @@ def summarize_variant(
     if reward_file_variant:
         variant = {**variant, **reward_file_variant}
     reward = variant.get("reward") if isinstance(variant.get("reward"), dict) else {}
+    sim = variant.get("sim") if isinstance(variant.get("sim"), dict) else {}
     validation = _read_json(run_dir / "policy_validation.json")
     actor_eval = validation.get("actor_eval")
     actor_eval = actor_eval if isinstance(actor_eval, dict) else {}
@@ -279,6 +284,10 @@ def summarize_variant(
         "derivative_bad_fraction": reward.get("derivative_bad_fraction", ""),
         "action_weight": reward.get("action_weight", ""),
         "delta_action_weight": reward.get("delta_action_weight", ""),
+        "terminate_on_current_limit": sim.get("terminate_on_current_limit", ""),
+        "current_termination_over_limit_a": sim.get("current_termination_over_limit_a", ""),
+        "current_termination_grace_steps": sim.get("current_termination_grace_steps", ""),
+        "current_hard_termination_fraction": sim.get("current_hard_termination_fraction", ""),
         "eval_rows": len(eval_rows),
         "tail_completion": _tail_metric(eval_rows, "mean_episode_completion", "episode_progress"),
         "tail_boundary_late_min": _tail_metric(eval_rows, "boundary_found_late_min", "boundary_found_min", "boundary_found"),

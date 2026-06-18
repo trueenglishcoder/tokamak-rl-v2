@@ -24,6 +24,17 @@ srun \
     echo "root=${ROOT}"
     echo "pass1_root=${ROOT}/pass1_broad"
     echo "out_dir=${ROOT}/selection/pass1"
+    PROFILE=$(python3 - <<\PYPROFILE
+import json
+import os
+import pathlib
+
+manifest = pathlib.Path(os.environ["ROOT"]) / "pass1_broad/variants.json"
+payload = json.loads(manifest.read_text(encoding="utf-8"))
+print(payload.get("profile") or "legal")
+PYPROFILE
+)
+    echo "profile=${PROFILE}"
 
     python3 scripts/summarize_reward_sweep_physical.py \
       "${ROOT}/pass1_broad" \
@@ -50,6 +61,7 @@ PYCENTER
     mkdir -p "${ROOT}/pass2_focused/generated_configs"
     python3 scripts/build_reward_sweep_manifest.py \
       --pass focused \
+      --profile "${PROFILE}" \
       --center "${ROOT}/selection/pass1/physical_best_candidate.json" \
       --runs-per-array-task 3 \
       --array-task-count 12 \
