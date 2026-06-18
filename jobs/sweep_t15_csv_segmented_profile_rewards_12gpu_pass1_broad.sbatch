@@ -85,13 +85,10 @@ PYPREFLIGHT
     MANIFEST=${SWEEP_ROOT}/variants.json
 
     mkdir -p "${SWEEP_ROOT}" "${SWEEP_ROOT}/generated_configs"
-    MANIFEST_TMP=${MANIFEST}.${ARRAY_TASK}.$$.tmp
-    python3 scripts/build_reward_sweep_manifest.py \
-      --pass broad \
-      --runs-per-array-task 3 \
-      --array-task-count 12 \
-      --output "${MANIFEST_TMP}" >/dev/null
-    mv "${MANIFEST_TMP}" "${MANIFEST}"
+    if [[ ! -f "${MANIFEST}" ]]; then
+      echo "missing pass1 reward-sweep manifest: ${MANIFEST}; launch through scripts/submit_two_pass_reward_sweep.py" >&2
+      exit 2
+    fi
 
     echo "policy_config=${POLICY_CONFIG}"
     echo "sweep_parent_root=${SWEEP_PARENT_ROOT}"

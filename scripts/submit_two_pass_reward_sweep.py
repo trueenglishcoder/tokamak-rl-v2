@@ -7,6 +7,11 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+try:
+    from scripts.build_reward_sweep_manifest import build_manifest
+except ModuleNotFoundError:  # pragma: no cover - used when run as python3 scripts/...
+    from build_reward_sweep_manifest import build_manifest
+
 
 def _job_id(raw: str) -> str:
     text = raw.strip()
@@ -20,6 +25,20 @@ def _submit(args: list[str]) -> str:
     return _job_id(result.stdout)
 
 
+def _run(args: list[str]) -> None:
+    subprocess.run(args, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def _write_pass1_manifest(root: str) -> str:
+    manifest_path = Path(root) / "pass1_broad" / "variants.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest = build_manifest("broad", runs_per_array_task=3, array_task_count=12)
+    if int(manifest["variant_count"]) != 36:
+        raise RuntimeError(f"pass1 manifest must contain 36 variants, got {manifest['variant_count']}")
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return str(manifest_path)
+
+
 def submit_chain(
     *,
     pass1_job: Path,
@@ -29,8 +48,9 @@ def submit_chain(
     root_prefix: str,
 ) -> dict[str, Any]:
     Path("slurm_logs").mkdir(parents=True, exist_ok=True)
-    pass1_jobid = _submit(["sbatch", "--parsable", f"--export=ALL,SWEEP_ROOT_PREFIX={root_prefix}", str(pass1_job)])
+    pass1_jobid = _submit(["sbatch", "--parsable", "--hold", f"--export=ALL,SWEEP_ROOT_PREFIX={root_prefix}", str(pass1_job)])
     root = f"{root_prefix}_{pass1_jobid}"
+    pass1_manifest = _write_pass1_manifest(root)
     center_json = f"{root}/selection/pass1/physical_best_candidate.json"
 
     pass1_aggregate_jobid = _submit(
@@ -64,6 +84,8 @@ def submit_chain(
     payload = {
         "root": root,
         "center_json": center_json,
+        "pass1_manifest": pass1_manifest,
+        "pass2_manifest": f"{root}/pass2_focused/variants.json",
         "pass1_jobid": pass1_jobid,
         "pass1_aggregate_jobid": pass1_aggregate_jobid,
         "pass2_jobid": pass2_jobid,
@@ -79,6 +101,7 @@ def submit_chain(
     out = Path(root) / "selection" / "submission_chain.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    _run(["scontrol", "release", pass1_jobid])
     return payload
 
 

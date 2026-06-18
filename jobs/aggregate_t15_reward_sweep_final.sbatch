@@ -1,17 +1,17 @@
 #!/bin/bash
-#SBATCH --job-name=tokamak-rl-v2-reward288-agg-final
+#SBATCH --job-name=tokamak-rl-v2-reward72-agg-final
 #SBATCH --partition=batch
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
-#SBATCH --output=slurm_logs/tokamak-rl-v2-csv-reward288-final-%j.out
-#SBATCH --error=slurm_logs/tokamak-rl-v2-csv-reward288-final-%j.err
+#SBATCH --output=slurm_logs/tokamak-rl-v2-csv-reward72-final-%j.out
+#SBATCH --error=slurm_logs/tokamak-rl-v2-csv-reward72-final-%j.err
 
 set -euo pipefail
 
 cd /scratch/$USER/tokamak
 
-: "${ROOT:?Set ROOT to outputs/t15_reward_sweep288_legal_1m_<PASS1_JOBID>}"
+: "${ROOT:?Set ROOT to outputs/t15_reward_sweep72_legal_1m_<PASS1_JOBID>}"
 
 srun \
   --container-image /scratch/$USER/tokamak/tokamak-rl-v2.sqsh \

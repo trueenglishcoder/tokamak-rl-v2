@@ -1,17 +1,17 @@
 #!/bin/bash
-#SBATCH --job-name=tokamak-rl-v2-reward288-agg1
+#SBATCH --job-name=tokamak-rl-v2-reward72-agg1
 #SBATCH --partition=batch
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
-#SBATCH --output=slurm_logs/tokamak-rl-v2-csv-reward288-agg1-%j.out
-#SBATCH --error=slurm_logs/tokamak-rl-v2-csv-reward288-agg1-%j.err
+#SBATCH --output=slurm_logs/tokamak-rl-v2-csv-reward72-agg1-%j.out
+#SBATCH --error=slurm_logs/tokamak-rl-v2-csv-reward72-agg1-%j.err
 
 set -euo pipefail
 
 cd /scratch/$USER/tokamak
 
-: "${ROOT:?Set ROOT to outputs/t15_reward_sweep288_legal_1m_<PASS1_JOBID>}"
+: "${ROOT:?Set ROOT to outputs/t15_reward_sweep72_legal_1m_<PASS1_JOBID>}"
 
 srun \
   --container-image /scratch/$USER/tokamak/tokamak-rl-v2.sqsh \
@@ -46,6 +46,14 @@ except Exception as exc:
     raise SystemExit(3)
 print(f"pass1_center_reward={center}")
 PYCENTER
+
+    mkdir -p "${ROOT}/pass2_focused/generated_configs"
+    python3 scripts/build_reward_sweep_manifest.py \
+      --pass focused \
+      --center "${ROOT}/selection/pass1/physical_best_candidate.json" \
+      --runs-per-array-task 3 \
+      --array-task-count 12 \
+      --output "${ROOT}/pass2_focused/variants.json"
 
     python3 scripts/build_reward_sweep_rerun_manifest.py \
       "${ROOT}" \

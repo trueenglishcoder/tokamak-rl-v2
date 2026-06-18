@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from scripts.aggregate_reward_sweep import aggregate, score_eval_row, write_outputs
+from scripts.audit_reward_sweep_pipeline import audit as audit_reward_sweep_pipeline
 from scripts.build_reward_sweep_manifest import build_manifest, build_variants
 from scripts.build_reward_sweep_rerun_manifest import build as build_rerun_manifest
 from scripts.summarize_two_pass_reward_sweep_physical import summarize_two_pass
@@ -134,6 +135,17 @@ def test_reward_sweep_job_blocks_stale_name_leaks() -> None:
     assert "--wandb-optional" in runner
     assert "shutil.rmtree(output_dir / \"exports\"" in runner
     assert "shutil.rmtree(output_dir / \"checkpoints\"" in runner
+    for path in (
+        ROOT / "jobs/aggregate_t15_reward_sweep_pass1.sbatch",
+        ROOT / "jobs/aggregate_t15_reward_sweep_final.sbatch",
+        PASS1_12_JOB,
+        PASS2_12_JOB,
+    ):
+        assert "reward288" not in path.read_text(encoding="utf-8")
+
+
+def test_reward_sweep_pipeline_static_audit_passes() -> None:
+    assert audit_reward_sweep_pipeline(ROOT) == []
 
 
 def test_reward_sweep_score_penalizes_bad_current_and_completion() -> None:
@@ -374,6 +386,7 @@ def test_two_pass_summary_writes_final_recommendation(tmp_path: Path) -> None:
 
 def test_submit_two_pass_chain_uses_slurm_dependencies(tmp_path: Path, monkeypatch) -> None:
     submitted: list[list[str]] = []
+    released: list[list[str]] = []
     jobids = iter(["111\n", "112\n", "113\n", "114\n"])
 
     class Result:
@@ -382,6 +395,9 @@ def test_submit_two_pass_chain_uses_slurm_dependencies(tmp_path: Path, monkeypat
             self.stderr = ""
 
     def fake_run(args, check, text, stdout, stderr):
+        if args[0] == "scontrol":
+            released.append(list(args))
+            return Result("")
         submitted.append(list(args))
         return Result(next(jobids))
 
@@ -401,8 +417,13 @@ def test_submit_two_pass_chain_uses_slurm_dependencies(tmp_path: Path, monkeypat
     assert payload["pass2_jobid"] == "113"
     assert payload["final_aggregate_jobid"] == "114"
     assert payload["root"] == "outputs/t15_reward_sweep72_legal_1m_111"
-    assert submitted[0][2] == "--export=ALL,SWEEP_ROOT_PREFIX=outputs/t15_reward_sweep72_legal_1m"
+    assert "--hold" in submitted[0]
+    assert "--export=ALL,SWEEP_ROOT_PREFIX=outputs/t15_reward_sweep72_legal_1m" in submitted[0]
     assert submitted[1][2] == "--dependency=afterany:111"
     assert submitted[2][2] == "--dependency=afterok:112"
     assert submitted[3][2] == "--dependency=afterany:113"
     assert (tmp_path / payload["root"] / "selection" / "submission_chain.json").exists()
+    assert (tmp_path / payload["root"] / "pass1_broad" / "variants.json").exists()
+    assert payload["pass1_manifest"] == f"{payload['root']}/pass1_broad/variants.json"
+    assert payload["pass2_manifest"] == f"{payload['root']}/pass2_focused/variants.json"
+    assert released == [["scontrol", "release", "111"]]
