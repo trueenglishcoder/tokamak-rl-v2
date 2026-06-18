@@ -22,7 +22,7 @@ def main(argv: list[str] | None = None) -> int:
 
     root = Path(args.data_root).resolve()
     ip_values: list[np.ndarray] = []
-    rates: list[np.ndarray] = []
+    step_rates: list[np.ndarray] = []
     durations: dict[str, float] = {}
     for path in sorted(root.glob(str(args.ip_glob))):
         match = SHOT_RE.search(path.name)
@@ -33,22 +33,31 @@ def main(argv: list[str] | None = None) -> int:
         t = arr[:, 0]
         ip = _smooth(arr[:, 1], window=int(args.smooth_window))
         _validate_time(t, path)
-        dt = np.gradient(t)
-        dipdt = np.gradient(ip, t)
-        finite = np.isfinite(ip) & np.isfinite(dipdt) & np.isfinite(dt) & (dt > 0.0)
-        ip_values.append(ip[finite])
-        rates.append(dipdt[finite])
+        finite_ip = np.isfinite(ip)
+        ip_values.append(ip[finite_ip])
+        step_dt = np.diff(t)
+        step_dipdt = np.diff(ip) / step_dt
+        step_valid = np.isfinite(step_dipdt) & (step_dt >= 5.0e-4)
+        step_rates.append(step_dipdt[step_valid])
         durations[shot_id] = float(t[-1] - t[0])
     if not ip_values:
         raise ValueError(f"no Ip CSV files matched under {root}")
     ip_all = np.concatenate(ip_values)
-    rate_all = np.concatenate(rates)
-    positive = rate_all[rate_all > 0.0]
-    negative = -rate_all[rate_all < 0.0]
+    step_rate_all = np.concatenate(step_rates)
+    positive = step_rate_all[step_rate_all > 0.0]
+    negative = -step_rate_all[step_rate_all < 0.0]
     if ip_all.size < 1000:
         raise ValueError(f"reference-limit build needs at least 1000 samples, got {ip_all.size}")
     if positive.size == 0 or negative.size == 0:
         raise ValueError("reference-limit build needs both positive and negative Ip rates")
+    positive_p95 = float(np.nanpercentile(positive, 95.0))
+    positive_p99 = float(np.nanpercentile(positive, 99.0))
+    negative_p95 = float(np.nanpercentile(negative, 95.0))
+    negative_p99 = float(np.nanpercentile(negative, 99.0))
+    positive_ramp = positive[positive >= 0.1 * positive_p95]
+    negative_ramp = negative[negative >= 0.1 * negative_p95]
+    if positive_ramp.size == 0 or negative_ramp.size == 0:
+        raise ValueError("reference-limit build could not identify robust Ip ramp portions")
     out = {
         "source_layout": "split_t15_data_new",
         "source_root": str(root),
@@ -61,14 +70,19 @@ def main(argv: list[str] | None = None) -> int:
         "ip_p99": float(np.nanpercentile(ip_all, 99.0)),
         "ip_p01_a": float(np.nanpercentile(ip_all, 1.0)),
         "ip_p99_a": float(np.nanpercentile(ip_all, 99.0)),
-        "positive_dipdt_p95_a_per_s": float(np.nanpercentile(positive, 95.0)),
-        "positive_dipdt_p99_a_per_s": float(np.nanpercentile(positive, 99.0)),
-        "negative_dipdt_abs_p95_a_per_s": float(np.nanpercentile(negative, 95.0)),
-        "negative_dipdt_abs_p99_a_per_s": float(np.nanpercentile(negative, 99.0)),
-        "positive_dip_dt_p95_a_per_s": float(np.nanpercentile(positive, 95.0)),
-        "positive_dip_dt_p99_a_per_s": float(np.nanpercentile(positive, 99.0)),
-        "negative_dip_dt_abs_p95_a_per_s": float(np.nanpercentile(negative, 95.0)),
-        "negative_dip_dt_abs_p99_a_per_s": float(np.nanpercentile(negative, 99.0)),
+        "positive_dipdt_p95_a_per_s": positive_p95,
+        "positive_dipdt_p99_a_per_s": positive_p99,
+        "negative_dipdt_abs_p95_a_per_s": negative_p95,
+        "negative_dipdt_abs_p99_a_per_s": negative_p99,
+        "positive_dip_dt_p95_a_per_s": positive_p95,
+        "positive_dip_dt_p99_a_per_s": positive_p99,
+        "negative_dip_dt_abs_p95_a_per_s": negative_p95,
+        "negative_dip_dt_abs_p99_a_per_s": negative_p99,
+        "ramp_mean_threshold_fraction_of_p95": 0.1,
+        "positive_ramp_mean_a_per_s": float(np.nanmean(positive_ramp)),
+        "negative_ramp_abs_mean_a_per_s": float(np.nanmean(negative_ramp)),
+        "positive_dipdt_ramp_mean_a_per_s": float(np.nanmean(positive_ramp)),
+        "negative_dipdt_abs_ramp_mean_a_per_s": float(np.nanmean(negative_ramp)),
         "duration_s_by_shot": durations,
         "duration_s_min": float(min(durations.values())),
         "duration_s_max": float(max(durations.values())),

@@ -199,11 +199,14 @@ def _reference(raw: Mapping[str, Any], base: Path) -> ReferenceConfig:
             plateau_max_fraction=float(ip_raw.get("plateau_max_fraction", 1.0)),
             end_min_fraction=float(ip_raw.get("end_min_fraction", 0.25)),
             end_max_fraction=float(ip_raw.get("end_max_fraction", 1.0)),
+            ramp_rate_reference=str(ip_raw.get("ramp_rate_reference", "p95")),
+            ramp_up_rate_min_fraction=float(ip_raw.get("ramp_up_rate_min_fraction", 0.0)),
             ramp_up_rate_fraction=float(ip_raw.get("ramp_up_rate_fraction", 0.25)),
+            ramp_down_rate_min_fraction=float(ip_raw.get("ramp_down_rate_min_fraction", 0.0)),
             ramp_down_rate_fraction=float(ip_raw.get("ramp_down_rate_fraction", 0.25)),
             hold_min_steps=int(ip_raw.get("hold_min_steps", 50)),
             hold_max_steps=int(ip_raw.get("hold_max_steps", 250)),
-            final_hold_min_steps=int(ip_raw.get("final_hold_min_steps", 50)),
+            final_hold_min_steps=int(ip_raw.get("final_hold_min_steps", 0)),
             smooth_ramps=bool(ip_raw.get("smooth_ramps", True)),
             max_delta_fraction=float(ip_raw.get("max_delta_fraction", 1.0)),
         ),
@@ -336,10 +339,28 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
             raise ValueError("reference.ip segmented_profile step bounds are invalid")
         if ip.segment_count_min < 2 or ip.segment_count_max < ip.segment_count_min:
             raise ValueError("reference.ip segmented_profile count bounds are invalid")
-        for name in ("plateau_min_fraction", "plateau_max_fraction", "end_min_fraction", "end_max_fraction", "ramp_up_rate_fraction", "ramp_down_rate_fraction", "max_delta_fraction"):
+        if ip.ramp_rate_reference not in {"p95", "robust_mean"}:
+            raise ValueError("reference.ip.ramp_rate_reference must be 'p95' or 'robust_mean'")
+        for name in (
+            "plateau_min_fraction",
+            "plateau_max_fraction",
+            "end_min_fraction",
+            "end_max_fraction",
+            "ramp_up_rate_min_fraction",
+            "ramp_up_rate_fraction",
+            "ramp_down_rate_min_fraction",
+            "ramp_down_rate_fraction",
+            "max_delta_fraction",
+        ):
             value = float(getattr(ip, name))
-            if not math.isfinite(value) or value <= 0.0:
-                raise ValueError(f"reference.ip.{name} must be finite and positive")
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"reference.ip.{name} must be finite and non-negative")
+            if name in {"ramp_up_rate_fraction", "ramp_down_rate_fraction", "max_delta_fraction"} and value <= 0.0:
+                raise ValueError(f"reference.ip.{name} must be positive")
+        if float(ip.ramp_up_rate_min_fraction) > float(ip.ramp_up_rate_fraction):
+            raise ValueError("reference.ip ramp-up rate fractions are invalid")
+        if float(ip.ramp_down_rate_min_fraction) > float(ip.ramp_down_rate_fraction):
+            raise ValueError("reference.ip ramp-down rate fractions are invalid")
         if float(ip.plateau_min_fraction) > float(ip.plateau_max_fraction):
             raise ValueError("reference.ip plateau fractions are invalid")
         if float(ip.end_min_fraction) > float(ip.end_max_fraction):

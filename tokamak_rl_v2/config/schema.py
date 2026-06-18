@@ -57,11 +57,14 @@ class IpReferenceConfig:
     plateau_max_fraction: float = 1.0
     end_min_fraction: float = 0.25
     end_max_fraction: float = 1.0
+    ramp_rate_reference: Literal["p95", "robust_mean"] = "p95"
+    ramp_up_rate_min_fraction: float = 0.0
     ramp_up_rate_fraction: float = 0.25
+    ramp_down_rate_min_fraction: float = 0.0
     ramp_down_rate_fraction: float = 0.25
     hold_min_steps: int = 50
     hold_max_steps: int = 250
-    final_hold_min_steps: int = 50
+    final_hold_min_steps: int = 0
     smooth_ramps: bool = True
     max_delta_fraction: float = 1.0
 
