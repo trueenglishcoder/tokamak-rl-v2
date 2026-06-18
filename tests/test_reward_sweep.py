@@ -84,22 +84,24 @@ def test_current_constraint_broad_manifest_has_36_and_current_termination() -> N
     assert variants[0]["folder"] == "b000_s0_i0_a0"
     assert variants[-1]["folder"] == "b035_s2_i2_a3"
     first = variants[0]
-    assert first["reward"]["shape_mean_weight"] == 8.0
-    assert first["reward"]["shape_max_weight"] == 2.5
-    assert first["reward"]["ip_weight"] == 2.5
-    assert first["reward"]["current_weight"] == 3.0
+    assert first["reward"]["shape_mean_weight"] == 1.0
+    assert first["reward"]["shape_max_weight"] == 0.25
+    assert first["reward"]["ip_weight"] == 0.75
+    assert first["reward"]["current_weight"] == 2.0
     assert first["reward"]["current_soft_fraction"] == 0.90
     assert first["reward"]["current_bad_fraction"] == 1.20
-    assert first["reward"]["derivative_weight"] == 0.25
+    assert first["reward"]["derivative_weight"] == 0.10
     assert first["reward"]["derivative_soft_fraction"] == 0.90
     assert first["reward"]["derivative_bad_fraction"] == 1.20
+    assert first["reward"]["terminal_reward"] == -20.0
+    assert first["reward"]["terminal_remaining_cost"] == 25000.0
     assert first["reward"]["action_weight"] == 0.01
     assert first["reward"]["delta_action_weight"] == 0.025
     assert first["sim"] == {
         "terminate_on_current_limit": True,
-        "current_termination_over_limit_a": 20000.0,
-        "current_termination_grace_steps": 25,
-        "current_hard_termination_fraction": 1.20,
+        "current_termination_over_limit_a": 50000.0,
+        "current_termination_grace_steps": 50,
+        "current_hard_termination_fraction": 1.40,
     }
 
 
@@ -112,15 +114,17 @@ def test_current_constraint_focused_manifest_uses_center_soft_fractions() -> Non
         "current_soft_fraction": 0.90,
         "derivative_weight": 0.25,
         "derivative_soft_fraction": 0.85,
+        "terminal_remaining_cost": 50000.0,
     }
     variants = build_variants("focused", center, profile=PROFILE_CURRENT_CONSTRAINT)
     assert len(variants) == 36
     assert variants[0]["folder"] == "f000_sf0_if0_af0"
     assert variants[-1]["folder"] == "f035_sf2_if2_af3"
-    assert variants[0]["reward"]["shape_mean_weight"] == 8.0
-    assert variants[0]["reward"]["ip_weight"] == 2.55
+    assert variants[0]["reward"]["shape_mean_weight"] == 7.5
+    assert variants[0]["reward"]["ip_weight"] == 2.1
     assert variants[0]["reward"]["current_weight"] == 3.0
     assert variants[0]["reward"]["derivative_weight"] == 0.1875
+    assert variants[0]["reward"]["terminal_remaining_cost"] == 37500.0
     assert variants[0]["reward"]["current_soft_fraction"] == 0.90
     assert variants[0]["reward"]["derivative_soft_fraction"] == 0.90
     center_variant = variants[17]
@@ -129,6 +133,7 @@ def test_current_constraint_focused_manifest_uses_center_soft_fractions() -> Non
     assert center_variant["reward"]["ip_weight"] == 3.0
     assert center_variant["reward"]["current_weight"] == 4.0
     assert center_variant["reward"]["derivative_weight"] == 0.25
+    assert center_variant["reward"]["terminal_remaining_cost"] == 50000.0
     assert center_variant["reward"]["current_soft_fraction"] == 0.90
     assert center_variant["reward"]["derivative_soft_fraction"] == 0.85
     assert center_variant["sim"]["terminate_on_current_limit"] is True
@@ -165,6 +170,7 @@ def test_current_constraint_manifest_has_exact_36_variants() -> None:
     assert broad["variant_count"] == 36
     assert broad["fixed_sim"]["terminate_on_current_limit"] is True
     assert broad["fixed_reward"]["action_weight"] == 0.01
+    assert broad["fixed_reward"]["terminal_remaining_cost"] == 50000.0
 
 
 def test_reward_sweep_array_task_mappings() -> None:
@@ -235,11 +241,12 @@ def test_reward_sweep_candidate_applies_sim_overrides_to_generated_config(tmp_pa
     assert run_candidate(args) == 0
     generated = json.loads((sweep_root / "generated_configs" / f"{variant['folder']}.json").read_text(encoding="utf-8"))
     assert generated["sim"]["terminate_on_current_limit"] is True
-    assert generated["sim"]["current_termination_over_limit_a"] == 20000.0
-    assert generated["sim"]["current_termination_grace_steps"] == 25
-    assert generated["sim"]["current_hard_termination_fraction"] == 1.20
+    assert generated["sim"]["current_termination_over_limit_a"] == 50000.0
+    assert generated["sim"]["current_termination_grace_steps"] == 50
+    assert generated["sim"]["current_hard_termination_fraction"] == 1.40
     assert generated["reward"]["action_weight"] == 0.01
     assert generated["reward"]["delta_action_weight"] == 0.025
+    assert generated["reward"]["terminal_remaining_cost"] == 25000.0
 
 
 def test_reward_sweep_job_blocks_stale_name_leaks() -> None:

@@ -245,6 +245,63 @@ def test_physical_reward_terminal_penalty_applies_to_hard_failures() -> None:
     assert float((rb.reward[0] - rb.reward[1]).item()) == pytest.approx(100.0)
 
 
+def test_physical_reward_terminal_remaining_cost_is_worse_earlier() -> None:
+    reward_fn = T15PhysicalReward(
+        RewardConfig(reward_scale=1.0, terminal_reward=-100.0, terminal_remaining_cost=1000.0),
+        control_rate_hz=1000.0,
+    )
+    ref = torch.zeros((2, 32, 2), dtype=torch.float32)
+    action = torch.zeros((2, 9), dtype=torch.float32)
+    rb = reward_fn(
+        ip=torch.tensor([200000.0, 200000.0]),
+        ip_ref=torch.tensor([200000.0, 200000.0]),
+        boundary_points=ref,
+        reference_points=ref,
+        action=action,
+        previous_action=action,
+        current_over_limit_a=torch.zeros((2,), dtype=torch.float32),
+        current_usage_fraction=torch.full((2,), 0.5, dtype=torch.float32),
+        current_margin_fraction=torch.full((2,), 0.5, dtype=torch.float32),
+        derivative_usage=torch.zeros((2,), dtype=torch.float32),
+        boundary_found=torch.ones((2,), dtype=torch.bool),
+        terminated=torch.tensor([True, True], dtype=torch.bool),
+        episode_progress=torch.tensor([0.25, 0.75], dtype=torch.float32),
+    )
+    assert rb.reward[0] < rb.reward[1]
+    assert float((rb.reward[1] - rb.reward[0]).item()) == pytest.approx(500.0)
+    comps = rb.components
+    assert float(comps["terminal_remaining_loss"][0].item()) == pytest.approx(750.0)
+    assert float(comps["terminal_remaining_loss"][1].item()) == pytest.approx(250.0)
+    assert float(comps["terminal_total_penalty"][0].item()) == pytest.approx(-850.0)
+
+
+def test_physical_reward_terminal_remaining_cost_does_not_change_live_steps() -> None:
+    base = T15PhysicalReward(RewardConfig(reward_scale=1.0, terminal_remaining_cost=0.0), control_rate_hz=1000.0)
+    survival = T15PhysicalReward(RewardConfig(reward_scale=1.0, terminal_remaining_cost=100000.0), control_rate_hz=1000.0)
+    ref = torch.zeros((2, 32, 2), dtype=torch.float32)
+    action = torch.zeros((2, 9), dtype=torch.float32)
+    kwargs = dict(
+        ip=torch.tensor([200000.0, 220000.0]),
+        ip_ref=torch.tensor([210000.0, 210000.0]),
+        boundary_points=ref,
+        reference_points=ref,
+        action=action,
+        previous_action=action,
+        current_over_limit_a=torch.zeros((2,), dtype=torch.float32),
+        current_usage_fraction=torch.full((2,), 0.5, dtype=torch.float32),
+        current_margin_fraction=torch.full((2,), 0.5, dtype=torch.float32),
+        derivative_usage=torch.zeros((2,), dtype=torch.float32),
+        boundary_found=torch.ones((2,), dtype=torch.bool),
+        terminated=torch.zeros((2,), dtype=torch.bool),
+        episode_progress=torch.tensor([0.25, 0.75], dtype=torch.float32),
+    )
+    base_rb = base(**kwargs)
+    survival_rb = survival(**kwargs)
+    assert torch.allclose(base_rb.reward, survival_rb.reward)
+    assert torch.count_nonzero(survival_rb.components["terminal_remaining_loss"]).item() == 0
+    assert torch.count_nonzero(survival_rb.components["terminal_total_penalty"]).item() == 0
+
+
 def test_physical_reward_penalizes_current_usage() -> None:
     reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0), control_rate_hz=1000.0)
     ref = torch.zeros((2, 32, 2), dtype=torch.float32)
@@ -945,6 +1002,13 @@ def test_config_loader_rejects_invalid_values(tmp_path: Path) -> None:
     bad_missing_boundary.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(ValueError, match="boundary_missing_error"):
         load_experiment_config(bad_missing_boundary)
+
+    data = json.loads(CONFIG.read_text())
+    data["reward"]["terminal_remaining_cost"] = -1.0
+    bad_terminal_remaining = tmp_path / "bad_terminal_remaining.json"
+    bad_terminal_remaining.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="terminal_remaining_cost"):
+        load_experiment_config(bad_terminal_remaining)
 
     data = json.loads(CONFIG.read_text())
     data["reward"]["late_error_weight"] = 1.0

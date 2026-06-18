@@ -76,16 +76,27 @@ class T15PhysicalReward:
             + float(c.action_weight) * action_loss
             + float(c.delta_action_weight) * delta_action_loss
         )
-        reward = -float(c.reward_scale) * physical_cost
-        reward = torch.where(
-            terminated,
-            reward + torch.full_like(reward, float(c.terminal_reward) * float(c.reward_scale)),
-            reward,
-        )
         if episode_progress is None:
-            progress = torch.zeros_like(reward)
+            progress = torch.zeros_like(physical_cost)
         else:
-            progress = torch.clamp(episode_progress.to(dtype=reward.dtype, device=reward.device).reshape_as(reward), 0.0, 1.0)
+            progress = torch.clamp(episode_progress.to(dtype=physical_cost.dtype, device=physical_cost.device).reshape_as(physical_cost), 0.0, 1.0)
+
+        terminal_mask = terminated.to(dtype=torch.bool, device=physical_cost.device).reshape_as(physical_cost)
+        terminal_remaining_loss = torch.where(
+            terminal_mask,
+            torch.clamp(1.0 - progress, min=0.0) * float(c.terminal_remaining_cost),
+            torch.zeros_like(physical_cost),
+        )
+        immediate_terminal_penalty = torch.where(
+            terminal_mask,
+            torch.full_like(physical_cost, float(c.terminal_reward) * float(c.reward_scale)),
+            torch.zeros_like(physical_cost),
+        )
+        remaining_terminal_penalty = -float(c.reward_scale) * terminal_remaining_loss
+        terminal_total_penalty = immediate_terminal_penalty + remaining_terminal_penalty
+
+        reward = -float(c.reward_scale) * physical_cost
+        reward = reward + terminal_total_penalty
 
         return RewardBatch(
             reward=reward,
@@ -109,6 +120,8 @@ class T15PhysicalReward:
                 "derivative_loss": derivative_loss,
                 "action_loss": action_loss,
                 "delta_action_loss": delta_action_loss,
+                "terminal_remaining_loss": terminal_remaining_loss,
+                "terminal_total_penalty": terminal_total_penalty,
                 "boundary_found": boundary_found.to(dtype=reward.dtype),
             },
         )

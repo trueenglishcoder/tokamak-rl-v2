@@ -111,6 +111,7 @@ class RewardConfig:
     derivative_soft_fraction: float = 0.90
     derivative_bad_fraction: float = 1.40
     terminal_reward: float = -20.0
+    terminal_remaining_cost: float = 0.0
     reward_scale: float = 1.0
 
 

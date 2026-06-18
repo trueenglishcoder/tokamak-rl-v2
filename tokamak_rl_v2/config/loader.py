@@ -487,6 +487,8 @@ def _validate_reward_config(reward: RewardConfig, *, prefix: str) -> None:
             raise ValueError(f"{prefix}.{bad_name} must be finite and greater than {prefix}.{soft_name}")
     if not math.isfinite(float(reward.terminal_reward)):
         raise ValueError(f"{prefix}.terminal_reward must be finite")
+    if not math.isfinite(float(reward.terminal_remaining_cost)) or float(reward.terminal_remaining_cost) < 0.0:
+        raise ValueError(f"{prefix}.terminal_remaining_cost must be finite and non-negative")
 
 
 _STALE_REWARD_KEYS = {

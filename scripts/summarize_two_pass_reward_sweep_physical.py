@@ -88,6 +88,7 @@ def _reward_from_row(row: dict[str, Any]) -> dict[str, float]:
         "derivative_bad_fraction",
         "action_weight",
         "delta_action_weight",
+        "terminal_remaining_cost",
     ]
     reward: dict[str, float] = {}
     for key in keys:

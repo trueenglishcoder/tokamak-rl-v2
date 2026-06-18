@@ -49,58 +49,62 @@ FOCUS_ACTUATOR_FACTORS = [
 ]
 
 CURRENT_CONSTRAINT_BROAD_SHAPE_REGIMES = [
-    {"id": "s0", "shape_mean_weight": 8.0, "shape_max_weight": 2.5},
-    {"id": "s1", "shape_mean_weight": 10.0, "shape_max_weight": 3.0},
-    {"id": "s2", "shape_mean_weight": 12.0, "shape_max_weight": 3.5},
+    {"id": "s0", "shape_mean_weight": 1.0, "shape_max_weight": 0.25},
+    {"id": "s1", "shape_mean_weight": 2.0, "shape_max_weight": 0.50},
+    {"id": "s2", "shape_mean_weight": 4.0, "shape_max_weight": 1.00},
 ]
 
 CURRENT_CONSTRAINT_BROAD_IP_REGIMES = [
-    {"id": "i0", "ip_weight": 2.5},
-    {"id": "i1", "ip_weight": 3.0},
-    {"id": "i2", "ip_weight": 3.5},
+    {"id": "i0", "ip_weight": 0.75},
+    {"id": "i1", "ip_weight": 1.50},
+    {"id": "i2", "ip_weight": 3.00},
 ]
 
 CURRENT_CONSTRAINT_BROAD_SAFETY_REGIMES = [
     {
         "id": "a0",
-        "current_weight": 3.0,
+        "current_weight": 2.0,
         "current_soft_fraction": 0.90,
-        "derivative_weight": 0.25,
+        "derivative_weight": 0.10,
         "derivative_soft_fraction": 0.90,
+        "terminal_remaining_cost": 25000.0,
     },
     {
         "id": "a1",
         "current_weight": 4.0,
         "current_soft_fraction": 0.90,
         "derivative_weight": 0.25,
-        "derivative_soft_fraction": 0.85,
+        "derivative_soft_fraction": 0.90,
+        "terminal_remaining_cost": 50000.0,
     },
     {
         "id": "a2",
-        "current_weight": 4.0,
+        "current_weight": 6.0,
         "current_soft_fraction": 0.85,
-        "derivative_weight": 0.50,
+        "derivative_weight": 0.35,
         "derivative_soft_fraction": 0.85,
+        "terminal_remaining_cost": 100000.0,
     },
     {
         "id": "a3",
-        "current_weight": 6.0,
+        "current_weight": 8.0,
         "current_soft_fraction": 0.85,
         "derivative_weight": 0.50,
         "derivative_soft_fraction": 0.85,
+        "terminal_remaining_cost": 200000.0,
     },
 ]
 
 CURRENT_CONSTRAINT_FOCUS_SHAPE_FACTORS = [
-    {"id": "sf0", "factor": 0.80},
+    {"id": "sf0", "factor": 0.75},
     {"id": "sf1", "factor": 1.00},
-    {"id": "sf2", "factor": 1.20},
+    {"id": "sf2", "factor": 1.25},
 ]
 
 CURRENT_CONSTRAINT_FOCUS_IP_FACTORS = [
-    {"id": "if0", "factor": 0.85},
+    {"id": "if0", "factor": 0.70},
     {"id": "if1", "factor": 1.00},
-    {"id": "if2", "factor": 1.15},
+    {"id": "if2", "factor": 1.30},
 ]
 
 CURRENT_CONSTRAINT_FOCUS_SAFETY_FACTORS = [
@@ -108,6 +112,7 @@ CURRENT_CONSTRAINT_FOCUS_SAFETY_FACTORS = [
         "id": "af0",
         "current_factor": 0.75,
         "derivative_factor": 0.75,
+        "terminal_remaining_factor": 0.75,
         "current_soft_fraction": 0.90,
         "derivative_soft_fraction": 0.90,
     },
@@ -115,20 +120,23 @@ CURRENT_CONSTRAINT_FOCUS_SAFETY_FACTORS = [
         "id": "af1",
         "current_factor": 1.00,
         "derivative_factor": 1.00,
+        "terminal_remaining_factor": 1.00,
         "current_soft_fraction": "center",
         "derivative_soft_fraction": "center",
     },
     {
         "id": "af2",
-        "current_factor": 1.25,
-        "derivative_factor": 1.25,
+        "current_factor": 1.35,
+        "derivative_factor": 1.35,
+        "terminal_remaining_factor": 1.50,
         "current_soft_fraction": 0.85,
         "derivative_soft_fraction": 0.85,
     },
     {
         "id": "af3",
-        "current_factor": 1.75,
-        "derivative_factor": 1.50,
+        "current_factor": 1.80,
+        "derivative_factor": 1.80,
+        "terminal_remaining_factor": 2.00,
         "current_soft_fraction": 0.85,
         "derivative_soft_fraction": 0.85,
     },
@@ -140,6 +148,7 @@ FIXED_REWARD = {
     "ip_scale_a": 25000.0,
     "reward_scale": 1.0,
     "terminal_reward": -20.0,
+    "terminal_remaining_cost": 0.0,
     "current_soft_fraction": 1.0,
     "current_bad_fraction": 1.4,
     "derivative_soft_fraction": 1.0,
@@ -154,6 +163,7 @@ CURRENT_CONSTRAINT_FIXED_REWARD = {
     "ip_scale_a": 25000.0,
     "reward_scale": 1.0,
     "terminal_reward": -20.0,
+    "terminal_remaining_cost": 50000.0,
     "current_bad_fraction": 1.20,
     "derivative_bad_fraction": 1.20,
     "action_weight": 0.01,
@@ -162,9 +172,9 @@ CURRENT_CONSTRAINT_FIXED_REWARD = {
 
 CURRENT_CONSTRAINT_FIXED_SIM = {
     "terminate_on_current_limit": True,
-    "current_termination_over_limit_a": 20000.0,
-    "current_termination_grace_steps": 25,
-    "current_hard_termination_fraction": 1.20,
+    "current_termination_over_limit_a": 50000.0,
+    "current_termination_grace_steps": 50,
+    "current_hard_termination_fraction": 1.40,
 }
 
 
@@ -265,6 +275,8 @@ def build_broad_variants(profile: str = PROFILE_LEGAL) -> list[dict[str, Any]]:
                     reward["current_soft_fraction"] = actuator["current_soft_fraction"]
                 if "derivative_soft_fraction" in actuator:
                     reward["derivative_soft_fraction"] = actuator["derivative_soft_fraction"]
+                if "terminal_remaining_cost" in actuator:
+                    reward["terminal_remaining_cost"] = actuator["terminal_remaining_cost"]
                 extra = {"actuator_regime": actuator["id"]}
                 if fixed_sim:
                     extra["sim"] = fixed_sim
@@ -316,7 +328,7 @@ def load_center_reward(path: Path) -> dict[str, float]:
     missing = [key for key in required if key not in reward]
     if missing:
         raise ValueError(f"Center candidate at {path} is missing reward fields: {', '.join(missing)}")
-    optional = ("current_soft_fraction", "derivative_soft_fraction")
+    optional = ("current_soft_fraction", "derivative_soft_fraction", "terminal_reward", "terminal_remaining_cost")
     return {key: float(reward[key]) for key in (*required, *optional) if key in reward}
 
 
@@ -349,6 +361,11 @@ def build_focused_variants(center_reward: dict[str, float], profile: str = PROFI
                     "ip_weight": _rounded(center_reward["ip_weight"] * float(ip["factor"])),
                     "current_weight": _rounded(center_reward["current_weight"] * float(actuator["current_factor"])),
                     "derivative_weight": _rounded(center_reward["derivative_weight"] * float(actuator["derivative_factor"])),
+                    "terminal_reward": _rounded(center_reward.get("terminal_reward", fixed_reward["terminal_reward"])),
+                    "terminal_remaining_cost": _rounded(
+                        center_reward.get("terminal_remaining_cost", fixed_reward["terminal_remaining_cost"])
+                        * float(actuator.get("terminal_remaining_factor", 1.0))
+                    ),
                     "current_soft_fraction": current_soft,
                     "derivative_soft_fraction": derivative_soft,
                 }
@@ -358,6 +375,7 @@ def build_focused_variants(center_reward: dict[str, float], profile: str = PROFI
                     "ip_factor": ip["factor"],
                     "current_factor": actuator["current_factor"],
                     "derivative_factor": actuator["derivative_factor"],
+                    "terminal_remaining_factor": actuator.get("terminal_remaining_factor", 1.0),
                 }
                 if fixed_sim:
                     extra["sim"] = fixed_sim
