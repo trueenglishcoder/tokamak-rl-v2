@@ -452,8 +452,6 @@ class Trainer:
 
 
     def _train_local_replay_distributed(self) -> dict[str, Any]:
-        if self.resume_checkpoint is not None:
-            raise ValueError("local_replay distributed training is not exactly resumable because replay/env state is sharded per rank")
         if int(self.config.training.actor_workers) != 1:
             raise ValueError("local_replay does not use actor_workers")
         self._write_config_snapshot()
@@ -474,26 +472,53 @@ class Trainer:
         loss_f = reward_f = health_f = None
         loss_writer = health_writer = reward_writer = None
         if self._rank0():
-            loss_f = losses_path.open("w", newline="", encoding="utf-8")
-            reward_f = rewards_path.open("w", newline="", encoding="utf-8")
-            health_f = health_path.open("w", newline="", encoding="utf-8")
+            append_logs = self.resume_checkpoint is not None
+            write_loss_header = (not append_logs) or not losses_path.exists() or losses_path.stat().st_size == 0
+            write_health_header = (not append_logs) or not health_path.exists() or health_path.stat().st_size == 0
+            loss_f = losses_path.open("a" if append_logs else "w", newline="", encoding="utf-8")
+            reward_f = rewards_path.open("a" if append_logs else "w", newline="", encoding="utf-8")
+            health_f = health_path.open("a" if append_logs else "w", newline="", encoding="utf-8")
             loss_writer = csv.DictWriter(loss_f, fieldnames=loss_fields)
             health_writer = csv.DictWriter(health_f, fieldnames=["step", *replay_health_fields])
-            loss_writer.writeheader()
-            health_writer.writeheader()
+            if write_loss_header:
+                loss_writer.writeheader()
+            if write_health_header:
+                health_writer.writeheader()
+            if append_logs and rewards_path.exists() and rewards_path.stat().st_size > 0:
+                with rewards_path.open("r", newline="", encoding="utf-8") as existing_reward_f:
+                    reader = csv.reader(existing_reward_f)
+                    try:
+                        reward_header = next(reader)
+                    except StopIteration:
+                        reward_header = []
+                if reward_header:
+                    reward_writer = csv.DictWriter(reward_f, fieldnames=reward_header)
 
         obs = self.env.reset()
         critic_obs = self.env.critic_obs()
+        if self.resume_checkpoint is not None:
+            obs = self._load_checkpoint(self.resume_checkpoint, restore_env=False, restore_replay=False, restore_rng=False)
+            critic_obs = self.env.critic_obs()
+            # Exact distributed resume would require per-rank env/replay/RNG state.
+            # The saved checkpoint is rank-0 state, so warm resume keeps the learned
+            # weights/optimiser state and reseeds each rank independently while replay refills.
+            rank_seed = int(self.config.training.seed) + int(self.distributed_rank) * 1000003 + int(self.start_step) + 17
+            torch.manual_seed(rank_seed)
+            if self.device.type == "cuda":
+                torch.cuda.manual_seed_all(rank_seed)
+            np.random.seed(rank_seed % (2**32 - 1))
+            random.seed(rank_seed)
+            self._broadcast_trainable_state()
         start = time.time()
-        updates = 0
+        updates = int(self.start_updates)
         local_step = 0
-        env_steps = 0
-        last_update_step = 0
-        last_checkpoint_step = 0
-        last_eval_step = 0
+        env_steps = int(self.start_step)
+        last_update_step = int(self.start_step)
+        last_checkpoint_step = int(self.start_step)
+        last_eval_step = int(self.start_step)
         rollout_chunks_seen = 0
         reward_acc = _RewardComponentAccumulator(self.device)
-        progress = tqdm(total=max(self.steps, 0), desc="local-replay-train", unit="env-step", dynamic_ncols=True) if self._rank0() else None
+        progress = tqdm(total=max(self.steps - self.start_step, 0), desc="local-replay-train", unit="env-step", dynamic_ncols=True) if self._rank0() else None
 
         try:
             while env_steps < self.steps:
@@ -959,38 +984,39 @@ class Trainer:
 
     @staticmethod
     def _selection_score(metrics: dict[str, float]) -> float:
-        late_cost = float(metrics.get("physical_cost_late", metrics.get("physical_cost", float("inf"))))
-        current_over = float(metrics.get("current_over_limit_a_late_max", metrics.get("current_over_limit_a_max", metrics.get("current_over_limit_a", 0.0))))
-        boundary_found = float(metrics.get("boundary_found_late_min", metrics.get("boundary_found_min", metrics.get("boundary_found", 1.0))))
-        min_completion = float(metrics.get("min_episode_completion", metrics.get("mean_episode_completion", 1.0)))
-        mean_completion = float(metrics.get("mean_episode_completion", min_completion))
-        shape_drift = float(metrics.get("shape_error_mean_m_late_minus_early", 0.0))
-        ip_drift = float(metrics.get("ip_error_a_late_minus_early", 0.0))
+        def metric(name: str, default: float) -> float:
+            try:
+                value = float(metrics.get(name, default))
+            except (TypeError, ValueError):
+                return default
+            return value if np.isfinite(value) else default
 
-        current_penalty = min(max(current_over, 0.0), 1.0e6) if np.isfinite(current_over) else 1.0e6
-        boundary_gap = max(0.999 - boundary_found, 0.0) if np.isfinite(boundary_found) else 0.999
-        completion_key = min_completion if np.isfinite(min_completion) else 0.0
-        mean_completion_key = mean_completion if np.isfinite(mean_completion) else completion_key
-        if completion_key < 0.95:
-            return float(
-                -1.0e9
-                + 1.0e6 * completion_key
-                + 1.0e5 * mean_completion_key
-                - 10.0 * current_penalty
-                - 1.0e6 * boundary_gap
-                - (late_cost if np.isfinite(late_cost) else 1.0e6)
-            )
+        completion = metric("mean_episode_completion", 0.0)
+        min_completion = metric("min_episode_completion", completion)
+        boundary_late = metric("boundary_found_late_min", metric("boundary_found_min", metric("boundary_found", 0.0)))
+        terminated_boundary = metric("terminated_boundary_late_max", metric("terminated_boundary_max", metric("terminated_boundary", 0.0)))
+        current_over = metric("current_over_limit_a_late_max", metric("current_over_limit_a_max", metric("current_over_limit_a", 0.0)))
+        current_fraction = metric("current_over_limit_fraction_late", metric("current_over_limit_fraction", 0.0))
+        shape_mean = metric("shape_error_mean_m_late", metric("shape_error_mean_m", 1.0))
+        shape_max = metric("shape_error_max_m_late", metric("shape_error_max_m", 1.0))
+        ip_error = metric("ip_error_a_late", metric("ip_error_a", 1.0e6))
+        action_rms = metric("action_rms_late", metric("action_rms", 1.0))
+        delta_action_rms = metric("delta_action_rms_late", metric("delta_action_rms", 1.0))
 
-        score = 1.0e6 - (late_cost if np.isfinite(late_cost) else 1.0e6)
-        if current_penalty > 0.0:
-            score -= 1.0e5 + current_penalty
-        if boundary_gap > 0.0:
-            score -= 1.0e5 * boundary_gap
-        if np.isfinite(shape_drift) and shape_drift > 0.0:
-            score -= 1000.0 * shape_drift
-        if np.isfinite(ip_drift) and ip_drift > 0.0:
-            score -= ip_drift / 1000.0
-        return float(score)
+        objective = (
+            200.0 * max(0.95 - completion, 0.0)
+            + 200.0 * max(0.90 - min_completion, 0.0)
+            + 1000.0 * max(0.999 - boundary_late, 0.0)
+            + 100.0 * max(terminated_boundary, 0.0)
+            + 3.0 * max(current_over, 0.0) / 20000.0
+            + 2.0 * max(current_fraction, 0.0)
+            + 2.0 * max(shape_mean, 0.0) / 0.03
+            + 1.0 * max(shape_max, 0.0) / 0.08
+            + 2.0 * max(ip_error, 0.0) / 25000.0
+            + 0.5 * max(action_rms, 0.0) / 0.5
+            + 0.25 * max(delta_action_rms, 0.0) / 0.1
+        )
+        return float(-objective)
 
     def _metadata(self, *, step: int, updates: int, eval_score: float | None = None) -> dict[str, object]:
         exact_resume_supported = not bool(self._last_actor_devices) and self.distributed_mode != "local_replay"
@@ -1207,7 +1233,7 @@ class Trainer:
         }, path)
         return path
 
-    def _load_checkpoint(self, path: str | Path, *, restore_env: bool = True) -> torch.Tensor:
+    def _load_checkpoint(self, path: str | Path, *, restore_env: bool = True, restore_replay: bool = True, restore_rng: bool = True) -> torch.Tensor:
         checkpoint_path = Path(path)
         if not checkpoint_path.exists():
             raise FileNotFoundError(f"resume checkpoint does not exist: {checkpoint_path}")
@@ -1220,7 +1246,8 @@ class Trainer:
         self.target_actor.load_state_dict(data["target_actor_state_dict"])
         self.target_critic.load_state_dict(data["target_critic_state_dict"])
         self.learner.load_state_dict(data["learner_state"])
-        self.replay.load_state_dict(data["replay_state"])
+        if restore_replay:
+            self.replay.load_state_dict(data["replay_state"])
         self.best_eval = float(data.get("best_eval", -float("inf")))
         raw_details = data.get("best_eval_details", {})
         self.best_eval_details = dict(raw_details) if isinstance(raw_details, dict) else {}
@@ -1230,7 +1257,7 @@ class Trainer:
         if self.steps <= self.start_step:
             raise ValueError(f"resume target steps must be greater than checkpoint step: target={self.steps}, checkpoint={self.start_step}")
         rng = data.get("rng_state", {})
-        if isinstance(rng, dict):
+        if restore_rng and isinstance(rng, dict):
             if "torch" in rng:
                 torch.set_rng_state(rng["torch"].detach().cpu())
             if self.device.type == "cuda":
