@@ -13,6 +13,10 @@ except ModuleNotFoundError:  # pragma: no cover - used when run as python3 scrip
 ACTIVE_JOB_FILES = [
     "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_pass1_broad.sbatch",
     "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_pass2_focused.sbatch",
+    "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_current_constraint_pass1.sbatch",
+    "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_current_constraint_pass2.sbatch",
+    "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_fixed_horizon_pass1.sbatch",
+    "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_fixed_horizon_pass2.sbatch",
     "jobs/aggregate_t15_reward_sweep_pass1.sbatch",
     "jobs/aggregate_t15_reward_sweep_final.sbatch",
 ]
@@ -57,11 +61,11 @@ def audit(root: Path) -> list[str]:
             issues.append(f"{rel} still hardcodes 500-step eval")
         if "build_reward_sweep_manifest.py" in text and "aggregate_t15_reward_sweep_pass1" not in rel:
             issues.append(f"{rel} writes a manifest inside an array task; manifests should be prepared upstream")
-        if rel.endswith("pass1_broad.sbatch") and "missing pass1 reward-sweep manifest" not in text:
+        if "pass1" in rel and "aggregate" not in rel and "missing pass1 reward-sweep manifest" not in text:
             issues.append(f"{rel} does not require the prebuilt pass1 manifest")
-        if rel.endswith("pass2_focused.sbatch") and "missing pass2 reward-sweep manifest" not in text:
+        if "pass2" in rel and "aggregate" not in rel and "missing pass2 reward-sweep manifest" not in text:
             issues.append(f"{rel} does not require the aggregate-built pass2 manifest")
-        if rel.endswith(("pass1_broad.sbatch", "pass2_focused.sbatch")) and "REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-288}" not in text:
+        if "sweep_t15_csv_segmented_profile_rewards_12gpu" in rel and "REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-288}" not in text:
             issues.append(f"{rel} must default REPLAY_CAPACITY_EPISODES to 288 for 2000-step A100 sweeps")
         if rel.endswith("aggregate_t15_reward_sweep_pass1.sbatch") and "pass2_focused/variants.json" not in text:
             issues.append(f"{rel} does not build the focused pass2 manifest")

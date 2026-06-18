@@ -9,6 +9,7 @@ from typing import Any
 
 PROFILE_LEGAL = "legal"
 PROFILE_CURRENT_CONSTRAINT = "current_constraint"
+PROFILE_FIXED_HORIZON = "fixed_horizon"
 
 BROAD_SHAPE_REGIMES = [
     {"id": "s0", "shape_mean_weight": 1.5, "shape_max_weight": 0.375},
@@ -177,47 +178,191 @@ CURRENT_CONSTRAINT_FIXED_SIM = {
     "current_hard_termination_fraction": 1.40,
 }
 
+FIXED_HORIZON_BROAD_SHAPE_REGIMES = [
+    {"id": "s0", "shape_mean_weight": 1.0, "shape_max_weight": 0.25},
+    {"id": "s1", "shape_mean_weight": 2.0, "shape_max_weight": 0.50},
+    {"id": "s2", "shape_mean_weight": 4.0, "shape_max_weight": 1.00},
+]
+
+FIXED_HORIZON_BROAD_IP_REGIMES = [
+    {"id": "i0", "ip_weight": 0.75},
+    {"id": "i1", "ip_weight": 1.50},
+    {"id": "i2", "ip_weight": 3.00},
+]
+
+FIXED_HORIZON_BROAD_SAFETY_REGIMES = [
+    {
+        "id": "a0",
+        "current_weight": 1.0,
+        "current_soft_fraction": 0.90,
+        "derivative_weight": 0.10,
+        "derivative_soft_fraction": 0.90,
+    },
+    {
+        "id": "a1",
+        "current_weight": 2.0,
+        "current_soft_fraction": 0.90,
+        "derivative_weight": 0.25,
+        "derivative_soft_fraction": 0.85,
+    },
+    {
+        "id": "a2",
+        "current_weight": 4.0,
+        "current_soft_fraction": 0.85,
+        "derivative_weight": 0.50,
+        "derivative_soft_fraction": 0.85,
+    },
+    {
+        "id": "a3",
+        "current_weight": 6.0,
+        "current_soft_fraction": 0.80,
+        "derivative_weight": 0.75,
+        "derivative_soft_fraction": 0.80,
+    },
+]
+
+FIXED_HORIZON_FOCUS_SHAPE_FACTORS = [
+    {"id": "sf0", "factor": 0.75},
+    {"id": "sf1", "factor": 1.00},
+    {"id": "sf2", "factor": 1.25},
+]
+
+FIXED_HORIZON_FOCUS_IP_FACTORS = [
+    {"id": "if0", "factor": 0.70},
+    {"id": "if1", "factor": 1.00},
+    {"id": "if2", "factor": 1.30},
+]
+
+FIXED_HORIZON_FOCUS_SAFETY_FACTORS = [
+    {
+        "id": "af0",
+        "current_factor": 0.70,
+        "derivative_factor": 0.70,
+        "current_soft_fraction": 0.90,
+        "derivative_soft_fraction": 0.90,
+    },
+    {
+        "id": "af1",
+        "current_factor": 1.00,
+        "derivative_factor": 1.00,
+        "current_soft_fraction": "center",
+        "derivative_soft_fraction": "center",
+    },
+    {
+        "id": "af2",
+        "current_factor": 1.35,
+        "derivative_factor": 1.35,
+        "current_soft_fraction": 0.85,
+        "derivative_soft_fraction": 0.85,
+    },
+    {
+        "id": "af3",
+        "current_factor": 1.80,
+        "derivative_factor": 1.80,
+        "current_soft_fraction": 0.80,
+        "derivative_soft_fraction": 0.80,
+    },
+]
+
+FIXED_HORIZON_FIXED_REWARD = {
+    "shape_mean_scale_m": 0.03,
+    "shape_max_scale_m": 0.08,
+    "ip_scale_a": 25000.0,
+    "reward_scale": 1.0,
+    "terminal_reward": -20.0,
+    "terminal_remaining_cost": 0.0,
+    "current_bad_fraction": 1.20,
+    "derivative_bad_fraction": 1.20,
+    "action_weight": 0.01,
+    "delta_action_weight": 0.025,
+}
+
+FIXED_HORIZON_FIXED_SIM = {
+    "terminate_on_boundary_loss": False,
+    "terminate_on_current_limit": False,
+}
+
 
 def _rounded(value: float) -> float:
     return float(round(float(value), 8))
 
 
 def _check_profile(profile: str) -> str:
-    if profile not in {PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT}:
+    if profile not in {PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON}:
         raise ValueError(f"Unknown reward sweep profile: {profile}")
     return profile
 
 
 def _fixed_reward(profile: str) -> dict[str, Any]:
-    return dict(CURRENT_CONSTRAINT_FIXED_REWARD if _check_profile(profile) == PROFILE_CURRENT_CONSTRAINT else FIXED_REWARD)
+    profile = _check_profile(profile)
+    if profile == PROFILE_CURRENT_CONSTRAINT:
+        return dict(CURRENT_CONSTRAINT_FIXED_REWARD)
+    if profile == PROFILE_FIXED_HORIZON:
+        return dict(FIXED_HORIZON_FIXED_REWARD)
+    return dict(FIXED_REWARD)
 
 
 def _fixed_sim(profile: str) -> dict[str, Any]:
-    return dict(CURRENT_CONSTRAINT_FIXED_SIM if _check_profile(profile) == PROFILE_CURRENT_CONSTRAINT else {})
+    profile = _check_profile(profile)
+    if profile == PROFILE_CURRENT_CONSTRAINT:
+        return dict(CURRENT_CONSTRAINT_FIXED_SIM)
+    if profile == PROFILE_FIXED_HORIZON:
+        return dict(FIXED_HORIZON_FIXED_SIM)
+    return {}
 
 
 def _broad_shape_regimes(profile: str) -> list[dict[str, Any]]:
-    return CURRENT_CONSTRAINT_BROAD_SHAPE_REGIMES if _check_profile(profile) == PROFILE_CURRENT_CONSTRAINT else BROAD_SHAPE_REGIMES
+    profile = _check_profile(profile)
+    if profile == PROFILE_CURRENT_CONSTRAINT:
+        return CURRENT_CONSTRAINT_BROAD_SHAPE_REGIMES
+    if profile == PROFILE_FIXED_HORIZON:
+        return FIXED_HORIZON_BROAD_SHAPE_REGIMES
+    return BROAD_SHAPE_REGIMES
 
 
 def _broad_ip_regimes(profile: str) -> list[dict[str, Any]]:
-    return CURRENT_CONSTRAINT_BROAD_IP_REGIMES if _check_profile(profile) == PROFILE_CURRENT_CONSTRAINT else BROAD_IP_REGIMES
+    profile = _check_profile(profile)
+    if profile == PROFILE_CURRENT_CONSTRAINT:
+        return CURRENT_CONSTRAINT_BROAD_IP_REGIMES
+    if profile == PROFILE_FIXED_HORIZON:
+        return FIXED_HORIZON_BROAD_IP_REGIMES
+    return BROAD_IP_REGIMES
 
 
 def _broad_safety_regimes(profile: str) -> list[dict[str, Any]]:
-    return CURRENT_CONSTRAINT_BROAD_SAFETY_REGIMES if _check_profile(profile) == PROFILE_CURRENT_CONSTRAINT else BROAD_ACTUATOR_REGIMES
+    profile = _check_profile(profile)
+    if profile == PROFILE_CURRENT_CONSTRAINT:
+        return CURRENT_CONSTRAINT_BROAD_SAFETY_REGIMES
+    if profile == PROFILE_FIXED_HORIZON:
+        return FIXED_HORIZON_BROAD_SAFETY_REGIMES
+    return BROAD_ACTUATOR_REGIMES
 
 
 def _focus_shape_factors(profile: str) -> list[dict[str, Any]]:
-    return CURRENT_CONSTRAINT_FOCUS_SHAPE_FACTORS if _check_profile(profile) == PROFILE_CURRENT_CONSTRAINT else FOCUS_SHAPE_FACTORS
+    profile = _check_profile(profile)
+    if profile == PROFILE_CURRENT_CONSTRAINT:
+        return CURRENT_CONSTRAINT_FOCUS_SHAPE_FACTORS
+    if profile == PROFILE_FIXED_HORIZON:
+        return FIXED_HORIZON_FOCUS_SHAPE_FACTORS
+    return FOCUS_SHAPE_FACTORS
 
 
 def _focus_ip_factors(profile: str) -> list[dict[str, Any]]:
-    return CURRENT_CONSTRAINT_FOCUS_IP_FACTORS if _check_profile(profile) == PROFILE_CURRENT_CONSTRAINT else FOCUS_IP_FACTORS
+    profile = _check_profile(profile)
+    if profile == PROFILE_CURRENT_CONSTRAINT:
+        return CURRENT_CONSTRAINT_FOCUS_IP_FACTORS
+    if profile == PROFILE_FIXED_HORIZON:
+        return FIXED_HORIZON_FOCUS_IP_FACTORS
+    return FOCUS_IP_FACTORS
 
 
 def _focus_safety_factors(profile: str) -> list[dict[str, Any]]:
-    return CURRENT_CONSTRAINT_FOCUS_SAFETY_FACTORS if _check_profile(profile) == PROFILE_CURRENT_CONSTRAINT else FOCUS_ACTUATOR_FACTORS
+    profile = _check_profile(profile)
+    if profile == PROFILE_CURRENT_CONSTRAINT:
+        return CURRENT_CONSTRAINT_FOCUS_SAFETY_FACTORS
+    if profile == PROFILE_FIXED_HORIZON:
+        return FIXED_HORIZON_FOCUS_SAFETY_FACTORS
+    return FOCUS_ACTUATOR_FACTORS
 
 
 def _soft_fraction(value: Any, center_reward: dict[str, float], key: str, default: float) -> float:
@@ -494,7 +639,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Write deterministic two-pass reward sweep manifests.")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--pass", dest="sweep_pass", choices=("broad", "focused"), default="broad")
-    parser.add_argument("--profile", choices=(PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT), default=PROFILE_LEGAL)
+    parser.add_argument("--profile", choices=(PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON), default=PROFILE_LEGAL)
     parser.add_argument("--center", type=Path, default=None, help="physical_best_candidate.json for focused pass")
     parser.add_argument("--variant-budget", type=int, default=None)
     parser.add_argument("--runs-per-array-task", type=int, default=None)

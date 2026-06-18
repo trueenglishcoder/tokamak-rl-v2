@@ -7,7 +7,7 @@ from pathlib import Path
 
 from scripts.aggregate_reward_sweep import aggregate, score_eval_row, write_outputs
 from scripts.audit_reward_sweep_pipeline import audit as audit_reward_sweep_pipeline
-from scripts.build_reward_sweep_manifest import PROFILE_CURRENT_CONSTRAINT, build_manifest, build_variants
+from scripts.build_reward_sweep_manifest import PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON, build_manifest, build_variants
 from scripts.build_reward_sweep_rerun_manifest import build as build_rerun_manifest
 from scripts.run_reward_sweep_candidate import run_candidate
 from scripts.summarize_two_pass_reward_sweep_physical import summarize_two_pass
@@ -22,6 +22,8 @@ PASS1_12_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_pass1_
 PASS2_12_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_pass2_focused.sbatch"
 PASS1_CURRENT_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_current_constraint_pass1.sbatch"
 PASS2_CURRENT_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_current_constraint_pass2.sbatch"
+PASS1_FIXED_HORIZON_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_fixed_horizon_pass1.sbatch"
+PASS2_FIXED_HORIZON_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_fixed_horizon_pass2.sbatch"
 RERUN_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_rerun_1gpu.sbatch"
 
 
@@ -105,6 +107,31 @@ def test_current_constraint_broad_manifest_has_36_and_current_termination() -> N
     }
 
 
+def test_fixed_horizon_broad_manifest_has_36_and_no_termination() -> None:
+    variants = build_variants("broad", profile=PROFILE_FIXED_HORIZON)
+    assert len(variants) == 36
+    assert variants[0]["folder"] == "b000_s0_i0_a0"
+    assert variants[-1]["folder"] == "b035_s2_i2_a3"
+    first = variants[0]
+    assert first["reward"]["shape_mean_weight"] == 1.0
+    assert first["reward"]["shape_max_weight"] == 0.25
+    assert first["reward"]["ip_weight"] == 0.75
+    assert first["reward"]["current_weight"] == 1.0
+    assert first["reward"]["current_soft_fraction"] == 0.90
+    assert first["reward"]["current_bad_fraction"] == 1.20
+    assert first["reward"]["derivative_weight"] == 0.10
+    assert first["reward"]["derivative_soft_fraction"] == 0.90
+    assert first["reward"]["derivative_bad_fraction"] == 1.20
+    assert first["reward"]["terminal_reward"] == -20.0
+    assert first["reward"]["terminal_remaining_cost"] == 0.0
+    assert first["reward"]["action_weight"] == 0.01
+    assert first["reward"]["delta_action_weight"] == 0.025
+    assert first["sim"] == {
+        "terminate_on_boundary_loss": False,
+        "terminate_on_current_limit": False,
+    }
+
+
 def test_current_constraint_focused_manifest_uses_center_soft_fractions() -> None:
     center = {
         "shape_mean_weight": 10.0,
@@ -139,6 +166,40 @@ def test_current_constraint_focused_manifest_uses_center_soft_fractions() -> Non
     assert center_variant["sim"]["terminate_on_current_limit"] is True
 
 
+def test_fixed_horizon_focused_manifest_uses_center_soft_fractions() -> None:
+    center = {
+        "shape_mean_weight": 2.0,
+        "shape_max_weight": 0.5,
+        "ip_weight": 1.5,
+        "current_weight": 2.0,
+        "current_soft_fraction": 0.90,
+        "derivative_weight": 0.25,
+        "derivative_soft_fraction": 0.85,
+        "terminal_remaining_cost": 0.0,
+    }
+    variants = build_variants("focused", center, profile=PROFILE_FIXED_HORIZON)
+    assert len(variants) == 36
+    assert variants[0]["folder"] == "f000_sf0_if0_af0"
+    assert variants[-1]["folder"] == "f035_sf2_if2_af3"
+    assert variants[0]["reward"]["shape_mean_weight"] == 1.5
+    assert variants[0]["reward"]["ip_weight"] == 1.05
+    assert variants[0]["reward"]["current_weight"] == 1.4
+    assert variants[0]["reward"]["derivative_weight"] == 0.175
+    assert variants[0]["reward"]["terminal_remaining_cost"] == 0.0
+    assert variants[0]["reward"]["current_soft_fraction"] == 0.90
+    assert variants[0]["reward"]["derivative_soft_fraction"] == 0.90
+    center_variant = variants[17]
+    assert center_variant["folder"] == "f017_sf1_if1_af1"
+    assert center_variant["reward"]["shape_mean_weight"] == 2.0
+    assert center_variant["reward"]["ip_weight"] == 1.5
+    assert center_variant["reward"]["current_weight"] == 2.0
+    assert center_variant["reward"]["derivative_weight"] == 0.25
+    assert center_variant["reward"]["current_soft_fraction"] == 0.90
+    assert center_variant["reward"]["derivative_soft_fraction"] == 0.85
+    assert center_variant["sim"]["terminate_on_boundary_loss"] is False
+    assert center_variant["sim"]["terminate_on_current_limit"] is False
+
+
 def test_reward_sweep_manifests_have_36_variants_without_hidden_subsampling() -> None:
     broad = build_manifest("broad", runs_per_array_task=3, array_task_count=12)
     assert broad["variant_count"] == 36
@@ -171,6 +232,19 @@ def test_current_constraint_manifest_has_exact_36_variants() -> None:
     assert broad["fixed_sim"]["terminate_on_current_limit"] is True
     assert broad["fixed_reward"]["action_weight"] == 0.01
     assert broad["fixed_reward"]["terminal_remaining_cost"] == 50000.0
+
+
+def test_fixed_horizon_manifest_has_exact_36_variants() -> None:
+    broad = build_manifest("broad", profile=PROFILE_FIXED_HORIZON, runs_per_array_task=3, array_task_count=12)
+    assert broad["profile"] == PROFILE_FIXED_HORIZON
+    assert broad["variant_count"] == 36
+    assert broad["fixed_sim"] == {
+        "terminate_on_boundary_loss": False,
+        "terminate_on_current_limit": False,
+    }
+    assert broad["fixed_reward"]["action_weight"] == 0.01
+    assert broad["fixed_reward"]["delta_action_weight"] == 0.025
+    assert broad["fixed_reward"]["terminal_remaining_cost"] == 0.0
 
 
 def test_reward_sweep_array_task_mappings() -> None:
@@ -249,8 +323,72 @@ def test_reward_sweep_candidate_applies_sim_overrides_to_generated_config(tmp_pa
     assert generated["reward"]["terminal_remaining_cost"] == 25000.0
 
 
+def test_reward_sweep_candidate_applies_fixed_horizon_sim_overrides(tmp_path: Path, monkeypatch) -> None:
+    variant = build_variants("broad", profile=PROFILE_FIXED_HORIZON)[0]
+    manifest = tmp_path / "variants.json"
+    manifest.write_text(json.dumps({"variants": [variant]}), encoding="utf-8")
+    base_config = tmp_path / "base.json"
+    base_config.write_text(
+        json.dumps(
+            {
+                "name": "base",
+                "sim": {"terminate_on_boundary_loss": True, "terminate_on_current_limit": True, "max_episode_steps": 2000},
+                "reference": {"ip": {}},
+                "reward": {},
+                "training": {},
+                "learner": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class Result:
+        returncode = 0
+
+    monkeypatch.setattr("scripts.run_reward_sweep_candidate.subprocess.run", lambda *args, **kwargs: Result())
+    sweep_root = tmp_path / "sweep"
+    args = Namespace(
+        manifest=manifest,
+        variant_index=0,
+        base_config=base_config,
+        sweep_root=sweep_root,
+        train_env_steps=100,
+        eval_env_steps=50,
+        num_envs=4,
+        batch_size=2,
+        replay_capacity_episodes=288,
+        rollout_chunk_length=64,
+        updates_per_rollout_chunk=32,
+        wandb_project="test",
+        wandb_mode="offline",
+        device="cuda:0",
+        sim_config_path=Path("/sim.toml"),
+        initial_state_library=Path("/states.npz"),
+        reference_limits=Path("/limits.json"),
+    )
+
+    assert run_candidate(args) == 0
+    generated = json.loads((sweep_root / "generated_configs" / f"{variant['folder']}.json").read_text(encoding="utf-8"))
+    assert generated["sim"]["terminate_on_boundary_loss"] is False
+    assert generated["sim"]["terminate_on_current_limit"] is False
+    assert generated["training"]["eval_max_steps"] == 2000
+    assert generated["reward"]["terminal_remaining_cost"] == 0.0
+    assert generated["reward"]["action_weight"] == 0.01
+    assert generated["reward"]["delta_action_weight"] == 0.025
+
+
 def test_reward_sweep_job_blocks_stale_name_leaks() -> None:
-    for path in (PASS1_JOB, PASS2_JOB, PASS1_12_JOB, PASS2_12_JOB, PASS1_CURRENT_JOB, PASS2_CURRENT_JOB, RERUN_JOB):
+    for path in (
+        PASS1_JOB,
+        PASS2_JOB,
+        PASS1_12_JOB,
+        PASS2_12_JOB,
+        PASS1_CURRENT_JOB,
+        PASS2_CURRENT_JOB,
+        PASS1_FIXED_HORIZON_JOB,
+        PASS2_FIXED_HORIZON_JOB,
+        RERUN_JOB,
+    ):
         text = path.read_text(encoding="utf-8")
         assert "unset RUN_NAME" in text
         assert "unset TRAIN_OUTPUT" in text
@@ -268,6 +406,8 @@ def test_reward_sweep_job_blocks_stale_name_leaks() -> None:
     assert "REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-288}" in PASS2_12_JOB.read_text(encoding="utf-8")
     assert "REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-288}" in PASS1_CURRENT_JOB.read_text(encoding="utf-8")
     assert "REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-288}" in PASS2_CURRENT_JOB.read_text(encoding="utf-8")
+    assert "REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-288}" in PASS1_FIXED_HORIZON_JOB.read_text(encoding="utf-8")
+    assert "REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-288}" in PASS2_FIXED_HORIZON_JOB.read_text(encoding="utf-8")
     for path in (
         ROOT / "jobs/aggregate_t15_reward_sweep_pass1.sbatch",
         ROOT / "jobs/aggregate_t15_reward_sweep_final.sbatch",
