@@ -89,6 +89,7 @@
     "derivative_soft_fraction": 1.0,
     "derivative_bad_fraction": 1.4,
     "terminal_reward": -20.0,
+    "terminal_remaining_cost": 0.0,
     "reward_scale": 1.0
   },
   "randomization": {
@@ -101,7 +102,7 @@
     "actor_initial_std": 0.2
   },
   "learner": {
-    "discount": 0.99,
+    "discount": 0.9995,
     "unroll_length": 64,
     "batch_size": 256,
     "replay_capacity_episodes": 288,
