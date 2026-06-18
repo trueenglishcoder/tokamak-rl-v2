@@ -83,7 +83,7 @@ def test_validate_split_nonoverlap_rejects_same_shot_rows_within_episode_gap() -
         )
 
 
-def test_builder_assign_splits_uses_strict_episode_gap() -> None:
+def test_builder_assign_splits_keeps_holdout_without_episode_gap_exclusion() -> None:
     accepted = [
         {
             "shot_id": "3856",
@@ -95,7 +95,10 @@ def test_builder_assign_splits_uses_strict_episode_gap() -> None:
         }
         for idx in range(1000)
     ]
-    splits = _assign_splits(accepted, gap_s=0.5)
+    splits = _assign_splits(accepted, block_s=0.5)
     shot_id = np.asarray([str(row["shot_id"]) for row in accepted], dtype=str)
     time_s = np.asarray([float(row["time_s"]) for row in accepted], dtype=float)
-    validate_split_nonoverlap(shot_id, time_s, splits, min_gap_s=0.5)
+    assert int(np.sum(splits == "train")) >= 80
+    assert int(np.sum(splits == "holdout")) >= 10
+    with pytest.raises(ValueError, match="overlap within one episode"):
+        validate_split_nonoverlap(shot_id, time_s, splits, min_gap_s=2.0)

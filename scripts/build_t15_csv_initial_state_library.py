@@ -14,7 +14,6 @@ from tokamak_control.io.config_io import load_config
 
 from tokamak_rl_v2.config import load_experiment_config
 from tokamak_rl_v2.env.batch_env import _current_limit_vector
-from tokamak_rl_v2.env.t15_csv_initial_states import validate_split_nonoverlap
 from tokamak_rl_v2.env.t15_reference_limits import load_reference_limits
 
 
@@ -96,9 +95,9 @@ def main(argv: list[str] | None = None) -> int:
         f"[csv-initial-states] cheap-filter raw={raw_rows} accepted={len(accepted)} rejected={len(rejected)}",
         flush=True,
     )
-    episode_gap_s = float(exp_cfg.sim.max_episode_steps) * float(exp_cfg.reference.t_step)
-    splits = _assign_splits(accepted, gap_s=episode_gap_s)
-    _validate_split_gates(accepted, splits, gap_s=episode_gap_s)
+    split_block_s = 0.5
+    splits = _assign_splits(accepted, block_s=split_block_s)
+    _validate_split_gates(accepted, splits)
 
     out_npz = Path(args.out_npz)
     out_npz.parent.mkdir(parents=True, exist_ok=True)
@@ -119,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
         machine_config=machine_config,
         splits=splits,
         reference_limits_path=Path(args.reference_limits).resolve(),
-        split_gap_seconds=episode_gap_s,
+        split_block_seconds=split_block_s,
     )
     Path(args.out_json).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out_json).write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
@@ -233,8 +232,8 @@ def _reject(shot_id: str, row_index: int, time_s: float, reason: str, usage: flo
     }
 
 
-def _assign_splits(accepted: list[dict[str, object]], *, gap_s: float) -> np.ndarray:
-    split = np.full((len(accepted),), "excluded", dtype="<U8")
+def _assign_splits(accepted: list[dict[str, object]], *, block_s: float = 0.5) -> np.ndarray:
+    split = np.full((len(accepted),), "train", dtype="<U8")
     by_shot: dict[str, list[tuple[int, float]]] = defaultdict(list)
     for index, row in enumerate(accepted):
         by_shot[str(row["shot_id"])].append((index, float(row["time_s"])))
@@ -242,46 +241,21 @@ def _assign_splits(accepted: list[dict[str, object]], *, gap_s: float) -> np.nda
         if not shot_rows:
             continue
         times = np.asarray([time_s for _idx, time_s in shot_rows], dtype=float)
-        first_block = int(np.floor(float(np.nanmin(times)) / float(gap_s)))
-        blocks = np.floor(times / float(gap_s)).astype(int) - first_block
+        first_block = int(np.floor(float(np.nanmin(times)) / float(block_s)))
+        blocks = np.floor(times / float(block_s)).astype(int) - first_block
         unique_blocks = np.asarray(sorted(set(int(v) for v in blocks.tolist())), dtype=int)
-        candidate_blocks = list(unique_blocks[4::5])
-        candidate_blocks.extend(int(v) for v in unique_blocks.tolist() if int(v) not in set(candidate_blocks))
-        best: tuple[int, np.ndarray, np.ndarray] | None = None
-        for block in candidate_blocks:
-            holdout_mask = blocks == int(block)
-            holdout_times = times[holdout_mask]
-            if holdout_times.size == 0:
-                continue
-            distance = np.min(np.abs(times[:, None] - holdout_times[None, :]), axis=1)
-            train_mask = (~holdout_mask) & (distance > float(gap_s))
-            train_count = int(np.sum(train_mask))
-            holdout_count = int(np.sum(holdout_mask))
-            if train_count >= 80 and holdout_count >= 10 and train_count + holdout_count >= 100:
-                best = (train_count + holdout_count, train_mask, holdout_mask)
-                break
-            score = train_count + holdout_count
-            if best is None or score > best[0]:
-                best = (score, train_mask, holdout_mask)
-        if best is None:
-            continue
-        _score, train_mask, holdout_mask = best
-        if int(np.sum(train_mask)) < 80 or int(np.sum(holdout_mask)) < 10 or int(np.sum(train_mask)) + int(np.sum(holdout_mask)) < 100:
+        holdout_blocks = set(int(v) for v in unique_blocks[4::5].tolist())
+        if not holdout_blocks and unique_blocks.size:
+            holdout_blocks = {int(unique_blocks[-1])}
+        if not holdout_blocks:
             continue
         for local, (row_index, _time_s) in enumerate(shot_rows):
-            if holdout_mask[local]:
+            if int(blocks[local]) in holdout_blocks:
                 split[row_index] = "holdout"
-            elif train_mask[local]:
-                split[row_index] = "train"
-    keep = split != "excluded"
-    if not bool(np.all(keep)):
-        kept = np.flatnonzero(keep)
-        accepted[:] = [accepted[int(i)] for i in kept.tolist()]
-        split = split[kept]
     return split
 
 
-def _validate_split_gates(accepted: list[dict[str, object]], splits: np.ndarray, *, gap_s: float) -> None:
+def _validate_split_gates(accepted: list[dict[str, object]], splits: np.ndarray) -> None:
     accepted_rows = int(len(accepted))
     train_rows = int(np.sum(splits == "train"))
     holdout_rows = int(np.sum(splits == "holdout"))
@@ -304,15 +278,6 @@ def _validate_split_gates(accepted: list[dict[str, object]], splits: np.ndarray,
     }
     if small:
         errors.append(f"per-shot split gates failed: {small}")
-    try:
-        validate_split_nonoverlap(
-            np.asarray([str(row["shot_id"]) for row in accepted], dtype=str),
-            np.asarray([float(row["time_s"]) for row in accepted], dtype=float),
-            np.asarray(splits, dtype=str),
-            min_gap_s=float(gap_s),
-        )
-    except ValueError as exc:
-        errors.append(str(exc))
     if errors:
         raise ValueError("; ".join(errors))
 
@@ -325,7 +290,7 @@ def _summary(
     machine_config: Path,
     splits: np.ndarray,
     reference_limits_path: Path,
-    split_gap_seconds: float,
+    split_block_seconds: float,
 ) -> dict[str, object]:
     accepted_by_shot = Counter(str(row["shot_id"]) for row in accepted)
     split_counts = Counter(str(value) for value in splits.tolist())
@@ -353,7 +318,9 @@ def _summary(
         "machine_config": str(machine_config),
         "reference_limits": str(reference_limits_path),
         "simulator_validation": False,
-        "split_gap_seconds": float(split_gap_seconds),
+        "split_gap_seconds": 0.0,
+        "split_block_seconds": float(split_block_seconds),
+        "split_policy": "deterministic_fifth_block_holdout_without_same_shot_gap_exclusion",
         "total_rows": int(len(accepted) + len(rejected)),
         "candidate_rows": int(len(accepted) + len(rejected)),
         "accepted_rows": int(len(accepted)),

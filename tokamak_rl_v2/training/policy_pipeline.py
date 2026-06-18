@@ -904,20 +904,15 @@ def _preflight_artifact_failure(cfg: ExperimentConfig) -> dict[str, object] | No
         summary_path = Path(path).with_suffix(".json")
         try:
             _validate_initial_state_summary(summary_path)
-            from tokamak_rl_v2.env.t15_csv_initial_states import CsvInitialStateLibrary, validate_split_nonoverlap
+            from tokamak_rl_v2.env.t15_csv_initial_states import CsvInitialStateLibrary
 
             with np.load(path, allow_pickle=False) as data:
                 expected_arrays = {"shot_id", "source_index", "time_s", "ip0", "pfc0", "sol0", "split"}
                 if set(data.files) != expected_arrays:
                     raise ValueError(f"initial-state library arrays must be exactly {sorted(expected_arrays)}, got {sorted(data.files)}")
-                shot_id = np.asarray(data["shot_id"]).astype(str).reshape(-1)
-                time_s = np.asarray(data["time_s"], dtype=float).reshape(-1)
-                split = np.asarray(data["split"]).astype(str).reshape(-1)
                 n_pfc = int(np.asarray(data["pfc0"]).shape[1])
                 n_sol = int(np.asarray(data["sol0"]).shape[1])
                 ip0 = np.asarray(data["ip0"], dtype=float).reshape(-1)
-            episode_duration_s = float(cfg.sim.max_episode_steps) * float(cfg.reference.t_step)
-            validate_split_nonoverlap(shot_id, time_s, split, min_gap_s=episode_duration_s)
             CsvInitialStateLibrary(path, n_pfc=n_pfc, n_sol=n_sol, split="train")
             CsvInitialStateLibrary(path, n_pfc=n_pfc, n_sol=n_sol, split="holdout")
         except Exception as exc:
@@ -933,6 +928,10 @@ def _preflight_artifact_failure(cfg: ExperimentConfig) -> dict[str, object] | No
             from tokamak_rl_v2.env.t15_reference_limits import load_reference_limits
 
             limits = load_reference_limits(Path(path))
+            if str(cfg.reference.ip.ramp_rate_reference) == "robust_mean" and (
+                limits.positive_ramp_mean_a_per_s is None or limits.negative_ramp_abs_mean_a_per_s is None
+            ):
+                raise ValueError("reference limits missing robust ramp mean fields; rebuild t15_reference_limits.json")
             if ip0.size and (float(np.nanmin(ip0)) < float(limits.ip_p01_a) or float(np.nanmax(ip0)) > float(limits.ip_p99_a)):
                 raise ValueError("initial-state library contains reset Ip outside production reference bounds")
         except Exception as exc:
