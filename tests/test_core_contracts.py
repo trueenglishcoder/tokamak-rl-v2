@@ -25,6 +25,7 @@ from tokamak_rl_v2.training.cli import _device_list
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "configs/experiments/t15_static_boundary.yaml"
+PRODUCTION_CONFIG = ROOT / "configs/experiments/t15_csv_initial_segmented_profile_boundary_mpo.yaml"
 
 
 def _small_config(tmp_path: Path):
@@ -686,6 +687,32 @@ def test_ip_reference_segment_count_controls_generation() -> None:
     )
     assert batch.ip.shape == (2, int(cfg.sim.max_episode_steps) + 1)
     assert torch.allclose(batch.ip[:, 0], torch.tensor([250000.0, 300000.0], dtype=torch.float64))
+
+
+def test_production_segmented_profile_uses_2000_step_t15_scale_segments() -> None:
+    cfg = load_experiment_config(PRODUCTION_CONFIG)
+    assert int(cfg.sim.max_episode_steps) == 2000
+    assert cfg.reference.duration_s == pytest.approx(2.0)
+    assert cfg.reference.duration_s == pytest.approx(float(cfg.sim.max_episode_steps) * float(cfg.reference.t_step))
+    assert int(cfg.training.eval_max_steps) == 2000
+    assert cfg.reference.ip.ramp_rate_reference == "robust_mean"
+    assert cfg.reference.ip.ramp_up_rate_min_fraction == pytest.approx(0.6)
+    assert cfg.reference.ip.ramp_up_rate_fraction == pytest.approx(1.1)
+    assert cfg.reference.ip.ramp_down_rate_min_fraction == pytest.approx(0.6)
+    assert cfg.reference.ip.ramp_down_rate_fraction == pytest.approx(1.1)
+    assert int(cfg.reference.ip.segment_min_steps) == 300
+    assert int(cfg.reference.ip.segment_max_steps) == 800
+    assert int(cfg.reference.ip.segment_count_min) == 3
+    assert int(cfg.reference.ip.segment_count_max) == 5
+    assert int(cfg.reference.ip.hold_min_steps) == 300
+    assert int(cfg.reference.ip.hold_max_steps) == 800
+    assert int(cfg.reference.ip.final_hold_min_steps) == 0
+
+    lengths = _segment_lengths(cfg.reference.ip, int(cfg.sim.max_episode_steps), np.random.default_rng(123))
+    assert int(np.sum(lengths)) == 2000
+    assert 3 <= len(lengths) <= 5
+    assert int(np.min(lengths)) >= 300
+    assert int(np.max(lengths)) <= 800
 
 
 def test_hold_reset_ip_reference_uses_actual_reset_ip() -> None:

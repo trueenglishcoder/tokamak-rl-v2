@@ -67,8 +67,8 @@ export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-tokamak-rl-v2-v071-32gpu-${RUN_P
 export WANDB_MODE=${WANDB_MODE:-online}
 export WANDB__SERVICE_WAIT=${WANDB__SERVICE_WAIT:-60}
 
-if [[ ! -f data/processed/t15_reference_limits.json || ! -f data/processed/t15_csv_initial_states.npz ]]; then
-  echo "missing processed CSV production artifacts; build data/processed/t15_reference_limits.json and data/processed/t15_csv_initial_states.npz before launching" >&2
+if [[ ! -f data/processed/t15_csv_initial_states.npz ]]; then
+  echo "missing processed CSV reset artifact; build data/processed/t15_csv_initial_states.npz before launching" >&2
   exit 2
 fi
 
@@ -87,8 +87,28 @@ train_output = sys.argv[3]
 cfg = json.loads(base_path.read_text(encoding="utf-8"))
 cfg["name"] = "t15_csv_initial_segmented_profile_boundary_mpo_v071_32gpu_500m"
 cfg.setdefault("sim", {})["config_path"] = "/workspace/tokamak-sim/configs/T15MD_new_data.toml"
+cfg["sim"]["max_episode_steps"] = 2000
 cfg["sim"]["csv_initial_state_library"] = "/workspace/tokamak-rl-v2/data/processed/t15_csv_initial_states.npz"
-cfg.setdefault("reference", {}).setdefault("ip", {})["limits_path"] = "/workspace/tokamak-rl-v2/data/processed/t15_reference_limits.json"
+reference = cfg.setdefault("reference", {})
+reference["duration_s"] = 2.0
+ip_reference = reference.setdefault("ip", {})
+ip_reference["limits_path"] = "/workspace/tokamak-rl-v2/data/processed/t15_reference_limits.json"
+ip_reference.update(
+    {
+        "ramp_rate_reference": "robust_mean",
+        "ramp_up_rate_min_fraction": 0.6,
+        "ramp_up_rate_fraction": 1.1,
+        "ramp_down_rate_min_fraction": 0.6,
+        "ramp_down_rate_fraction": 1.1,
+        "segment_min_steps": 300,
+        "segment_max_steps": 800,
+        "segment_count_min": 3,
+        "segment_count_max": 5,
+        "hold_min_steps": 300,
+        "hold_max_steps": 800,
+        "final_hold_min_steps": 0,
+    }
+)
 cfg.setdefault("reward", {}).update(
     {
         "shape_mean_scale_m": 0.03,
@@ -113,6 +133,7 @@ training["output_dir"] = f"/workspace/tokamak-rl-v2/{train_output}"
 training["save_checkpoints"] = __import__("os").environ["SAVE_CHECKPOINTS"].lower() in {"1", "true", "yes", "on"}
 training["checkpoint_interval_steps"] = int(__import__("os").environ["CHECKPOINT_ENV_STEPS"])
 training["eval_interval_steps"] = int(__import__("os").environ["EVAL_ENV_STEPS"])
+training["eval_max_steps"] = int(cfg["sim"]["max_episode_steps"])
 training["eval_checkpoint_top_k"] = int(__import__("os").environ["EVAL_CHECKPOINT_TOP_K"])
 training["milestone_checkpoint_interval_steps"] = int(__import__("os").environ["MILESTONE_CHECKPOINT_ENV_STEPS"])
 training["keep_latest_checkpoint"] = __import__("os").environ["KEEP_LATEST_CHECKPOINT"].lower() in {"1", "true", "yes", "on"}
@@ -178,9 +199,20 @@ if (( NUM_ENVS % WORLD_SIZE != 0 )); then
   exit 2
 fi
 
-MIN_LEARNING_ENV_STEPS=$(( NUM_ENVS * 500 + NUM_ENVS ))
+EPISODE_STEPS=$(python3 - "${GENERATED_CONFIG}" <<'PYSTEPS'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    cfg = json.load(f)
+print(int(cfg["sim"]["max_episode_steps"]))
+PYSTEPS
+)
+echo "episode_steps=${EPISODE_STEPS}"
+
+MIN_LEARNING_ENV_STEPS=$(( NUM_ENVS * EPISODE_STEPS + NUM_ENVS ))
 if (( TRAIN_ENV_STEPS < MIN_LEARNING_ENV_STEPS )); then
-  echo "TRAIN_ENV_STEPS=${TRAIN_ENV_STEPS} is too short for 32-GPU learning; need at least ${MIN_LEARNING_ENV_STEPS} global env steps to complete one 500-step episode and create replay updates" >&2
+  echo "TRAIN_ENV_STEPS=${TRAIN_ENV_STEPS} is too short for 32-GPU learning; need at least ${MIN_LEARNING_ENV_STEPS} global env steps to complete one ${EPISODE_STEPS}-step episode and create replay updates" >&2
   exit 2
 fi
 
@@ -209,6 +241,7 @@ srun \
 
     cd /workspace/tokamak-rl-v2
     mkdir -p slurm_logs outputs data/processed
+    python3 scripts/ensure_t15_reference_limits.py
 
     python3 - <<PYCUDA
 import os
@@ -261,7 +294,7 @@ PYCUDA
         "${CHECKPOINT_ARGS[@]}" \
         --eval-interval-steps "${EVAL_ENV_STEPS}" \
         --eval-episodes 128 \
-        --eval-max-steps 500 \
+        --eval-max-steps "${EPISODE_STEPS}" \
         --controller-rollout-steps 0 \
         "${MODE_ARGS[@]}" \
         --wandb \
