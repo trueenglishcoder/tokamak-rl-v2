@@ -135,6 +135,8 @@ def test_reward_sweep_job_blocks_stale_name_leaks() -> None:
     assert "--wandb-optional" in runner
     assert "shutil.rmtree(output_dir / \"exports\"" in runner
     assert "shutil.rmtree(output_dir / \"checkpoints\"" in runner
+    assert "REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-288}" in PASS1_12_JOB.read_text(encoding="utf-8")
+    assert "REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-288}" in PASS2_12_JOB.read_text(encoding="utf-8")
     for path in (
         ROOT / "jobs/aggregate_t15_reward_sweep_pass1.sbatch",
         ROOT / "jobs/aggregate_t15_reward_sweep_final.sbatch",

@@ -61,6 +61,8 @@ def audit(root: Path) -> list[str]:
             issues.append(f"{rel} does not require the prebuilt pass1 manifest")
         if rel.endswith("pass2_focused.sbatch") and "missing pass2 reward-sweep manifest" not in text:
             issues.append(f"{rel} does not require the aggregate-built pass2 manifest")
+        if rel.endswith(("pass1_broad.sbatch", "pass2_focused.sbatch")) and "REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-288}" not in text:
+            issues.append(f"{rel} must default REPLAY_CAPACITY_EPISODES to 288 for 2000-step A100 sweeps")
         if rel.endswith("aggregate_t15_reward_sweep_pass1.sbatch") and "pass2_focused/variants.json" not in text:
             issues.append(f"{rel} does not build the focused pass2 manifest")
 

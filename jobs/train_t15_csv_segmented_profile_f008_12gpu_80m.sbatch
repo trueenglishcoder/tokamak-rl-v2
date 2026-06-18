@@ -17,7 +17,7 @@ mkdir -p slurm_logs outputs data/processed
 export RUN_PRESET=${RUN_PRESET:-full}
 export POLICY_CONFIG=${POLICY_CONFIG:-configs/experiments/t15_csv_initial_segmented_profile_boundary_mpo.yaml}
 export NUM_ENVS=${NUM_ENVS:-3072}
-export REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-512}
+export REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-288}
 export BATCH_SIZE=${BATCH_SIZE:-256}
 export ROLLOUT_CHUNK_LENGTH=${ROLLOUT_CHUNK_LENGTH:-64}
 export UPDATES_PER_ROLLOUT_CHUNK=${UPDATES_PER_ROLLOUT_CHUNK:-64}
