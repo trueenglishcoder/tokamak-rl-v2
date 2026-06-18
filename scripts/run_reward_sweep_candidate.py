@@ -42,6 +42,31 @@ def _write_failure(output_dir: Path, *, status: str, reason: str, return_code: i
     _write_json(path, payload)
 
 
+def _print_validation_summary(output_dir: Path) -> None:
+    path = output_dir / "policy_validation.json"
+    if not path.exists():
+        print(f"policy_validation_missing={path}", flush=True)
+        return
+    try:
+        payload = _load_json(path)
+    except Exception as exc:
+        print(f"policy_validation_unreadable={path} error={exc!r}", flush=True)
+        return
+    print(f"policy_validation_status={payload.get('status')}", flush=True)
+    if payload.get("training_status") is not None:
+        print(f"policy_validation_training_status={payload.get('training_status')}", flush=True)
+    if payload.get("reason") is not None:
+        print(f"policy_validation_reason={payload.get('reason')}", flush=True)
+    if payload.get("error") is not None:
+        print(f"policy_validation_error={payload.get('error')}", flush=True)
+    artifact = payload.get("artifact_preflight")
+    if artifact is not None:
+        print(f"policy_validation_artifact_preflight={artifact}", flush=True)
+    gates = payload.get("gates")
+    if isinstance(gates, list) and gates:
+        print(f"policy_validation_first_gate={gates[0]}", flush=True)
+
+
 def run_candidate(args: argparse.Namespace) -> int:
     manifest = _load_json(args.manifest)
     variants = manifest.get("variants")
@@ -73,6 +98,8 @@ def run_candidate(args: argparse.Namespace) -> int:
     cfg["training"]["checkpoint_interval_steps"] = max(1, int(args.train_env_steps))
     cfg["training"]["eval_interval_steps"] = max(1, int(args.eval_env_steps))
     cfg["training"]["num_envs"] = int(args.num_envs)
+    eval_max_steps = int(cfg.get("sim", {}).get("max_episode_steps", 2000))
+    cfg["training"]["eval_max_steps"] = eval_max_steps
     cfg.setdefault("learner", {})["replay_capacity_episodes"] = int(args.replay_capacity_episodes)
     cfg["learner"]["batch_size"] = int(args.batch_size)
     cfg["learner"]["rollout_chunk_length"] = int(args.rollout_chunk_length)
@@ -146,7 +173,7 @@ def run_candidate(args: argparse.Namespace) -> int:
         "--eval-episodes",
         "128",
         "--eval-max-steps",
-        "500",
+        str(eval_max_steps),
         "--controller-rollout-steps",
         "0",
         "--reward-sweep-mode",
@@ -171,6 +198,7 @@ def run_candidate(args: argparse.Namespace) -> int:
         _cleanup(output_dir)
     print(f"variant_index={variant_index} run_status={result.returncode}")
     if result.returncode != 0:
+        _print_validation_summary(output_dir)
         _write_failure(
             output_dir,
             status="sweep_failed_training",

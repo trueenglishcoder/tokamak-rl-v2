@@ -523,6 +523,8 @@ def summarize(
     best = next((row for row in ranked if row["selection_valid"]), None)
     if best is None:
         best = next((row for row in ranked if row["valid_actor_eval"] and math.isfinite(_finite(row["physical_priority_score"], float("inf")))), None)
+    if best is None and ranked:
+        best = ranked[0]
     best_payload = {
         "source_root": str(root),
         "best_candidate": _row_for_json(best),

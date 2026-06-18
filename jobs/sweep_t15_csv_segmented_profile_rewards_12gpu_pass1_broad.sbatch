@@ -47,6 +47,10 @@ srun \
     mkdir -p slurm_logs outputs data/processed
     python3 scripts/apply_t15_actuator_limits.py /workspace/tokamak-sim/configs/T15MD_new_data.toml
     python3 scripts/ensure_t15_reference_limits.py
+    python3 scripts/ensure_t15_csv_initial_states.py \
+      --experiment-config "${POLICY_CONFIG}" \
+      --workers 8 \
+      --max-rows-per-shot 600
 
     python3 - <<\PYPREFLIGHT
 import pathlib

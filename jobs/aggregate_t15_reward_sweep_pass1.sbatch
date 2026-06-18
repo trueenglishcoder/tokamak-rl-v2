@@ -31,20 +31,20 @@ srun \
       --top 25
 
     python3 - <<\PYCENTER
-import json
 import os
 import pathlib
 import sys
 
 path = pathlib.Path(os.environ["ROOT"]) / "selection/pass1/physical_best_candidate.json"
-payload = json.loads(path.read_text(encoding="utf-8"))
-best = payload.get("best_candidate")
-best = best if isinstance(best, dict) else {}
-required = ["shape_mean_weight", "shape_max_weight", "ip_weight", "current_weight", "derivative_weight"]
-missing = [key for key in required if key not in best]
-if missing:
-    print(f"pass1 produced no usable focused-sweep center; missing reward fields: {missing}", file=sys.stderr)
+sys.path.insert(0, str(pathlib.Path("scripts").resolve()))
+from build_reward_sweep_manifest import load_center_reward
+
+try:
+    center = load_center_reward(path)
+except Exception as exc:
+    print(f"pass1 aggregation could not extract a focused-sweep center from {path}: {exc}", file=sys.stderr)
     raise SystemExit(3)
+print(f"pass1_center_reward={center}")
 PYCENTER
 
     python3 scripts/build_reward_sweep_rerun_manifest.py \
