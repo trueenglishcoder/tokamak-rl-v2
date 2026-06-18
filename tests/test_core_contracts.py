@@ -1329,6 +1329,7 @@ def test_distributed_resume_fails_clearly_because_worker_envs_are_not_checkpoint
 
 def test_evaluate_detailed_reports_physical_metrics(tmp_path: Path) -> None:
     cfg = _small_config(tmp_path)
+    cfg = replace(cfg, sim=replace(cfg.sim, terminate_on_current_limit=False, terminate_on_boundary_loss=False, max_episode_steps=4))
     trainer = Trainer(cfg, device="cpu", output_dir=tmp_path)
     metrics = trainer.evaluate_detailed(episodes=2, max_steps=4, policy="no_control", seed_offset=123456)
     repeat = trainer.evaluate_detailed(episodes=2, max_steps=4, policy="no_control", seed_offset=123456)
@@ -1363,10 +1364,48 @@ def test_evaluate_detailed_reports_physical_metrics(tmp_path: Path) -> None:
     assert "boundary_found" in metrics
     assert "boundary_found_late_min" in metrics
     assert "boundary_found_min" in metrics
+    assert "full_episode_success" in metrics
+    assert "termination_failure_fraction" in metrics
+    assert "padded_shape_error_mean_m_late" in metrics
+    assert "padded_shape_error_max_m_late" in metrics
+    assert "padded_ip_error_a_late" in metrics
+    assert "padded_boundary_found_late_min" in metrics
+    assert "padded_current_over_limit_a_late_max" in metrics
+    assert "padded_current_over_limit_fraction_late" in metrics
+    assert metrics["full_episode_success"] == pytest.approx(1.0)
+    assert metrics["termination_failure_fraction"] == pytest.approx(0.0)
+    assert metrics["padded_shape_error_mean_m_late"] == pytest.approx(metrics["shape_error_mean_m_late"])
+    assert metrics["padded_ip_error_a_late"] == pytest.approx(metrics["ip_error_a_late"])
+    assert metrics["padded_boundary_found_late_min"] == pytest.approx(metrics["boundary_found_late_min"])
     assert np.isfinite(metrics["mean_return"])
     assert 0.0 < metrics["mean_episode_completion"] <= 1.0
     assert repeat["mean_return"] == pytest.approx(metrics["mean_return"])
     assert np.isfinite(holdout["mean_return"])
+
+
+def test_evaluate_detailed_failure_padding_marks_short_termination_bad(tmp_path: Path) -> None:
+    cfg = _small_config(tmp_path)
+    cfg = replace(
+        cfg,
+        sim=replace(
+            cfg.sim,
+            max_episode_steps=8,
+            terminate_on_current_limit=True,
+            terminate_on_boundary_loss=False,
+            current_termination_over_limit_a=-1.0,
+            current_termination_grace_steps=1,
+            current_hard_termination_fraction=1.01,
+        ),
+    )
+    trainer = Trainer(cfg, device="cpu", output_dir=tmp_path)
+    metrics = trainer.evaluate_detailed(episodes=2, max_steps=4, policy="no_control", seed_offset=123456)
+    assert metrics["mean_episode_completion"] < 1.0
+    assert metrics["full_episode_success"] == pytest.approx(0.0)
+    assert metrics["termination_failure_fraction"] == pytest.approx(1.0)
+    assert metrics["padded_boundary_found_late_min"] == pytest.approx(0.0)
+    assert metrics["padded_shape_error_mean_m_late"] >= cfg.reward.boundary_missing_error_m
+    assert metrics["padded_shape_error_max_m_late"] >= cfg.reward.boundary_missing_error_m
+    assert metrics["padded_ip_error_a_late"] >= max(100000.0, 4.0 * cfg.reward.ip_scale_a)
 
 
 def test_selection_score_prefers_survival_over_short_low_cost() -> None:

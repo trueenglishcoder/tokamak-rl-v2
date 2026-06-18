@@ -154,7 +154,7 @@ CURRENT_CONSTRAINT_FIXED_REWARD = {
     "ip_scale_a": 25000.0,
     "reward_scale": 1.0,
     "terminal_reward": -20.0,
-    "current_bad_fraction": 1.05,
+    "current_bad_fraction": 1.20,
     "derivative_bad_fraction": 1.20,
     "action_weight": 0.01,
     "delta_action_weight": 0.025,
@@ -162,9 +162,9 @@ CURRENT_CONSTRAINT_FIXED_REWARD = {
 
 CURRENT_CONSTRAINT_FIXED_SIM = {
     "terminate_on_current_limit": True,
-    "current_termination_over_limit_a": 5000.0,
-    "current_termination_grace_steps": 8,
-    "current_hard_termination_fraction": 1.05,
+    "current_termination_over_limit_a": 20000.0,
+    "current_termination_grace_steps": 25,
+    "current_hard_termination_fraction": 1.20,
 }
 
 

@@ -876,6 +876,41 @@ class Trainer:
         component_values: dict[str, list[float]] = {}
         early_component_values: dict[str, list[float]] = {}
         late_component_values: dict[str, list[float]] = {}
+        padded_component_values: dict[str, list[float]] = {}
+        padded_late_component_values: dict[str, list[float]] = {}
+        full_episode_successes: list[float] = []
+        max_steps_f = max(float(max_steps), 1.0)
+        failure_padded_names = {
+            "shape_error_mean_m",
+            "shape_error_max_m",
+            "ip_error_a",
+            "current_over_limit_a",
+            "current_usage_fraction",
+            "boundary_found",
+        }
+        failure_ip_error_a = max(100000.0, 4.0 * float(eval_config.reward.ip_scale_a))
+        failure_shape_error_m = float(eval_config.reward.boundary_missing_error_m)
+        current_termination_over_limit_a = float(eval_config.sim.current_termination_over_limit_a)
+        current_hard_termination_fraction = float(eval_config.sim.current_hard_termination_fraction)
+
+        def _append_padded(name: str, values: np.ndarray, progress: np.ndarray) -> None:
+            if name not in failure_padded_names or values.size == 0:
+                return
+            finite = np.isfinite(values)
+            if np.any(finite):
+                padded_component_values.setdefault(name, []).extend(values[finite].astype(float).tolist())
+            if progress.shape == values.shape:
+                late = finite & (progress >= 0.8)
+                if np.any(late):
+                    padded_late_component_values.setdefault(name, []).extend(values[late].astype(float).tolist())
+
+        def _append_padded_failure(name: str, value: float, remaining: int, late_count: int) -> None:
+            if remaining <= 0:
+                return
+            padded_component_values.setdefault(name, []).extend([float(value)] * int(remaining))
+            if late_count > 0:
+                padded_late_component_values.setdefault(name, []).extend([float(value)] * int(late_count))
+
         while len(returns) < int(episodes):
             if policy == "actor":
                 action = self.actor.deterministic(obs)
@@ -885,15 +920,17 @@ class Trainer:
             totals += out.reward
             steps += 1
             comps = out.info.get("reward_components", {}) if isinstance(out.info, dict) else {}
+            comp_arrays: dict[str, np.ndarray] = {}
             if isinstance(comps, dict):
-                max_steps_f = max(float(max_steps), 1.0)
                 progress = (steps.to(torch.float32) / max_steps_f).detach().cpu().numpy().reshape(-1)
                 early_cutoff = max(0.2, 1.0 / max_steps_f)
                 for name, value in comps.items():
                     arr = np.asarray(_value_to_numpy(value), dtype=float).reshape(-1)
+                    comp_arrays[str(name)] = arr
                     if arr.size:
                         finite = np.isfinite(arr)
                         component_values.setdefault(str(name), []).extend(arr[finite].astype(float).tolist())
+                        _append_padded(str(name), arr, progress)
                         if progress.shape == arr.shape:
                             early = finite & (progress <= early_cutoff)
                             late = finite & (progress >= 0.8)
@@ -904,12 +941,42 @@ class Trainer:
             done = out.terminated | out.truncated | (steps >= int(max_steps))
             if bool(torch.any(done).item()):
                 done_cpu = done.detach().cpu().numpy().astype(bool)
+                terminated_cpu = out.terminated.detach().cpu().numpy().astype(bool)
+                truncated_cpu = out.truncated.detach().cpu().numpy().astype(bool)
                 totals_cpu = totals.detach().cpu().numpy().astype(float)
                 steps_cpu = steps.detach().cpu().numpy().astype(int)
+
+                def terminal_component(name: str, index: int, default: float = 0.0) -> float:
+                    arr = comp_arrays.get(name)
+                    if arr is None or index >= arr.size:
+                        return float(default)
+                    value = float(arr[index])
+                    return value if np.isfinite(value) else float(default)
+
                 for index, is_done in enumerate(done_cpu):
                     if is_done and len(returns) < int(episodes):
                         returns.append(float(totals_cpu[index]))
                         episode_steps.append(int(steps_cpu[index]))
+                        finished_horizon = int(steps_cpu[index]) >= int(max_steps)
+                        success = finished_horizon and not bool(terminated_cpu[index])
+                        full_episode_successes.append(1.0 if success else 0.0)
+                        remaining = max(int(max_steps) - int(steps_cpu[index]), 0)
+                        if remaining > 0:
+                            future_progress = (np.arange(int(steps_cpu[index]) + 1, int(max_steps) + 1, dtype=float) / max_steps_f)
+                            late_count = int(np.count_nonzero(future_progress >= 0.8))
+                            terminal_ip_error = terminal_component("ip_error_a", index, failure_ip_error_a)
+                            terminal_current_over = terminal_component("current_over_limit_a", index, 0.0)
+                            terminal_current_usage = terminal_component("current_usage_fraction", index, 0.0)
+                            current_terminated = terminal_component("terminated_current", index, 0.0) > 0.5
+                            if current_terminated:
+                                terminal_current_over = max(float(terminal_current_over), current_termination_over_limit_a)
+                                terminal_current_usage = max(float(terminal_current_usage), current_hard_termination_fraction)
+                            _append_padded_failure("boundary_found", 0.0, remaining, late_count)
+                            _append_padded_failure("shape_error_mean_m", failure_shape_error_m, remaining, late_count)
+                            _append_padded_failure("shape_error_max_m", failure_shape_error_m, remaining, late_count)
+                            _append_padded_failure("ip_error_a", max(failure_ip_error_a, float(terminal_ip_error)), remaining, late_count)
+                            _append_padded_failure("current_over_limit_a", terminal_current_over, remaining, late_count)
+                            _append_padded_failure("current_usage_fraction", terminal_current_usage, remaining, late_count)
                 totals = torch.where(done, torch.zeros_like(totals), totals)
                 steps = torch.where(done, torch.zeros_like(steps), steps)
                 obs = env.reset_indices(done) if len(returns) < int(episodes) else out.obs
@@ -925,6 +992,10 @@ class Trainer:
             metrics["min_episode_steps"] = float(np.nanmin(selected_steps))
             metrics["mean_episode_completion"] = float(np.nanmean(completion))
             metrics["min_episode_completion"] = float(np.nanmin(completion))
+        if full_episode_successes:
+            successes = np.asarray(full_episode_successes[: int(episodes)], dtype=float)
+            metrics["full_episode_success"] = float(np.nanmean(successes))
+            metrics["termination_failure_fraction"] = float(np.nanmean(successes < 0.5))
         max_metrics = {
             "shape_error_mean_m",
             "shape_error_max_m",
@@ -975,6 +1046,28 @@ class Trainer:
                     metrics["current_over_limit_fraction_late"] = float(np.nanmean(late > 0.0))
             if early.size and late.size and name in drift_metrics:
                 metrics[f"{name}_late_minus_early"] = float(np.nanmean(late) - np.nanmean(early))
+        padded_max_metrics = {"shape_error_mean_m", "shape_error_max_m", "ip_error_a", "current_over_limit_a", "current_usage_fraction"}
+        padded_min_metrics = {"boundary_found"}
+        for name, values in padded_component_values.items():
+            arr = np.asarray(values, dtype=float)
+            if arr.size:
+                metrics[f"padded_{name}"] = float(np.nanmean(arr))
+                if name in padded_max_metrics:
+                    metrics[f"padded_{name}_max"] = float(np.nanmax(arr))
+                if name in padded_min_metrics:
+                    metrics[f"padded_{name}_min"] = float(np.nanmin(arr))
+                if name == "current_over_limit_a":
+                    metrics["padded_current_over_limit_fraction"] = float(np.nanmean(arr > 0.0))
+        for name, values in padded_late_component_values.items():
+            arr = np.asarray(values, dtype=float)
+            if arr.size:
+                metrics[f"padded_{name}_late"] = float(np.nanmean(arr))
+                if name in padded_max_metrics:
+                    metrics[f"padded_{name}_late_max"] = float(np.nanmax(arr))
+                if name in padded_min_metrics:
+                    metrics[f"padded_{name}_late_min"] = float(np.nanmin(arr))
+                if name == "current_over_limit_a":
+                    metrics["padded_current_over_limit_fraction_late"] = float(np.nanmean(arr > 0.0))
         return metrics
 
     def _evaluation_config(self) -> ExperimentConfig:
@@ -992,19 +1085,21 @@ class Trainer:
             return value if np.isfinite(value) else default
 
         completion = metric("mean_episode_completion", 0.0)
+        full_success = metric("full_episode_success", completion)
         min_completion = metric("min_episode_completion", completion)
-        boundary_late = metric("boundary_found_late_min", metric("boundary_found_min", metric("boundary_found", 0.0)))
+        boundary_late = metric("padded_boundary_found_late_min", metric("boundary_found_late_min", metric("boundary_found_min", metric("boundary_found", 0.0))))
         terminated_boundary = metric("terminated_boundary_late_max", metric("terminated_boundary_max", metric("terminated_boundary", 0.0)))
-        current_over = metric("current_over_limit_a_late_max", metric("current_over_limit_a_max", metric("current_over_limit_a", 0.0)))
-        current_fraction = metric("current_over_limit_fraction_late", metric("current_over_limit_fraction", 0.0))
-        shape_mean = metric("shape_error_mean_m_late", metric("shape_error_mean_m", 1.0))
-        shape_max = metric("shape_error_max_m_late", metric("shape_error_max_m", 1.0))
-        ip_error = metric("ip_error_a_late", metric("ip_error_a", 1.0e6))
+        current_over = metric("padded_current_over_limit_a_late_max", metric("current_over_limit_a_late_max", metric("current_over_limit_a_max", metric("current_over_limit_a", 0.0))))
+        current_fraction = metric("padded_current_over_limit_fraction_late", metric("current_over_limit_fraction_late", metric("current_over_limit_fraction", 0.0)))
+        shape_mean = metric("padded_shape_error_mean_m_late", metric("shape_error_mean_m_late", metric("shape_error_mean_m", 1.0)))
+        shape_max = metric("padded_shape_error_max_m_late", metric("shape_error_max_m_late", metric("shape_error_max_m", 1.0)))
+        ip_error = metric("padded_ip_error_a_late", metric("ip_error_a_late", metric("ip_error_a", 1.0e6)))
         action_rms = metric("action_rms_late", metric("action_rms", 1.0))
         delta_action_rms = metric("delta_action_rms_late", metric("delta_action_rms", 1.0))
 
         objective = (
             200.0 * max(0.95 - completion, 0.0)
+            + 200.0 * max(0.95 - full_success, 0.0)
             + 200.0 * max(0.90 - min_completion, 0.0)
             + 1000.0 * max(0.999 - boundary_late, 0.0)
             + 100.0 * max(terminated_boundary, 0.0)

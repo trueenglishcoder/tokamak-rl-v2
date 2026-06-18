@@ -15,13 +15,14 @@ LOWER_BETTER = {
     "current_over_limit_a_max",
     "current_usage_fraction_late_max",
     "terminated_boundary",
+    "termination_failure_fraction",
     "shape_error_mean_m_late",
     "shape_error_max_m_late",
     "ip_error_a_late",
     "action_rms_late",
     "delta_action_rms_late",
 }
-HIGHER_BETTER = {"mean_episode_completion", "boundary_found_late_min"}
+HIGHER_BETTER = {"mean_episode_completion", "full_episode_success", "boundary_found_late_min"}
 
 SUMMARY_FIELDS = [
     "physical_rank",
@@ -34,8 +35,11 @@ SUMMARY_FIELDS = [
     "selection_valid",
     "selection_reason",
     "on_pareto_front",
+    "uses_padded_metrics",
     "physical_priority_score",
     "mean_episode_completion",
+    "full_episode_success",
+    "termination_failure_fraction",
     "boundary_found_late_min",
     "terminated_boundary",
     "shape_error_mean_m_late",
@@ -184,6 +188,7 @@ def _selection_reason(
     if not metrics["valid_actor_eval"]:
         return False, "missing_actor_eval"
     checks = [
+        ("low_full_episode_success", metrics["full_episode_success"] >= min_completion),
         ("low_completion", metrics["mean_episode_completion"] >= min_completion),
         ("lost_late_boundary", metrics["boundary_found_late_min"] >= min_boundary_late),
         ("boundary_termination", metrics["terminated_boundary"] <= max_terminated_boundary),
@@ -198,6 +203,7 @@ def _selection_reason(
 
 def _physical_priority_score(row: dict[str, Any]) -> float:
     completion_gap = max(0.0, 1.0 - _finite(row["mean_episode_completion"], 0.0))
+    full_success_gap = max(0.0, 1.0 - _finite(row.get("full_episode_success"), _finite(row["mean_episode_completion"], 0.0)))
     boundary_gap = max(0.0, 1.0 - _finite(row["boundary_found_late_min"], 0.0))
     current_fraction = _finite(row["current_over_limit_fraction_late"], 1.0)
     current_max = _finite(row["current_over_limit_a_max"], 1.0e9)
@@ -208,9 +214,12 @@ def _physical_priority_score(row: dict[str, Any]) -> float:
     action = _finite(row["action_rms_late"], 10.0)
     delta_action = _finite(row["delta_action_rms_late"], 10.0)
     terminated_boundary = _finite(row["terminated_boundary"], 1.0)
+    termination_failure = _finite(row.get("termination_failure_fraction"), full_success_gap)
     return float(
         500.0 * completion_gap
+        + 500.0 * full_success_gap
         + 1000.0 * boundary_gap
+        + 200.0 * termination_failure
         + 100.0 * terminated_boundary
         + 60.0 * current_fraction
         + 6.0 * current_max / 20000.0
@@ -244,6 +253,10 @@ def summarize_variant(
     actor_eval = validation.get("actor_eval")
     actor_eval = actor_eval if isinstance(actor_eval, dict) else {}
     eval_rows = _read_csv(run_dir / "eval_history.csv")
+    uses_padded = any(str(key).startswith("padded_") for key in actor_eval)
+    completion_metric = _metric(actor_eval, "mean_episode_completion", "episode_progress", default=0.0)
+    full_success_metric = _metric(actor_eval, "full_episode_success", "mean_episode_completion", "episode_progress", default=0.0)
+    termination_failure_metric = _metric(actor_eval, "termination_failure_fraction", default=max(0.0, 1.0 - full_success_metric))
 
     row: dict[str, Any] = {
         "physical_rank": "",
@@ -256,17 +269,20 @@ def summarize_variant(
         "selection_valid": False,
         "selection_reason": "",
         "on_pareto_front": False,
+        "uses_padded_metrics": uses_padded,
         "physical_priority_score": float("inf"),
-        "mean_episode_completion": _metric(actor_eval, "mean_episode_completion", "episode_progress", default=0.0),
-        "boundary_found_late_min": _metric(actor_eval, "boundary_found_late_min", "boundary_found_min", "boundary_found", default=0.0),
+        "mean_episode_completion": completion_metric,
+        "full_episode_success": full_success_metric,
+        "termination_failure_fraction": termination_failure_metric,
+        "boundary_found_late_min": _metric(actor_eval, "padded_boundary_found_late_min", "boundary_found_late_min", "boundary_found_min", "boundary_found", default=0.0),
         "terminated_boundary": _metric(actor_eval, "terminated_boundary_late", "terminated_boundary", default=1.0),
-        "shape_error_mean_m_late": _metric(actor_eval, "shape_error_mean_m_late", "shape_error_mean_m", default=float("nan")),
-        "shape_error_max_m_late": _metric(actor_eval, "shape_error_max_m_late", "shape_error_max_m", default=float("nan")),
-        "ip_error_a_late": _metric(actor_eval, "ip_error_a_late", "ip_error_a", default=float("nan")),
-        "current_over_limit_a_late": _metric(actor_eval, "current_over_limit_a_late", "current_over_limit_a", default=float("nan")),
-        "current_over_limit_a_max": _metric(actor_eval, "current_over_limit_a_late_max", "current_over_limit_a_max", "current_over_limit_a", default=float("nan")),
-        "current_over_limit_fraction_late": _metric(actor_eval, "current_over_limit_fraction_late", "current_over_limit_fraction", default=float("nan")),
-        "current_usage_fraction_late_max": _metric(actor_eval, "current_usage_fraction_late_max", "current_usage_fraction_max", "current_usage_fraction", default=float("nan")),
+        "shape_error_mean_m_late": _metric(actor_eval, "padded_shape_error_mean_m_late", "shape_error_mean_m_late", "shape_error_mean_m", default=float("nan")),
+        "shape_error_max_m_late": _metric(actor_eval, "padded_shape_error_max_m_late", "shape_error_max_m_late", "shape_error_max_m", default=float("nan")),
+        "ip_error_a_late": _metric(actor_eval, "padded_ip_error_a_late", "ip_error_a_late", "ip_error_a", default=float("nan")),
+        "current_over_limit_a_late": _metric(actor_eval, "padded_current_over_limit_a_late", "current_over_limit_a_late", "current_over_limit_a", default=float("nan")),
+        "current_over_limit_a_max": _metric(actor_eval, "padded_current_over_limit_a_late_max", "padded_current_over_limit_a_max", "current_over_limit_a_late_max", "current_over_limit_a_max", "current_over_limit_a", default=float("nan")),
+        "current_over_limit_fraction_late": _metric(actor_eval, "padded_current_over_limit_fraction_late", "current_over_limit_fraction_late", "current_over_limit_fraction", default=float("nan")),
+        "current_usage_fraction_late_max": _metric(actor_eval, "padded_current_usage_fraction_late_max", "padded_current_usage_fraction_max", "current_usage_fraction_late_max", "current_usage_fraction_max", "current_usage_fraction", default=float("nan")),
         "action_rms_late": _metric(actor_eval, "action_rms_late", "action_rms", default=float("nan")),
         "delta_action_rms_late": _metric(actor_eval, "delta_action_rms_late", "delta_action_rms", default=float("nan")),
         "shape_regime": str(variant.get("shape_regime") or ""),
@@ -290,10 +306,10 @@ def summarize_variant(
         "current_hard_termination_fraction": sim.get("current_hard_termination_fraction", ""),
         "eval_rows": len(eval_rows),
         "tail_completion": _tail_metric(eval_rows, "mean_episode_completion", "episode_progress"),
-        "tail_boundary_late_min": _tail_metric(eval_rows, "boundary_found_late_min", "boundary_found_min", "boundary_found"),
-        "tail_shape_error_mean_m_late": _tail_metric(eval_rows, "shape_error_mean_m_late", "shape_error_mean_m"),
-        "tail_ip_error_a_late": _tail_metric(eval_rows, "ip_error_a_late", "ip_error_a"),
-        "tail_current_over_limit_fraction_late": _tail_metric(eval_rows, "current_over_limit_fraction_late", "current_over_limit_fraction"),
+        "tail_boundary_late_min": _tail_metric(eval_rows, "padded_boundary_found_late_min", "boundary_found_late_min", "boundary_found_min", "boundary_found"),
+        "tail_shape_error_mean_m_late": _tail_metric(eval_rows, "padded_shape_error_mean_m_late", "shape_error_mean_m_late", "shape_error_mean_m"),
+        "tail_ip_error_a_late": _tail_metric(eval_rows, "padded_ip_error_a_late", "ip_error_a_late", "ip_error_a"),
+        "tail_current_over_limit_fraction_late": _tail_metric(eval_rows, "padded_current_over_limit_fraction_late", "current_over_limit_fraction_late", "current_over_limit_fraction"),
     }
     row["selection_valid"], row["selection_reason"] = _selection_reason(
         row,

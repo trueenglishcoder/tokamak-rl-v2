@@ -89,7 +89,7 @@ def test_current_constraint_broad_manifest_has_36_and_current_termination() -> N
     assert first["reward"]["ip_weight"] == 2.5
     assert first["reward"]["current_weight"] == 3.0
     assert first["reward"]["current_soft_fraction"] == 0.90
-    assert first["reward"]["current_bad_fraction"] == 1.05
+    assert first["reward"]["current_bad_fraction"] == 1.20
     assert first["reward"]["derivative_weight"] == 0.25
     assert first["reward"]["derivative_soft_fraction"] == 0.90
     assert first["reward"]["derivative_bad_fraction"] == 1.20
@@ -97,9 +97,9 @@ def test_current_constraint_broad_manifest_has_36_and_current_termination() -> N
     assert first["reward"]["delta_action_weight"] == 0.025
     assert first["sim"] == {
         "terminate_on_current_limit": True,
-        "current_termination_over_limit_a": 5000.0,
-        "current_termination_grace_steps": 8,
-        "current_hard_termination_fraction": 1.05,
+        "current_termination_over_limit_a": 20000.0,
+        "current_termination_grace_steps": 25,
+        "current_hard_termination_fraction": 1.20,
     }
 
 
@@ -235,9 +235,9 @@ def test_reward_sweep_candidate_applies_sim_overrides_to_generated_config(tmp_pa
     assert run_candidate(args) == 0
     generated = json.loads((sweep_root / "generated_configs" / f"{variant['folder']}.json").read_text(encoding="utf-8"))
     assert generated["sim"]["terminate_on_current_limit"] is True
-    assert generated["sim"]["current_termination_over_limit_a"] == 5000.0
-    assert generated["sim"]["current_termination_grace_steps"] == 8
-    assert generated["sim"]["current_hard_termination_fraction"] == 1.05
+    assert generated["sim"]["current_termination_over_limit_a"] == 20000.0
+    assert generated["sim"]["current_termination_grace_steps"] == 25
+    assert generated["sim"]["current_hard_termination_fraction"] == 1.20
     assert generated["reward"]["action_weight"] == 0.01
     assert generated["reward"]["delta_action_weight"] == 0.025
 
@@ -411,6 +411,40 @@ def test_physical_sweep_summary_uses_actor_eval_and_marks_missing_actor_eval(tmp
     assert rows[1]["selection_reason"] == "missing_actor_eval"
     assert (out_dir / "physical_best_candidate.json").exists()
     assert (out_dir / "physical_selection_report.md").exists()
+
+
+def test_physical_sweep_summary_prefers_padded_actor_eval_metrics(tmp_path: Path) -> None:
+    manifest = build_manifest()
+    manifest["variants"] = manifest["variants"][:1]
+    (tmp_path / "variants.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _write_physical_run(tmp_path, manifest["variants"][0], completion=1.0, boundary=1.0, shape=0.02, ip=10000.0)
+    validation_path = tmp_path / manifest["variants"][0]["folder"] / "policy_validation.json"
+    validation = json.loads(validation_path.read_text(encoding="utf-8"))
+    validation["actor_eval"].update(
+        {
+            "full_episode_success": 0.0,
+            "termination_failure_fraction": 1.0,
+            "padded_boundary_found_late_min": 0.0,
+            "padded_shape_error_mean_m_late": 0.10,
+            "padded_shape_error_max_m_late": 0.10,
+            "padded_ip_error_a_late": 100000.0,
+            "padded_current_over_limit_a_late_max": 20000.0,
+            "padded_current_over_limit_fraction_late": 1.0,
+            "padded_current_usage_fraction_late_max": 1.20,
+        }
+    )
+    validation_path.write_text(json.dumps(validation), encoding="utf-8")
+
+    out_dir = tmp_path / "analysis"
+    summarize(tmp_path, out_dir, top=10, min_completion=0.95, min_boundary_late=0.999, max_terminated_boundary=0.001, max_current_over_limit_a_max=250000.0, max_current_over_limit_fraction_late=0.5)
+
+    rows = list(csv.DictReader((out_dir / "physical_sweep_summary.csv").open()))
+    assert rows[0]["uses_padded_metrics"] == "True"
+    assert rows[0]["selection_valid"] == "False"
+    assert rows[0]["selection_reason"] == "low_full_episode_success"
+    assert rows[0]["boundary_found_late_min"] == "0.0"
+    assert rows[0]["shape_error_mean_m_late"] == "0.1"
+    assert rows[0]["ip_error_a_late"] == "100000.0"
 
 
 def test_physical_sweep_best_candidate_falls_back_to_imperfect_actor_eval(tmp_path: Path) -> None:
