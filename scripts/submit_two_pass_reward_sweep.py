@@ -8,9 +8,21 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from scripts.build_reward_sweep_manifest import PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON, PROFILE_LEGAL, build_manifest
+    from scripts.build_reward_sweep_manifest import (
+        PROFILE_CURRENT_CONSTRAINT,
+        PROFILE_FIXED_HORIZON,
+        PROFILE_LEGAL,
+        PROFILE_SATURATION,
+        build_manifest,
+    )
 except ModuleNotFoundError:  # pragma: no cover - used when run as python3 scripts/...
-    from build_reward_sweep_manifest import PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON, PROFILE_LEGAL, build_manifest
+    from build_reward_sweep_manifest import (
+        PROFILE_CURRENT_CONSTRAINT,
+        PROFILE_FIXED_HORIZON,
+        PROFILE_LEGAL,
+        PROFILE_SATURATION,
+        build_manifest,
+    )
 
 
 def _job_id(raw: str) -> str:
@@ -114,7 +126,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pass2-job", type=Path, default=Path("jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_pass2_focused.sbatch"))
     parser.add_argument("--final-aggregate-job", type=Path, default=Path("jobs/aggregate_t15_reward_sweep_final.sbatch"))
     parser.add_argument("--root-prefix", default="outputs/t15_reward_sweep72_legal_1m")
-    parser.add_argument("--profile", choices=(PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON), default=PROFILE_LEGAL)
+    parser.add_argument(
+        "--profile",
+        choices=(PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON, PROFILE_SATURATION),
+        default=PROFILE_LEGAL,
+    )
     args = parser.parse_args(argv)
     payload = submit_chain(
         pass1_job=args.pass1_job,

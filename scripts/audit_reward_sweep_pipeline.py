@@ -17,6 +17,8 @@ ACTIVE_JOB_FILES = [
     "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_current_constraint_pass2.sbatch",
     "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_fixed_horizon_pass1.sbatch",
     "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_fixed_horizon_pass2.sbatch",
+    "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_saturation_pass1.sbatch",
+    "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_saturation_pass2.sbatch",
     "jobs/aggregate_t15_reward_sweep_pass1.sbatch",
     "jobs/aggregate_t15_reward_sweep_final.sbatch",
 ]

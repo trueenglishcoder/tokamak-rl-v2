@@ -59,12 +59,22 @@ print(f"pass1_center_reward={center}")
 PYCENTER
 
     mkdir -p "${ROOT}/pass2_focused/generated_configs"
+    if [[ "${PROFILE}" == "saturation" ]]; then
+      PASS2_RUNS_PER_TASK=1
+      PASS2_ARRAY_TASKS=12
+    else
+      PASS2_RUNS_PER_TASK=3
+      PASS2_ARRAY_TASKS=12
+    fi
+    echo "pass2_runs_per_task=${PASS2_RUNS_PER_TASK}"
+    echo "pass2_array_tasks=${PASS2_ARRAY_TASKS}"
+
     python3 scripts/build_reward_sweep_manifest.py \
       --pass focused \
       --profile "${PROFILE}" \
       --center "${ROOT}/selection/pass1/physical_best_candidate.json" \
-      --runs-per-array-task 3 \
-      --array-task-count 12 \
+      --runs-per-array-task "${PASS2_RUNS_PER_TASK}" \
+      --array-task-count "${PASS2_ARRAY_TASKS}" \
       --output "${ROOT}/pass2_focused/variants.json"
 
     python3 scripts/build_reward_sweep_rerun_manifest.py \

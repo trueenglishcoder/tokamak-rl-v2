@@ -296,10 +296,68 @@ SATURATION_BROAD_IP_REGIMES = [
 ]
 
 SATURATION_BROAD_SAFETY_REGIMES = [
-    {"id": "a0", "current_weight": 2.0, "derivative_weight": 0.25, "actuator_saturation_weight": 2.0},
-    {"id": "a1", "current_weight": 4.2, "derivative_weight": 0.525, "actuator_saturation_weight": 4.0},
-    {"id": "a2", "current_weight": 6.0, "derivative_weight": 0.75, "actuator_saturation_weight": 8.0},
-    {"id": "a3", "current_weight": 8.0, "derivative_weight": 1.0, "actuator_saturation_weight": 12.0},
+    {
+        "id": "a0",
+        "current_weight": 1.5,
+        "derivative_weight": 0.20,
+        "current_usage_weight": 0.25,
+        "derivative_usage_weight": 0.05,
+        "actuator_saturation_weight": 2.0,
+    },
+    {
+        "id": "a1",
+        "current_weight": 3.0,
+        "derivative_weight": 0.40,
+        "current_usage_weight": 0.50,
+        "derivative_usage_weight": 0.10,
+        "actuator_saturation_weight": 4.0,
+    },
+    {
+        "id": "a2",
+        "current_weight": 5.0,
+        "derivative_weight": 0.70,
+        "current_usage_weight": 1.00,
+        "derivative_usage_weight": 0.20,
+        "actuator_saturation_weight": 8.0,
+    },
+    {
+        "id": "a3",
+        "current_weight": 8.0,
+        "derivative_weight": 1.00,
+        "current_usage_weight": 2.00,
+        "derivative_usage_weight": 0.40,
+        "actuator_saturation_weight": 12.0,
+    },
+]
+
+SATURATION_FOCUS_SHAPE_FACTORS = [
+    {"id": "sf0", "factor": 0.80},
+    {"id": "sf1", "factor": 1.00},
+    {"id": "sf2", "factor": 1.25},
+]
+
+SATURATION_FOCUS_IP_FACTORS = [
+    {"id": "if0", "factor": 0.80},
+    {"id": "if1", "factor": 1.20},
+]
+
+SATURATION_FOCUS_SAFETY_FACTORS = [
+    {
+        "id": "af0",
+        "current_factor": 0.85,
+        "derivative_factor": 0.85,
+        "current_usage_factor": 0.75,
+        "derivative_usage_factor": 0.75,
+        "actuator_saturation_factor": 0.75,
+    },
+    {
+        "id": "af1",
+        "current_factor": 1.25,
+        "derivative_factor": 1.25,
+        "current_usage_factor": 1.50,
+        "derivative_usage_factor": 1.50,
+        "actuator_saturation_factor": 1.50,
+    },
 ]
 
 SATURATION_FIXED_REWARD = {
@@ -310,7 +368,7 @@ SATURATION_FIXED_REWARD = {
     "terminal_reward": -20.0,
     "terminal_remaining_cost": 0.0,
     "current_soft_fraction": 0.90,
-    "current_bad_fraction": 1.20,
+    "current_bad_fraction": 1.05,
     "derivative_soft_fraction": 0.90,
     "derivative_bad_fraction": 1.20,
     "action_weight": 0.01,
@@ -320,7 +378,7 @@ SATURATION_FIXED_REWARD = {
 SATURATION_FIXED_SIM = {
     "terminate_on_boundary_loss": False,
     "terminate_on_current_limit": False,
-    "current_saturation_fraction": 1.15,
+    "current_saturation_fraction": 1.05,
 }
 
 
@@ -395,6 +453,8 @@ def _focus_shape_factors(profile: str) -> list[dict[str, Any]]:
         return CURRENT_CONSTRAINT_FOCUS_SHAPE_FACTORS
     if profile == PROFILE_FIXED_HORIZON:
         return FIXED_HORIZON_FOCUS_SHAPE_FACTORS
+    if profile == PROFILE_SATURATION:
+        return SATURATION_FOCUS_SHAPE_FACTORS
     return FOCUS_SHAPE_FACTORS
 
 
@@ -404,6 +464,8 @@ def _focus_ip_factors(profile: str) -> list[dict[str, Any]]:
         return CURRENT_CONSTRAINT_FOCUS_IP_FACTORS
     if profile == PROFILE_FIXED_HORIZON:
         return FIXED_HORIZON_FOCUS_IP_FACTORS
+    if profile == PROFILE_SATURATION:
+        return SATURATION_FOCUS_IP_FACTORS
     return FOCUS_IP_FACTORS
 
 
@@ -413,6 +475,8 @@ def _focus_safety_factors(profile: str) -> list[dict[str, Any]]:
         return CURRENT_CONSTRAINT_FOCUS_SAFETY_FACTORS
     if profile == PROFILE_FIXED_HORIZON:
         return FIXED_HORIZON_FOCUS_SAFETY_FACTORS
+    if profile == PROFILE_SATURATION:
+        return SATURATION_FOCUS_SAFETY_FACTORS
     return FOCUS_ACTUATOR_FACTORS
 
 
@@ -476,6 +540,10 @@ def build_broad_variants(profile: str = PROFILE_LEGAL) -> list[dict[str, Any]]:
                     reward["terminal_remaining_cost"] = actuator["terminal_remaining_cost"]
                 if "actuator_saturation_weight" in actuator:
                     reward["actuator_saturation_weight"] = actuator["actuator_saturation_weight"]
+                if "current_usage_weight" in actuator:
+                    reward["current_usage_weight"] = actuator["current_usage_weight"]
+                if "derivative_usage_weight" in actuator:
+                    reward["derivative_usage_weight"] = actuator["derivative_usage_weight"]
                 extra = {"actuator_regime": actuator["id"]}
                 if fixed_sim:
                     extra["sim"] = fixed_sim
@@ -527,7 +595,19 @@ def load_center_reward(path: Path) -> dict[str, float]:
     missing = [key for key in required if key not in reward]
     if missing:
         raise ValueError(f"Center candidate at {path} is missing reward fields: {', '.join(missing)}")
-    optional = ("current_soft_fraction", "derivative_soft_fraction", "terminal_reward", "terminal_remaining_cost")
+    optional = (
+        "current_soft_fraction",
+        "current_bad_fraction",
+        "derivative_soft_fraction",
+        "derivative_bad_fraction",
+        "current_usage_weight",
+        "derivative_usage_weight",
+        "actuator_saturation_weight",
+        "action_weight",
+        "delta_action_weight",
+        "terminal_reward",
+        "terminal_remaining_cost",
+    )
     return {key: float(reward[key]) for key in (*required, *optional) if key in reward}
 
 
@@ -568,12 +648,27 @@ def build_focused_variants(center_reward: dict[str, float], profile: str = PROFI
                     "current_soft_fraction": current_soft,
                     "derivative_soft_fraction": derivative_soft,
                 }
+                for key, factor_key in (
+                    ("current_usage_weight", "current_usage_factor"),
+                    ("derivative_usage_weight", "derivative_usage_factor"),
+                    ("actuator_saturation_weight", "actuator_saturation_factor"),
+                ):
+                    if key in fixed_reward or key in center_reward or factor_key in actuator:
+                        reward[key] = _rounded(
+                            center_reward.get(key, fixed_reward.get(key, 0.0)) * float(actuator.get(factor_key, 1.0))
+                        )
+                for key in ("current_bad_fraction", "derivative_bad_fraction", "action_weight", "delta_action_weight"):
+                    if key in fixed_reward or key in center_reward:
+                        reward[key] = _rounded(center_reward.get(key, fixed_reward.get(key, 0.0)))
                 extra = {
                     "actuator_regime": actuator["id"],
                     "shape_factor": shape["factor"],
                     "ip_factor": ip["factor"],
                     "current_factor": actuator["current_factor"],
                     "derivative_factor": actuator["derivative_factor"],
+                    "current_usage_factor": actuator.get("current_usage_factor", 1.0),
+                    "derivative_usage_factor": actuator.get("derivative_usage_factor", 1.0),
+                    "actuator_saturation_factor": actuator.get("actuator_saturation_factor", 1.0),
                     "terminal_remaining_factor": actuator.get("terminal_remaining_factor", 1.0),
                 }
                 if fixed_sim:
@@ -628,8 +723,6 @@ def build_variants(
     if sweep_pass == "broad":
         variants = build_broad_variants(profile)
     elif sweep_pass == "focused":
-        if profile == PROFILE_SATURATION:
-            raise ValueError("saturation reward sweep profile is one-pass only")
         if center_reward is None:
             raise ValueError("focused sweep requires center_reward")
         variants = build_focused_variants(center_reward, profile)

@@ -5,8 +5,6 @@ import json
 from argparse import Namespace
 from pathlib import Path
 
-import pytest
-
 from scripts.aggregate_reward_sweep import aggregate, score_eval_row, write_outputs
 from scripts.audit_reward_sweep_pipeline import audit as audit_reward_sweep_pipeline
 from scripts.build_reward_sweep_manifest import (
@@ -21,6 +19,7 @@ from scripts.run_reward_sweep_candidate import run_candidate
 from scripts.summarize_two_pass_reward_sweep_physical import summarize_two_pass
 from scripts.summarize_reward_sweep_physical import summarize
 from scripts.submit_saturation_reward_sweep import submit_onepass
+from scripts.submit_saturation_two_pass_reward_sweep import main as submit_saturation_two_pass_main
 from scripts.submit_two_pass_reward_sweep import submit_chain
 
 
@@ -35,6 +34,8 @@ PASS1_FIXED_HORIZON_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_1
 PASS2_FIXED_HORIZON_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_fixed_horizon_pass2.sbatch"
 SATURATION_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_saturation_onepass.sbatch"
 SATURATION_AGG_JOB = ROOT / "jobs/aggregate_t15_reward_sweep_onepass.sbatch"
+SATURATION_PASS1_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_saturation_pass1.sbatch"
+SATURATION_PASS2_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_saturation_pass2.sbatch"
 RERUN_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_rerun_1gpu.sbatch"
 
 
@@ -154,10 +155,12 @@ def test_saturation_broad_manifest_has_36_and_saturation_overrides() -> None:
     assert first["reward"]["shape_mean_weight"] == 0.75
     assert first["reward"]["shape_max_weight"] == 0.1875
     assert first["reward"]["ip_weight"] == 0.75
-    assert first["reward"]["current_weight"] == 2.0
+    assert first["reward"]["current_weight"] == 1.5
     assert first["reward"]["current_soft_fraction"] == 0.90
-    assert first["reward"]["current_bad_fraction"] == 1.20
-    assert first["reward"]["derivative_weight"] == 0.25
+    assert first["reward"]["current_bad_fraction"] == 1.05
+    assert first["reward"]["derivative_weight"] == 0.20
+    assert first["reward"]["current_usage_weight"] == 0.25
+    assert first["reward"]["derivative_usage_weight"] == 0.05
     assert first["reward"]["derivative_soft_fraction"] == 0.90
     assert first["reward"]["derivative_bad_fraction"] == 1.20
     assert first["reward"]["actuator_saturation_weight"] == 2.0
@@ -167,7 +170,7 @@ def test_saturation_broad_manifest_has_36_and_saturation_overrides() -> None:
     assert first["sim"] == {
         "terminate_on_boundary_loss": False,
         "terminate_on_current_limit": False,
-        "current_saturation_fraction": 1.15,
+        "current_saturation_fraction": 1.05,
     }
     saturation_weights = {
         variant["actuator_regime"]: variant["reward"]["actuator_saturation_weight"]
@@ -303,21 +306,45 @@ def test_saturation_manifest_has_exact_36_variants() -> None:
     assert broad["fixed_sim"] == {
         "terminate_on_boundary_loss": False,
         "terminate_on_current_limit": False,
-        "current_saturation_fraction": 1.15,
+        "current_saturation_fraction": 1.05,
     }
     assert all("actuator_saturation_weight" in variant["reward"] for variant in broad["variants"])
+    assert all("current_usage_weight" in variant["reward"] for variant in broad["variants"])
+    assert all("derivative_usage_weight" in variant["reward"] for variant in broad["variants"])
 
 
-def test_saturation_profile_rejects_focused_pass() -> None:
+def test_saturation_focused_manifest_has_12_local_variants() -> None:
     center = {
         "shape_mean_weight": 1.5,
         "shape_max_weight": 0.375,
         "ip_weight": 1.5,
-        "current_weight": 4.2,
-        "derivative_weight": 0.525,
+        "current_weight": 3.0,
+        "derivative_weight": 0.40,
+        "current_usage_weight": 0.50,
+        "derivative_usage_weight": 0.10,
+        "actuator_saturation_weight": 4.0,
     }
-    with pytest.raises(ValueError, match="one-pass only"):
-        build_manifest("focused", center, profile=PROFILE_SATURATION, runs_per_array_task=3, array_task_count=12)
+    focused = build_manifest("focused", center, profile=PROFILE_SATURATION, runs_per_array_task=1, array_task_count=12)
+    assert focused["profile"] == PROFILE_SATURATION
+    assert focused["variant_count"] == 12
+    assert focused["runs_per_array_task"] == 1
+    assert focused["array_task_count"] == 12
+    assert focused["variants"][0]["folder"] == "f000_sf0_if0_af0"
+    assert focused["variants"][-1]["folder"] == "f011_sf2_if1_af1"
+    first = focused["variants"][0]
+    assert first["reward"]["shape_mean_weight"] == 1.2
+    assert first["reward"]["shape_max_weight"] == 0.3
+    assert first["reward"]["ip_weight"] == 1.2
+    assert first["reward"]["current_weight"] == 2.55
+    assert first["reward"]["derivative_weight"] == 0.34
+    assert first["reward"]["current_usage_weight"] == 0.375
+    assert first["reward"]["derivative_usage_weight"] == 0.075
+    assert first["reward"]["actuator_saturation_weight"] == 3.0
+    assert first["sim"] == {
+        "terminate_on_boundary_loss": False,
+        "terminate_on_current_limit": False,
+        "current_saturation_fraction": 1.05,
+    }
 
 
 def test_reward_sweep_array_task_mappings() -> None:
@@ -498,10 +525,12 @@ def test_reward_sweep_candidate_applies_saturation_overrides(tmp_path: Path, mon
     generated = json.loads((sweep_root / "generated_configs" / f"{variant['folder']}.json").read_text(encoding="utf-8"))
     assert generated["sim"]["terminate_on_boundary_loss"] is False
     assert generated["sim"]["terminate_on_current_limit"] is False
-    assert generated["sim"]["current_saturation_fraction"] == 1.15
+    assert generated["sim"]["current_saturation_fraction"] == 1.05
     assert generated["reward"]["actuator_saturation_weight"] == 2.0
+    assert generated["reward"]["current_usage_weight"] == 0.25
+    assert generated["reward"]["derivative_usage_weight"] == 0.05
     assert generated["reward"]["current_soft_fraction"] == 0.90
-    assert generated["reward"]["current_bad_fraction"] == 1.20
+    assert generated["reward"]["current_bad_fraction"] == 1.05
     assert generated["reward"]["terminal_remaining_cost"] == 0.0
 
 
@@ -516,6 +545,8 @@ def test_reward_sweep_job_blocks_stale_name_leaks() -> None:
         PASS1_FIXED_HORIZON_JOB,
         PASS2_FIXED_HORIZON_JOB,
         SATURATION_JOB,
+        SATURATION_PASS1_JOB,
+        SATURATION_PASS2_JOB,
         RERUN_JOB,
     ):
         text = path.read_text(encoding="utf-8")
@@ -538,12 +569,16 @@ def test_reward_sweep_job_blocks_stale_name_leaks() -> None:
     assert "REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-288}" in PASS1_FIXED_HORIZON_JOB.read_text(encoding="utf-8")
     assert "REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-288}" in PASS2_FIXED_HORIZON_JOB.read_text(encoding="utf-8")
     assert "REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-288}" in SATURATION_JOB.read_text(encoding="utf-8")
+    assert "REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-288}" in SATURATION_PASS1_JOB.read_text(encoding="utf-8")
+    assert "REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-288}" in SATURATION_PASS2_JOB.read_text(encoding="utf-8")
     for path in (
         ROOT / "jobs/aggregate_t15_reward_sweep_pass1.sbatch",
         ROOT / "jobs/aggregate_t15_reward_sweep_final.sbatch",
         SATURATION_AGG_JOB,
         PASS1_12_JOB,
         PASS2_12_JOB,
+        SATURATION_PASS1_JOB,
+        SATURATION_PASS2_JOB,
     ):
         assert "reward288" not in path.read_text(encoding="utf-8")
 
@@ -624,6 +659,8 @@ def _write_physical_run(
     ip: float = 40000.0,
     current_max: float = 0.0,
     current_fraction: float = 0.0,
+    current_usage_loss: float = 0.2,
+    derivative_usage_loss: float = 0.05,
     saturation_fraction: float = 0.0,
     saturation_loss: float = 0.0,
     actor_eval: bool = True,
@@ -643,6 +680,10 @@ def _write_physical_run(
             "current_over_limit_a_late_max": current_max,
             "current_over_limit_fraction_late": current_fraction,
             "current_usage_fraction_late_max": 0.8 if current_max == 0.0 else 1.2,
+            "current_usage_mean_fraction_late": 0.4,
+            "current_usage_loss_late": current_usage_loss,
+            "derivative_usage_mean_fraction_late": 0.2,
+            "derivative_usage_loss_late": derivative_usage_loss,
             "action_rms_late": 0.1,
             "delta_action_rms_late": 0.01,
             "action_saturation_fraction_late": saturation_fraction,
@@ -660,6 +701,8 @@ def _write_physical_run(
                 "shape_error_mean_m_late",
                 "ip_error_a_late",
                 "current_over_limit_fraction_late",
+                "current_usage_loss_late",
+                "derivative_usage_loss_late",
                 "action_saturation_fraction_late",
                 "actuator_saturation_loss_late",
             ],
@@ -673,6 +716,8 @@ def _write_physical_run(
                 "shape_error_mean_m_late": shape,
                 "ip_error_a_late": ip,
                 "current_over_limit_fraction_late": current_fraction,
+                "current_usage_loss_late": current_usage_loss,
+                "derivative_usage_loss_late": derivative_usage_loss,
                 "action_saturation_fraction_late": saturation_fraction,
                 "actuator_saturation_loss_late": saturation_loss,
             }
@@ -966,3 +1011,59 @@ def test_submit_saturation_onepass_uses_single_array_and_aggregate(tmp_path: Pat
     assert manifest["profile"] == PROFILE_SATURATION
     assert manifest["variant_count"] == 36
     assert released == [["scontrol", "release", "211"]]
+
+
+def test_submit_saturation_two_pass_uses_36_plus_12_chain(tmp_path: Path, monkeypatch) -> None:
+    submitted: list[list[str]] = []
+    released: list[list[str]] = []
+    jobids = iter(["311\n", "312\n", "313\n", "314\n"])
+
+    class Result:
+        def __init__(self, stdout: str) -> None:
+            self.stdout = stdout
+            self.stderr = ""
+
+    def fake_run(args, check, text, stdout, stderr):
+        if args[0] == "scontrol":
+            released.append(list(args))
+            return Result("")
+        submitted.append(list(args))
+        return Result(next(jobids))
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("scripts.submit_two_pass_reward_sweep.subprocess.run", fake_run)
+
+    assert (
+        submit_saturation_two_pass_main(
+            [
+                "--pass1-job",
+                "jobs/sat-pass1.sbatch",
+                "--pass1-aggregate-job",
+                "jobs/agg1.sbatch",
+                "--pass2-job",
+                "jobs/sat-pass2.sbatch",
+                "--final-aggregate-job",
+                "jobs/final.sbatch",
+                "--root-prefix",
+                "outputs/t15_reward_sweep48_saturation_1m",
+            ]
+        )
+        == 0
+    )
+
+    root = tmp_path / "outputs/t15_reward_sweep48_saturation_1m_311"
+    pass1_manifest = json.loads((root / "pass1_broad" / "variants.json").read_text(encoding="utf-8"))
+    payload = json.loads((root / "selection" / "submission_chain.json").read_text(encoding="utf-8"))
+
+    assert pass1_manifest["profile"] == PROFILE_SATURATION
+    assert pass1_manifest["variant_count"] == 36
+    assert pass1_manifest["runs_per_array_task"] == 3
+    assert pass1_manifest["array_task_count"] == 12
+    assert payload["pass2_manifest"] == "outputs/t15_reward_sweep48_saturation_1m_311/pass2_focused/variants.json"
+    assert payload["jobs"]["pass1"] == "jobs/sat-pass1.sbatch"
+    assert payload["jobs"]["pass2"] == "jobs/sat-pass2.sbatch"
+    assert "--export=ALL,SWEEP_ROOT_PREFIX=outputs/t15_reward_sweep48_saturation_1m" in submitted[0]
+    assert submitted[1][2] == "--dependency=afterany:311"
+    assert submitted[2][2] == "--dependency=afterok:312"
+    assert submitted[3][2] == "--dependency=afterany:313"
+    assert released == [["scontrol", "release", "311"]]
