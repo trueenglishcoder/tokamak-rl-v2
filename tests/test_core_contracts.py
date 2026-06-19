@@ -160,6 +160,49 @@ def test_physical_reward_penalizes_rejected_actuator_command() -> None:
     assert saturated.reward[0] < clean.reward[0]
 
 
+def test_physical_reward_penalizes_always_on_coil_usage_below_soft_limit() -> None:
+    reward_fn = T15PhysicalReward(
+        RewardConfig(
+            reward_scale=1.0,
+            current_weight=0.0,
+            derivative_weight=0.0,
+            current_usage_weight=2.0,
+            derivative_usage_weight=3.0,
+            action_weight=0.0,
+            delta_action_weight=0.0,
+            actuator_saturation_weight=0.0,
+        ),
+        control_rate_hz=1000.0,
+    )
+    ref = torch.zeros((2, 32, 2), dtype=torch.float32)
+    action = torch.zeros((2, 9), dtype=torch.float32)
+    common = dict(
+        ip=torch.tensor([200000.0, 200000.0]),
+        ip_ref=torch.tensor([200000.0, 200000.0]),
+        boundary_points=ref,
+        reference_points=ref,
+        action=action,
+        previous_action=action,
+        current_over_limit_a=torch.zeros((2,), dtype=torch.float32),
+        current_usage_fraction=torch.tensor([0.4, 0.8], dtype=torch.float32),
+        current_margin_fraction=torch.tensor([0.6, 0.2], dtype=torch.float32),
+        derivative_usage=torch.tensor([0.2, 0.6], dtype=torch.float32),
+        current_usage_loss=torch.tensor([0.04, 0.16], dtype=torch.float32),
+        derivative_usage_loss=torch.tensor([0.01, 0.09], dtype=torch.float32),
+        current_usage_mean_fraction=torch.tensor([0.2, 0.4], dtype=torch.float32),
+        derivative_usage_mean_fraction=torch.tensor([0.1, 0.3], dtype=torch.float32),
+        boundary_found=torch.ones((2,), dtype=torch.bool),
+        terminated=torch.zeros((2,), dtype=torch.bool),
+    )
+    rb = reward_fn(**common)
+    assert float(rb.components["current_loss"][0].item()) == pytest.approx(0.0)
+    assert float(rb.components["derivative_loss"][0].item()) == pytest.approx(0.0)
+    assert float(rb.components["current_usage_loss"][0].item()) == pytest.approx(0.04)
+    assert float(rb.components["derivative_usage_loss"][1].item()) == pytest.approx(0.09)
+    assert float(rb.components["current_usage_mean_fraction"][1].item()) == pytest.approx(0.4)
+    assert rb.reward[1] < rb.reward[0]
+
+
 def test_reward_components_remain_finite_when_boundary_is_missing() -> None:
     reward_fn = T15PhysicalReward(RewardConfig(reward_scale=1.0), control_rate_hz=1000.0)
     boundary = torch.full((1, 32, 2), float("nan"), dtype=torch.float32)
@@ -457,14 +500,14 @@ def test_current_aware_saturation_clips_command_before_current_runaway() -> None
             compute_backend="cpu",
             max_episode_steps=4,
             terminate_on_current_limit=False,
-            current_saturation_fraction=1.15,
+            current_saturation_fraction=1.05,
         ),
         reward=replace(cfg.reward, actuator_saturation_weight=4.0),
     )
     env = TokamakMagneticControlEnv(cfg, batch_size=1, device="cpu", seed=12)
     env.reset()
     limit = float(env.current_limits[0].item())
-    upper = 1.15 * limit
+    upper = 1.05 * limit
     env._cpu_models[0].state.pfc_currents[0] = upper - 1.0
     action = torch.zeros((1, env.action_dim), dtype=torch.float32)
     action[0, 0] = 1.0
@@ -490,7 +533,7 @@ def test_current_aware_saturation_leaves_safe_command_unchanged() -> None:
             compute_backend="cpu",
             max_episode_steps=4,
             terminate_on_current_limit=False,
-            current_saturation_fraction=1.15,
+            current_saturation_fraction=1.05,
         ),
     )
     env = TokamakMagneticControlEnv(cfg, batch_size=1, device="cpu", seed=13)
@@ -1144,6 +1187,20 @@ def test_config_loader_rejects_invalid_values(tmp_path: Path) -> None:
     bad_saturation_weight.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(ValueError, match="actuator_saturation_weight"):
         load_experiment_config(bad_saturation_weight)
+
+    data = json.loads(CONFIG.read_text())
+    data["reward"]["current_usage_weight"] = -1.0
+    bad_current_usage_weight = tmp_path / "bad_current_usage_weight.json"
+    bad_current_usage_weight.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="current_usage_weight"):
+        load_experiment_config(bad_current_usage_weight)
+
+    data = json.loads(CONFIG.read_text())
+    data["reward"]["derivative_usage_weight"] = -1.0
+    bad_derivative_usage_weight = tmp_path / "bad_derivative_usage_weight.json"
+    bad_derivative_usage_weight.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="derivative_usage_weight"):
+        load_experiment_config(bad_derivative_usage_weight)
 
     data = json.loads(CONFIG.read_text())
     data["sim"]["current_saturation_fraction"] = 0.99

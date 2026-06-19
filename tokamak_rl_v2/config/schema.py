@@ -104,6 +104,8 @@ class RewardConfig:
     ip_weight: float = 3.0
     current_weight: float = 2.0
     derivative_weight: float = 0.5
+    current_usage_weight: float = 0.0
+    derivative_usage_weight: float = 0.0
     action_weight: float = 0.02
     delta_action_weight: float = 0.05
     current_soft_fraction: float = 0.90

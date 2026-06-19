@@ -14,6 +14,8 @@ LOWER_BETTER = {
     "current_over_limit_fraction_late",
     "current_over_limit_a_max",
     "current_usage_fraction_late_max",
+    "current_usage_loss_late",
+    "derivative_usage_loss_late",
     "terminated_boundary",
     "termination_failure_fraction",
     "shape_error_mean_m_late",
@@ -52,6 +54,10 @@ SUMMARY_FIELDS = [
     "current_over_limit_a_max",
     "current_over_limit_fraction_late",
     "current_usage_fraction_late_max",
+    "current_usage_mean_fraction_late",
+    "current_usage_loss_late",
+    "derivative_usage_mean_fraction_late",
+    "derivative_usage_loss_late",
     "action_rms_late",
     "delta_action_rms_late",
     "action_saturation_fraction_late",
@@ -68,6 +74,8 @@ SUMMARY_FIELDS = [
     "current_soft_fraction",
     "current_bad_fraction",
     "derivative_weight",
+    "current_usage_weight",
+    "derivative_usage_weight",
     "derivative_soft_fraction",
     "derivative_bad_fraction",
     "action_weight",
@@ -84,6 +92,8 @@ SUMMARY_FIELDS = [
     "tail_shape_error_mean_m_late",
     "tail_ip_error_a_late",
     "tail_current_over_limit_fraction_late",
+    "tail_current_usage_loss_late",
+    "tail_derivative_usage_loss_late",
     "tail_action_saturation_fraction_late",
     "tail_actuator_saturation_loss_late",
 ]
@@ -218,6 +228,8 @@ def _physical_priority_score(row: dict[str, Any]) -> float:
     current_fraction = _finite(row["current_over_limit_fraction_late"], 1.0)
     current_max = _finite(row["current_over_limit_a_max"], 1.0e9)
     current_usage_max = _finite(row["current_usage_fraction_late_max"], 10.0)
+    current_usage_loss = _finite(row.get("current_usage_loss_late"), current_usage_max * current_usage_max)
+    derivative_usage_loss = _finite(row.get("derivative_usage_loss_late"), 10.0)
     shape_mean = _finite(row["shape_error_mean_m_late"], 10.0)
     shape_max = _finite(row["shape_error_max_m_late"], 10.0)
     ip_error = _finite(row["ip_error_a_late"], 1.0e9)
@@ -237,6 +249,8 @@ def _physical_priority_score(row: dict[str, Any]) -> float:
         + 60.0 * current_fraction
         + 6.0 * current_max / 20000.0
         + 20.0 * max(0.0, current_usage_max - 1.0)
+        + 5.0 * current_usage_loss
+        + 2.0 * derivative_usage_loss
         + 2.0 * shape_mean / 0.03
         + 1.0 * shape_max / 0.08
         + 2.0 * ip_error / 25000.0
@@ -299,6 +313,10 @@ def summarize_variant(
         "current_over_limit_a_max": _metric(actor_eval, "padded_current_over_limit_a_late_max", "padded_current_over_limit_a_max", "current_over_limit_a_late_max", "current_over_limit_a_max", "current_over_limit_a", default=float("nan")),
         "current_over_limit_fraction_late": _metric(actor_eval, "padded_current_over_limit_fraction_late", "current_over_limit_fraction_late", "current_over_limit_fraction", default=float("nan")),
         "current_usage_fraction_late_max": _metric(actor_eval, "padded_current_usage_fraction_late_max", "padded_current_usage_fraction_max", "current_usage_fraction_late_max", "current_usage_fraction_max", "current_usage_fraction", default=float("nan")),
+        "current_usage_mean_fraction_late": _metric(actor_eval, "current_usage_mean_fraction_late", "current_usage_mean_fraction", default=float("nan")),
+        "current_usage_loss_late": _metric(actor_eval, "current_usage_loss_late", "current_usage_loss", default=float("nan")),
+        "derivative_usage_mean_fraction_late": _metric(actor_eval, "derivative_usage_mean_fraction_late", "derivative_usage_mean_fraction", default=float("nan")),
+        "derivative_usage_loss_late": _metric(actor_eval, "derivative_usage_loss_late", "derivative_usage_loss", default=float("nan")),
         "action_rms_late": _metric(actor_eval, "action_rms_late", "action_rms", default=float("nan")),
         "delta_action_rms_late": _metric(actor_eval, "delta_action_rms_late", "delta_action_rms", default=float("nan")),
         "action_saturation_fraction_late": _metric(
@@ -321,6 +339,8 @@ def summarize_variant(
         "current_soft_fraction": reward.get("current_soft_fraction", ""),
         "current_bad_fraction": reward.get("current_bad_fraction", ""),
         "derivative_weight": reward.get("derivative_weight", ""),
+        "current_usage_weight": reward.get("current_usage_weight", ""),
+        "derivative_usage_weight": reward.get("derivative_usage_weight", ""),
         "derivative_soft_fraction": reward.get("derivative_soft_fraction", ""),
         "derivative_bad_fraction": reward.get("derivative_bad_fraction", ""),
         "action_weight": reward.get("action_weight", ""),
@@ -337,6 +357,8 @@ def summarize_variant(
         "tail_shape_error_mean_m_late": _tail_metric(eval_rows, "padded_shape_error_mean_m_late", "shape_error_mean_m_late", "shape_error_mean_m"),
         "tail_ip_error_a_late": _tail_metric(eval_rows, "padded_ip_error_a_late", "ip_error_a_late", "ip_error_a"),
         "tail_current_over_limit_fraction_late": _tail_metric(eval_rows, "padded_current_over_limit_fraction_late", "current_over_limit_fraction_late", "current_over_limit_fraction"),
+        "tail_current_usage_loss_late": _tail_metric(eval_rows, "current_usage_loss_late", "current_usage_loss"),
+        "tail_derivative_usage_loss_late": _tail_metric(eval_rows, "derivative_usage_loss_late", "derivative_usage_loss"),
         "tail_action_saturation_fraction_late": _tail_metric(eval_rows, "action_saturation_fraction_late", "action_saturation_fraction"),
         "tail_actuator_saturation_loss_late": _tail_metric(eval_rows, "actuator_saturation_loss_late", "actuator_saturation_loss"),
     }

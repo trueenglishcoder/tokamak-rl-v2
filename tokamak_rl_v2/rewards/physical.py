@@ -37,6 +37,10 @@ class T15PhysicalReward:
         derivative_usage: Tensor,
         boundary_found: Tensor,
         terminated: Tensor,
+        current_usage_loss: Tensor | None = None,
+        derivative_usage_loss: Tensor | None = None,
+        current_usage_mean_fraction: Tensor | None = None,
+        derivative_usage_mean_fraction: Tensor | None = None,
         episode_progress: Tensor | None = None,
     ) -> RewardBatch:
         c = self.config
@@ -71,6 +75,26 @@ class T15PhysicalReward:
         ip_loss = _huber(ip_error / max(float(c.ip_scale_a), 1.0e-12))
         current_loss = _threshold_square(current_usage_fraction, start=float(c.current_soft_fraction), bad=float(c.current_bad_fraction))
         derivative_loss = _threshold_square(derivative_usage, start=float(c.derivative_soft_fraction), bad=float(c.derivative_bad_fraction))
+        current_usage_cost = (
+            torch.clamp(current_usage_fraction, min=0.0).pow(2)
+            if current_usage_loss is None
+            else torch.clamp(current_usage_loss.to(dtype=action.dtype, device=action.device).reshape_as(current_usage_fraction), min=0.0)
+        )
+        derivative_usage_cost = (
+            torch.clamp(derivative_usage, min=0.0).pow(2)
+            if derivative_usage_loss is None
+            else torch.clamp(derivative_usage_loss.to(dtype=action.dtype, device=action.device).reshape_as(derivative_usage), min=0.0)
+        )
+        current_usage_mean = (
+            torch.clamp(current_usage_fraction, min=0.0)
+            if current_usage_mean_fraction is None
+            else torch.clamp(current_usage_mean_fraction.to(dtype=action.dtype, device=action.device).reshape_as(current_usage_fraction), min=0.0)
+        )
+        derivative_usage_mean = (
+            torch.clamp(derivative_usage, min=0.0)
+            if derivative_usage_mean_fraction is None
+            else torch.clamp(derivative_usage_mean_fraction.to(dtype=action.dtype, device=action.device).reshape_as(derivative_usage), min=0.0)
+        )
         action_loss = torch.mean(action.pow(2), dim=-1)
         delta_action_loss = torch.mean(delta_action.pow(2), dim=-1)
         actuator_saturation_loss = torch.mean(saturation_delta.pow(2), dim=-1)
@@ -81,6 +105,8 @@ class T15PhysicalReward:
             + float(c.ip_weight) * ip_loss
             + float(c.current_weight) * current_loss
             + float(c.derivative_weight) * derivative_loss
+            + float(c.current_usage_weight) * current_usage_cost
+            + float(c.derivative_usage_weight) * derivative_usage_cost
             + float(c.action_weight) * action_loss
             + float(c.delta_action_weight) * delta_action_loss
             + float(c.actuator_saturation_weight) * actuator_saturation_loss
@@ -115,8 +141,10 @@ class T15PhysicalReward:
                 "ip_error_a": ip_error,
                 "current_over_limit_a": torch.clamp(current_over_limit_a, min=0.0),
                 "current_usage_fraction": torch.clamp(current_usage_fraction, min=0.0),
+                "current_usage_mean_fraction": current_usage_mean,
                 "current_margin_fraction": current_margin_fraction,
                 "derivative_usage": torch.clamp(derivative_usage, min=0.0),
+                "derivative_usage_mean_fraction": derivative_usage_mean,
                 "max_abs_action": max_abs_action,
                 "action_rms": action_rms,
                 "requested_action_rms": requested_action_rms,
@@ -132,6 +160,8 @@ class T15PhysicalReward:
                 "ip_loss": ip_loss,
                 "current_loss": current_loss,
                 "derivative_loss": derivative_loss,
+                "current_usage_loss": current_usage_cost,
+                "derivative_usage_loss": derivative_usage_cost,
                 "action_loss": action_loss,
                 "delta_action_loss": delta_action_loss,
                 "actuator_saturation_loss": actuator_saturation_loss,

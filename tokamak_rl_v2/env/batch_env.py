@@ -630,8 +630,14 @@ class TokamakMagneticControlEnv:
         current_usage_by_coil = current_abs / current_scale[None, :]
         current_over_limit = torch.max(torch.clamp(current_abs - self.current_limits[None, :], min=0.0), dim=1).values
         current_usage_fraction = torch.max(current_usage_by_coil, dim=1).values
+        current_usage_mean_fraction = torch.mean(current_usage_by_coil, dim=1)
+        current_usage_loss = torch.mean(current_usage_by_coil.pow(2), dim=1)
         current_margin_fraction = torch.min(1.0 - current_usage_by_coil, dim=1).values
-        derivative_usage = torch.max(torch.abs(deriv) / torch.where(torch.isfinite(self.raw_derivative_limits) & (self.raw_derivative_limits > 0.0), self.raw_derivative_limits, torch.ones_like(self.raw_derivative_limits))[None, :], dim=1).values
+        derivative_scale = torch.where(torch.isfinite(self.raw_derivative_limits) & (self.raw_derivative_limits > 0.0), self.raw_derivative_limits, torch.ones_like(self.raw_derivative_limits))
+        derivative_usage_by_coil = torch.abs(deriv) / derivative_scale[None, :]
+        derivative_usage = torch.max(derivative_usage_by_coil, dim=1).values
+        derivative_usage_mean_fraction = torch.mean(derivative_usage_by_coil, dim=1)
+        derivative_usage_loss = torch.mean(derivative_usage_by_coil.pow(2), dim=1)
         boundary_points = result.boundary.points[:, : int(self.config.sim.angles)].to(torch.float32)
         ref = ref_points[:, : int(self.config.sim.angles)].to(torch.float32)
         found = result.boundary.found.to(torch.bool)
@@ -639,7 +645,7 @@ class TokamakMagneticControlEnv:
         current_terminated, current_hard_terminated, current_grace_terminated = self._current_termination(current_over_limit=current_over_limit, current_usage_fraction=current_usage_fraction)
         terminated = boundary_terminated | current_terminated
         episode_progress = self.step_index.to(torch.float32) / max(float(self.config.sim.max_episode_steps), 1.0)
-        rb = self.reward_fn(ip=result.state.Ip.to(torch.float32), ip_ref=ip_ref, boundary_points=boundary_points, reference_points=ref, action=action, previous_action=previous_action, requested_action=requested_action, current_over_limit_a=current_over_limit, current_usage_fraction=current_usage_fraction, current_margin_fraction=current_margin_fraction, derivative_usage=derivative_usage, boundary_found=found, terminated=terminated, episode_progress=episode_progress)
+        rb = self.reward_fn(ip=result.state.Ip.to(torch.float32), ip_ref=ip_ref, boundary_points=boundary_points, reference_points=ref, action=action, previous_action=previous_action, requested_action=requested_action, current_over_limit_a=current_over_limit, current_usage_fraction=current_usage_fraction, current_margin_fraction=current_margin_fraction, derivative_usage=derivative_usage, current_usage_loss=current_usage_loss, derivative_usage_loss=derivative_usage_loss, current_usage_mean_fraction=current_usage_mean_fraction, derivative_usage_mean_fraction=derivative_usage_mean_fraction, boundary_found=found, terminated=terminated, episode_progress=episode_progress)
         components = dict(rb.components)
         components["terminated_boundary"] = boundary_terminated.to(dtype=rb.reward.dtype)
         components["terminated_current"] = current_terminated.to(dtype=rb.reward.dtype)
@@ -675,14 +681,20 @@ class TokamakMagneticControlEnv:
         current_usage_by_coil = current_abs / current_scale[None, :]
         current_over_limit = torch.max(torch.clamp(current_abs - self.current_limits[None, :], min=0.0), dim=1).values
         current_usage_fraction = torch.max(current_usage_by_coil, dim=1).values
+        current_usage_mean_fraction = torch.mean(current_usage_by_coil, dim=1)
+        current_usage_loss = torch.mean(current_usage_by_coil.pow(2), dim=1)
         current_margin_fraction = torch.min(1.0 - current_usage_by_coil, dim=1).values
-        derivative_usage = torch.max(torch.abs(deriv_t) / torch.where(torch.isfinite(self.raw_derivative_limits) & (self.raw_derivative_limits > 0.0), self.raw_derivative_limits, torch.ones_like(self.raw_derivative_limits))[None, :], dim=1).values
+        derivative_scale = torch.where(torch.isfinite(self.raw_derivative_limits) & (self.raw_derivative_limits > 0.0), self.raw_derivative_limits, torch.ones_like(self.raw_derivative_limits))
+        derivative_usage_by_coil = torch.abs(deriv_t) / derivative_scale[None, :]
+        derivative_usage = torch.max(derivative_usage_by_coil, dim=1).values
+        derivative_usage_mean_fraction = torch.mean(derivative_usage_by_coil, dim=1)
+        derivative_usage_loss = torch.mean(derivative_usage_by_coil.pow(2), dim=1)
         found_t = torch.as_tensor(found, dtype=torch.bool, device=self.device)
         boundary_terminated = ~found_t if self.config.sim.terminate_on_boundary_loss else torch.zeros_like(found_t, dtype=torch.bool)
         current_terminated, current_hard_terminated, current_grace_terminated = self._current_termination(current_over_limit=current_over_limit, current_usage_fraction=current_usage_fraction)
         terminated = boundary_terminated | current_terminated
         episode_progress = self.step_index.to(torch.float32) / max(float(self.config.sim.max_episode_steps), 1.0)
-        rb = self.reward_fn(ip=torch.as_tensor(ips, dtype=torch.float32, device=self.device), ip_ref=ip_ref, boundary_points=torch.nan_to_num(torch.as_tensor(np.stack(boundary_points), dtype=torch.float32, device=self.device)), reference_points=ref_points[:, : int(self.config.sim.angles)].to(torch.float32), action=action, previous_action=previous_action, requested_action=requested_action, current_over_limit_a=current_over_limit, current_usage_fraction=current_usage_fraction, current_margin_fraction=current_margin_fraction, derivative_usage=derivative_usage, boundary_found=found_t, terminated=terminated, episode_progress=episode_progress)
+        rb = self.reward_fn(ip=torch.as_tensor(ips, dtype=torch.float32, device=self.device), ip_ref=ip_ref, boundary_points=torch.nan_to_num(torch.as_tensor(np.stack(boundary_points), dtype=torch.float32, device=self.device)), reference_points=ref_points[:, : int(self.config.sim.angles)].to(torch.float32), action=action, previous_action=previous_action, requested_action=requested_action, current_over_limit_a=current_over_limit, current_usage_fraction=current_usage_fraction, current_margin_fraction=current_margin_fraction, derivative_usage=derivative_usage, current_usage_loss=current_usage_loss, derivative_usage_loss=derivative_usage_loss, current_usage_mean_fraction=current_usage_mean_fraction, derivative_usage_mean_fraction=derivative_usage_mean_fraction, boundary_found=found_t, terminated=terminated, episode_progress=episode_progress)
         components = dict(rb.components)
         components["terminated_boundary"] = boundary_terminated.to(dtype=rb.reward.dtype)
         components["terminated_current"] = current_terminated.to(dtype=rb.reward.dtype)
