@@ -70,8 +70,8 @@
   "observation": {
     "actor_kind": "controller_state_v2",
     "critic_kind": "privileged_training_state_v1",
-    "target_preview_steps": 8,
-    "target_preview_stride": 10
+    "target_preview_steps": 10,
+    "target_preview_stride": 50
   },
   "reward": {
     "shape_mean_scale_m": 0.03,

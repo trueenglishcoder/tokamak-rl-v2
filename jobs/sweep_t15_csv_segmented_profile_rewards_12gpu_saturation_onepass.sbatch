@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=tokamak-rl-v2-reward36-coil
+#SBATCH --job-name=tokamak-rl-v2-reward36-preview500
 #SBATCH --partition=batch
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --array=0-11%12
-#SBATCH --output=slurm_logs/tokamak-rl-v2-csv-reward36-coilnormal-1gpu-%A_%a.out
-#SBATCH --error=slurm_logs/tokamak-rl-v2-csv-reward36-coilnormal-1gpu-%A_%a.err
+#SBATCH --output=slurm_logs/tokamak-rl-v2-csv-reward36-coilnormal-preview500-1gpu-%A_%a.out
+#SBATCH --error=slurm_logs/tokamak-rl-v2-csv-reward36-coilnormal-preview500-1gpu-%A_%a.err
 
 set -euo pipefail
 
@@ -21,7 +21,7 @@ export ROLLOUT_CHUNK_LENGTH=${ROLLOUT_CHUNK_LENGTH:-64}
 export UPDATES_PER_ROLLOUT_CHUNK=${UPDATES_PER_ROLLOUT_CHUNK:-32}
 export WANDB_MODE=${WANDB_MODE:-online}
 export WANDB__SERVICE_WAIT=${WANDB__SERVICE_WAIT:-30}
-export SWEEP_ROOT_PREFIX=${SWEEP_ROOT_PREFIX:-outputs/t15_reward_sweep36_coilnormal_1m}
+export SWEEP_ROOT_PREFIX=${SWEEP_ROOT_PREFIX:-outputs/t15_reward_sweep36_coilnormal_preview500_1m}
 
 srun \
   --container-image /scratch/$USER/tokamak/tokamak-rl-v2.sqsh \
@@ -80,7 +80,7 @@ PYPREFLIGHT
     ARRAY_JOB=${SLURM_ARRAY_JOB_ID:-${SLURM_JOB_ID:-manual}}
     ARRAY_TASK=${SLURM_ARRAY_TASK_ID:-0}
     SWEEP_ROOT=${SWEEP_ROOT_PREFIX}_${ARRAY_JOB}
-    SWEEP_WANDB_PROJECT=tokamak-rl-v2-reward36-coilnormal-${ARRAY_JOB}
+    SWEEP_WANDB_PROJECT=tokamak-rl-v2-reward36-coilnormal-preview500-${ARRAY_JOB}
     MANIFEST=${SWEEP_ROOT}/variants.json
 
     mkdir -p "${SWEEP_ROOT}" "${SWEEP_ROOT}/generated_configs"

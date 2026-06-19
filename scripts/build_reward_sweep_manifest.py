@@ -284,57 +284,57 @@ FIXED_HORIZON_FIXED_SIM = {
 }
 
 SATURATION_BROAD_SHAPE_REGIMES = [
-    {"id": "s0", "shape_mean_weight": 0.05, "shape_max_weight": 0.0125},
-    {"id": "s1", "shape_mean_weight": 0.15, "shape_max_weight": 0.0375},
-    {"id": "s2", "shape_mean_weight": 0.40, "shape_max_weight": 0.1000},
+    {"id": "s0", "shape_mean_weight": 0.03, "shape_max_weight": 0.0075},
+    {"id": "s1", "shape_mean_weight": 0.08, "shape_max_weight": 0.0200},
+    {"id": "s2", "shape_mean_weight": 0.20, "shape_max_weight": 0.0500},
 ]
 
 SATURATION_BROAD_IP_REGIMES = [
-    {"id": "i0", "ip_weight": 0.10},
-    {"id": "i1", "ip_weight": 0.30},
-    {"id": "i2", "ip_weight": 0.75},
+    {"id": "i0", "ip_weight": 0.05},
+    {"id": "i1", "ip_weight": 0.15},
+    {"id": "i2", "ip_weight": 0.40},
 ]
 
 SATURATION_BROAD_SAFETY_REGIMES = [
     {
         "id": "a0",
-        "current_weight": 4.0,
-        "current_soft_fraction": 0.85,
-        "derivative_weight": 0.25,
-        "derivative_soft_fraction": 0.85,
-        "current_usage_weight": 4.0,
-        "derivative_usage_weight": 0.50,
-        "actuator_saturation_weight": 16.0,
-    },
-    {
-        "id": "a1",
         "current_weight": 8.0,
-        "current_soft_fraction": 0.80,
-        "derivative_weight": 0.50,
-        "derivative_soft_fraction": 0.80,
-        "current_usage_weight": 10.0,
-        "derivative_usage_weight": 1.00,
-        "actuator_saturation_weight": 32.0,
-    },
-    {
-        "id": "a2",
-        "current_weight": 12.0,
         "current_soft_fraction": 0.75,
-        "derivative_weight": 0.75,
+        "derivative_weight": 0.50,
         "derivative_soft_fraction": 0.75,
         "current_usage_weight": 20.0,
-        "derivative_usage_weight": 2.00,
+        "derivative_usage_weight": 2.0,
         "actuator_saturation_weight": 64.0,
     },
     {
-        "id": "a3",
-        "current_weight": 20.0,
+        "id": "a1",
+        "current_weight": 16.0,
         "current_soft_fraction": 0.70,
-        "derivative_weight": 1.00,
+        "derivative_weight": 0.75,
         "derivative_soft_fraction": 0.70,
         "current_usage_weight": 40.0,
-        "derivative_usage_weight": 4.00,
+        "derivative_usage_weight": 4.0,
         "actuator_saturation_weight": 128.0,
+    },
+    {
+        "id": "a2",
+        "current_weight": 32.0,
+        "current_soft_fraction": 0.65,
+        "derivative_weight": 1.00,
+        "derivative_soft_fraction": 0.65,
+        "current_usage_weight": 80.0,
+        "derivative_usage_weight": 8.0,
+        "actuator_saturation_weight": 256.0,
+    },
+    {
+        "id": "a3",
+        "current_weight": 64.0,
+        "current_soft_fraction": 0.55,
+        "derivative_weight": 1.50,
+        "derivative_soft_fraction": 0.60,
+        "current_usage_weight": 160.0,
+        "derivative_usage_weight": 16.0,
+        "actuator_saturation_weight": 512.0,
     },
 ]
 
@@ -386,7 +386,7 @@ SATURATION_FIXED_REWARD = {
 SATURATION_FIXED_SIM = {
     "terminate_on_boundary_loss": False,
     "terminate_on_current_limit": False,
-    "current_saturation_fraction": 1.05,
+    "current_saturation_fraction": 1.02,
 }
 
 
