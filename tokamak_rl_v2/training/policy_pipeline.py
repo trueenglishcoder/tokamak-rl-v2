@@ -19,7 +19,7 @@ from tokamak_rl_v2.config.loader import _validate_experiment_config
 from tokamak_rl_v2.config.schema import ExperimentConfig
 from tokamak_rl_v2.env import TokamakMagneticControlEnv
 from tokamak_rl_v2.training.cli import _device_list
-from tokamak_rl_v2.training.trainer import Trainer, _eval_max_steps_for_config
+from tokamak_rl_v2.training.trainer import Trainer, _FOCUSED_WANDB_METRICS, _eval_max_steps_for_config
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -89,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
             wandb_run=None,
             resume_checkpoint=args.resume_checkpoint,
             export_policy=not bool(args.no_export),
+            wandb_metric_preset=args.wandb_metric_preset,
         )
         wandb_run = _start_wandb(args, cfg, output_dir=output_dir)
         trainer.wandb_run = wandb_run
@@ -832,6 +833,7 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--wandb-group", default=None)
     ap.add_argument("--wandb-mode", choices=("online", "offline", "disabled"), default="online")
     ap.add_argument("--wandb-optional", action="store_true", help="Continue if W&B init fails.")
+    ap.add_argument("--wandb-metric-preset", choices=("full", "focused"), default="full")
     return ap
 
 
@@ -1086,7 +1088,7 @@ def _start_wandb(args: argparse.Namespace, cfg: ExperimentConfig, *, output_dir:
     try:
         import wandb
 
-        return wandb.init(
+        run = wandb.init(
             project=args.wandb_project,
             name=args.wandb_name or cfg.name,
             group=args.wandb_group,
@@ -1097,8 +1099,11 @@ def _start_wandb(args: argparse.Namespace, cfg: ExperimentConfig, *, output_dir:
                 "output_dir": str(output_dir),
                 "eval_seed_offset": int(args.eval_seed_offset),
                 "holdout_eval_seed_offset": int(args.holdout_eval_seed_offset),
+                "wandb_metric_preset": str(args.wandb_metric_preset),
             },
         )
+        setattr(run, "_tokamak_metric_preset", str(args.wandb_metric_preset))
+        return run
     except Exception as exc:
         if bool(getattr(args, "wandb_optional", False)):
             print(f"warning: W&B init failed and --wandb-optional is set; continuing without W&B: {exc}", file=sys.stderr)
@@ -1117,6 +1122,8 @@ def _wandb_log(wandb_run, prefix: str, metrics: Mapping[str, object], *, step: i
             continue
         if math.isfinite(numeric):
             payload[f"{prefix}/{key}"] = numeric
+    if getattr(wandb_run, "_tokamak_metric_preset", "full") == "focused":
+        payload = {key: value for key, value in payload.items() if key in _FOCUSED_WANDB_METRICS}
     if payload:
         try:
             wandb_run.log({"global_step": int(step), **payload}, step=int(step))

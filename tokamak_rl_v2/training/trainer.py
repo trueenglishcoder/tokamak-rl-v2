@@ -37,6 +37,34 @@ from tokamak_rl_v2.training.mpo import MaximumAPosterioriPolicyOptimiser
 from tokamak_rl_v2.training.replay import FIFOSequenceReplay
 
 
+_FOCUSED_WANDB_METRICS = {
+    "global_step",
+    "env_step",
+    "decision_step",
+    "eval/mean_episode_completion",
+    "eval/boundary_found_late_min",
+    "eval/shape_error_mean_m_late",
+    "eval/ip_error_a_late",
+    "eval/current_over_limit_a_max",
+    "eval/current_over_limit_a_late_max",
+    "eval/current_over_limit_fraction_late",
+    "eval/action_rms_late",
+    "eval/selection_score",
+    "reward/physical_cost",
+    "reward/shape_error_mean_m",
+    "reward/ip_error_a",
+    "reward/current_usage_fraction",
+    "reward/current_over_limit_a",
+    "reward/boundary_found",
+    "train/replay_mean_episode_length",
+    "train/critic_loss",
+    "train/actor_loss",
+    "train/q_mean",
+    "train/sampled_q_spread",
+    "train/policy_weight_max",
+}
+
+
 def _value_to_numpy(value: object) -> np.ndarray:
     if torch.is_tensor(value):
         return value.detach().cpu().numpy()
@@ -129,6 +157,7 @@ class Trainer:
         wandb_run=None,
         resume_checkpoint: str | Path | None = None,
         export_policy: bool = True,
+        wandb_metric_preset: str = "full",
     ) -> None:
         self.distributed_mode = str(config.training.distributed_mode)
         self.distributed_rank = 0
@@ -148,6 +177,7 @@ class Trainer:
         self.output_dir = Path(config.training.output_dir if output_dir is None else output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.wandb_run = wandb_run
+        self.wandb_metric_preset = str(wandb_metric_preset)
         self.resume_checkpoint = Path(resume_checkpoint) if resume_checkpoint is not None else None
         self.export_policy = bool(export_policy)
         self.start_step = 0
@@ -283,6 +313,8 @@ class Trainer:
             decision_step = raw_step
             env_step = raw_step * self.num_envs
         payload = {"global_step": int(env_step), "env_step": int(env_step), "decision_step": int(decision_step), **values}
+        if self.wandb_metric_preset == "focused":
+            payload = {key: value for key, value in payload.items() if key in _FOCUSED_WANDB_METRICS}
         try:
             self.wandb_run.log(payload, step=int(env_step))
         except Exception as exc:
@@ -1166,7 +1198,6 @@ class Trainer:
         ckpt_dir = self.output_dir / "checkpoints"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
         checkpoint_name = f"eval_step_{int(step):012d}.pt"
-        checkpoint_path = self._save_checkpoint(checkpoint_name, step=step, updates=updates, eval_score=score)
         entry = {
             "step": int(step),
             "updates": int(updates),
@@ -1192,6 +1223,13 @@ class Trainer:
         top_entries = self._sort_checkpoint_entries(entries)[:top_k] if top_k > 0 else []
         keep_names = {str(item["path"]) for item in top_entries}
         keep_names.update(str(item["path"]) for item in entries if bool(item.get("milestone", False)))
+
+        checkpoint_path = ckpt_dir / checkpoint_name
+        if checkpoint_name in keep_names:
+            checkpoint_path = self._save_checkpoint(checkpoint_name, step=step, updates=updates, eval_score=score)
+        else:
+            entries_by_path.pop(checkpoint_name, None)
+            entries = list(entries_by_path.values())
 
         retained: list[dict[str, object]] = []
         for item in entries:

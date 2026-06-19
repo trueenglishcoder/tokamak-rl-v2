@@ -42,6 +42,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--wandb-project", default="tokamak-rl-v2")
     ap.add_argument("--wandb-name", default=None)
     ap.add_argument("--wandb-mode", choices=("online", "offline", "disabled"), default="online")
+    ap.add_argument("--wandb-metric-preset", choices=("full", "focused"), default="full")
     args = ap.parse_args(argv)
     cfg = load_experiment_config(args.config)
     if args.sim_compute_backend is not None or args.sim_gpu_device is not None:
@@ -98,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.wandb and args.wandb_mode != "disabled" and rank == 0:
         import wandb
         wandb_run = wandb.init(project=args.wandb_project, name=args.wandb_name or cfg.name, mode=args.wandb_mode, config={"experiment": cfg.name})
-    trainer = Trainer(cfg, steps=args.steps, num_envs=args.num_envs, device=args.device, output_dir=args.output_dir, wandb_run=wandb_run, resume_checkpoint=args.resume_checkpoint)
+    trainer = Trainer(cfg, steps=args.steps, num_envs=args.num_envs, device=args.device, output_dir=args.output_dir, wandb_run=wandb_run, resume_checkpoint=args.resume_checkpoint, wandb_metric_preset=args.wandb_metric_preset)
     result = trainer.train()
     if wandb_run is not None:
         wandb_run.finish()
