@@ -80,7 +80,7 @@ def submit_onepass(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Submit a one-pass 36-run saturation reward sweep.")
+    parser = argparse.ArgumentParser(description="Submit a one-pass 36-run coil-normal saturation reward sweep.")
     parser.add_argument(
         "--sweep-job",
         type=Path,
@@ -91,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=Path("jobs/aggregate_t15_reward_sweep_onepass.sbatch"),
     )
-    parser.add_argument("--root-prefix", default="outputs/t15_reward_sweep36_saturation_1m")
+    parser.add_argument("--root-prefix", default="outputs/t15_reward_sweep36_coilnormal_1m")
     args = parser.parse_args(argv)
     payload = submit_onepass(sweep_job=args.sweep_job, aggregate_job=args.aggregate_job, root_prefix=args.root_prefix)
     print(json.dumps(payload, indent=2))
