@@ -10,6 +10,7 @@ from typing import Any
 PROFILE_LEGAL = "legal"
 PROFILE_CURRENT_CONSTRAINT = "current_constraint"
 PROFILE_FIXED_HORIZON = "fixed_horizon"
+PROFILE_SATURATION = "saturation"
 
 BROAD_SHAPE_REGIMES = [
     {"id": "s0", "shape_mean_weight": 1.5, "shape_max_weight": 0.375},
@@ -282,13 +283,53 @@ FIXED_HORIZON_FIXED_SIM = {
     "terminate_on_current_limit": False,
 }
 
+SATURATION_BROAD_SHAPE_REGIMES = [
+    {"id": "s0", "shape_mean_weight": 0.75, "shape_max_weight": 0.1875},
+    {"id": "s1", "shape_mean_weight": 1.5, "shape_max_weight": 0.375},
+    {"id": "s2", "shape_mean_weight": 2.5, "shape_max_weight": 0.625},
+]
+
+SATURATION_BROAD_IP_REGIMES = [
+    {"id": "i0", "ip_weight": 0.75},
+    {"id": "i1", "ip_weight": 1.5},
+    {"id": "i2", "ip_weight": 3.0},
+]
+
+SATURATION_BROAD_SAFETY_REGIMES = [
+    {"id": "a0", "current_weight": 2.0, "derivative_weight": 0.25, "actuator_saturation_weight": 2.0},
+    {"id": "a1", "current_weight": 4.2, "derivative_weight": 0.525, "actuator_saturation_weight": 4.0},
+    {"id": "a2", "current_weight": 6.0, "derivative_weight": 0.75, "actuator_saturation_weight": 8.0},
+    {"id": "a3", "current_weight": 8.0, "derivative_weight": 1.0, "actuator_saturation_weight": 12.0},
+]
+
+SATURATION_FIXED_REWARD = {
+    "shape_mean_scale_m": 0.03,
+    "shape_max_scale_m": 0.08,
+    "ip_scale_a": 25000.0,
+    "reward_scale": 1.0,
+    "terminal_reward": -20.0,
+    "terminal_remaining_cost": 0.0,
+    "current_soft_fraction": 0.90,
+    "current_bad_fraction": 1.20,
+    "derivative_soft_fraction": 0.90,
+    "derivative_bad_fraction": 1.20,
+    "action_weight": 0.01,
+    "delta_action_weight": 0.025,
+}
+
+SATURATION_FIXED_SIM = {
+    "terminate_on_boundary_loss": False,
+    "terminate_on_current_limit": False,
+    "current_saturation_fraction": 1.15,
+}
+
 
 def _rounded(value: float) -> float:
     return float(round(float(value), 8))
 
 
 def _check_profile(profile: str) -> str:
-    if profile not in {PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON}:
+    if profile not in {PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON, PROFILE_SATURATION}:
         raise ValueError(f"Unknown reward sweep profile: {profile}")
     return profile
 
@@ -299,6 +340,8 @@ def _fixed_reward(profile: str) -> dict[str, Any]:
         return dict(CURRENT_CONSTRAINT_FIXED_REWARD)
     if profile == PROFILE_FIXED_HORIZON:
         return dict(FIXED_HORIZON_FIXED_REWARD)
+    if profile == PROFILE_SATURATION:
+        return dict(SATURATION_FIXED_REWARD)
     return dict(FIXED_REWARD)
 
 
@@ -308,6 +351,8 @@ def _fixed_sim(profile: str) -> dict[str, Any]:
         return dict(CURRENT_CONSTRAINT_FIXED_SIM)
     if profile == PROFILE_FIXED_HORIZON:
         return dict(FIXED_HORIZON_FIXED_SIM)
+    if profile == PROFILE_SATURATION:
+        return dict(SATURATION_FIXED_SIM)
     return {}
 
 
@@ -317,6 +362,8 @@ def _broad_shape_regimes(profile: str) -> list[dict[str, Any]]:
         return CURRENT_CONSTRAINT_BROAD_SHAPE_REGIMES
     if profile == PROFILE_FIXED_HORIZON:
         return FIXED_HORIZON_BROAD_SHAPE_REGIMES
+    if profile == PROFILE_SATURATION:
+        return SATURATION_BROAD_SHAPE_REGIMES
     return BROAD_SHAPE_REGIMES
 
 
@@ -326,6 +373,8 @@ def _broad_ip_regimes(profile: str) -> list[dict[str, Any]]:
         return CURRENT_CONSTRAINT_BROAD_IP_REGIMES
     if profile == PROFILE_FIXED_HORIZON:
         return FIXED_HORIZON_BROAD_IP_REGIMES
+    if profile == PROFILE_SATURATION:
+        return SATURATION_BROAD_IP_REGIMES
     return BROAD_IP_REGIMES
 
 
@@ -335,6 +384,8 @@ def _broad_safety_regimes(profile: str) -> list[dict[str, Any]]:
         return CURRENT_CONSTRAINT_BROAD_SAFETY_REGIMES
     if profile == PROFILE_FIXED_HORIZON:
         return FIXED_HORIZON_BROAD_SAFETY_REGIMES
+    if profile == PROFILE_SATURATION:
+        return SATURATION_BROAD_SAFETY_REGIMES
     return BROAD_ACTUATOR_REGIMES
 
 
@@ -404,6 +455,7 @@ def build_broad_variants(profile: str = PROFILE_LEGAL) -> list[dict[str, Any]]:
     index = 0
     fixed_reward = _fixed_reward(profile)
     fixed_sim = _fixed_sim(profile)
+    prefix = "s" if profile == PROFILE_SATURATION else "b"
     for shape in _broad_shape_regimes(profile):
         for ip in _broad_ip_regimes(profile):
             for actuator in _broad_safety_regimes(profile):
@@ -422,13 +474,15 @@ def build_broad_variants(profile: str = PROFILE_LEGAL) -> list[dict[str, Any]]:
                     reward["derivative_soft_fraction"] = actuator["derivative_soft_fraction"]
                 if "terminal_remaining_cost" in actuator:
                     reward["terminal_remaining_cost"] = actuator["terminal_remaining_cost"]
+                if "actuator_saturation_weight" in actuator:
+                    reward["actuator_saturation_weight"] = actuator["actuator_saturation_weight"]
                 extra = {"actuator_regime": actuator["id"]}
                 if fixed_sim:
                     extra["sim"] = fixed_sim
                 variants.append(
                     _variant(
                         index=index,
-                        prefix="b",
+                        prefix=prefix,
                         name=name,
                         shape_regime=str(shape["id"]),
                         ip_regime=str(ip["id"]),
@@ -574,6 +628,8 @@ def build_variants(
     if sweep_pass == "broad":
         variants = build_broad_variants(profile)
     elif sweep_pass == "focused":
+        if profile == PROFILE_SATURATION:
+            raise ValueError("saturation reward sweep profile is one-pass only")
         if center_reward is None:
             raise ValueError("focused sweep requires center_reward")
         variants = build_focused_variants(center_reward, profile)
@@ -639,7 +695,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Write deterministic two-pass reward sweep manifests.")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--pass", dest="sweep_pass", choices=("broad", "focused"), default="broad")
-    parser.add_argument("--profile", choices=(PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON), default=PROFILE_LEGAL)
+    parser.add_argument("--profile", choices=(PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON, PROFILE_SATURATION), default=PROFILE_LEGAL)
     parser.add_argument("--center", type=Path, default=None, help="physical_best_candidate.json for focused pass")
     parser.add_argument("--variant-budget", type=int, default=None)
     parser.add_argument("--runs-per-array-task", type=int, default=None)

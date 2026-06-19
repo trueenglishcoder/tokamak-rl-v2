@@ -5,13 +5,22 @@ import json
 from argparse import Namespace
 from pathlib import Path
 
+import pytest
+
 from scripts.aggregate_reward_sweep import aggregate, score_eval_row, write_outputs
 from scripts.audit_reward_sweep_pipeline import audit as audit_reward_sweep_pipeline
-from scripts.build_reward_sweep_manifest import PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON, build_manifest, build_variants
+from scripts.build_reward_sweep_manifest import (
+    PROFILE_CURRENT_CONSTRAINT,
+    PROFILE_FIXED_HORIZON,
+    PROFILE_SATURATION,
+    build_manifest,
+    build_variants,
+)
 from scripts.build_reward_sweep_rerun_manifest import build as build_rerun_manifest
 from scripts.run_reward_sweep_candidate import run_candidate
 from scripts.summarize_two_pass_reward_sweep_physical import summarize_two_pass
 from scripts.summarize_reward_sweep_physical import summarize
+from scripts.submit_saturation_reward_sweep import submit_onepass
 from scripts.submit_two_pass_reward_sweep import submit_chain
 
 
@@ -24,6 +33,8 @@ PASS1_CURRENT_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_c
 PASS2_CURRENT_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_current_constraint_pass2.sbatch"
 PASS1_FIXED_HORIZON_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_fixed_horizon_pass1.sbatch"
 PASS2_FIXED_HORIZON_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_fixed_horizon_pass2.sbatch"
+SATURATION_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_saturation_onepass.sbatch"
+SATURATION_AGG_JOB = ROOT / "jobs/aggregate_t15_reward_sweep_onepass.sbatch"
 RERUN_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_rerun_1gpu.sbatch"
 
 
@@ -130,6 +141,40 @@ def test_fixed_horizon_broad_manifest_has_36_and_no_termination() -> None:
         "terminate_on_boundary_loss": False,
         "terminate_on_current_limit": False,
     }
+
+
+def test_saturation_broad_manifest_has_36_and_saturation_overrides() -> None:
+    variants = build_variants("broad", profile=PROFILE_SATURATION)
+    assert len(variants) == 36
+    assert [variant["index"] for variant in variants] == list(range(36))
+    assert len({variant["folder"] for variant in variants}) == 36
+    assert variants[0]["folder"] == "s000_s0_i0_a0"
+    assert variants[-1]["folder"] == "s035_s2_i2_a3"
+    first = variants[0]
+    assert first["reward"]["shape_mean_weight"] == 0.75
+    assert first["reward"]["shape_max_weight"] == 0.1875
+    assert first["reward"]["ip_weight"] == 0.75
+    assert first["reward"]["current_weight"] == 2.0
+    assert first["reward"]["current_soft_fraction"] == 0.90
+    assert first["reward"]["current_bad_fraction"] == 1.20
+    assert first["reward"]["derivative_weight"] == 0.25
+    assert first["reward"]["derivative_soft_fraction"] == 0.90
+    assert first["reward"]["derivative_bad_fraction"] == 1.20
+    assert first["reward"]["actuator_saturation_weight"] == 2.0
+    assert first["reward"]["terminal_remaining_cost"] == 0.0
+    assert first["reward"]["action_weight"] == 0.01
+    assert first["reward"]["delta_action_weight"] == 0.025
+    assert first["sim"] == {
+        "terminate_on_boundary_loss": False,
+        "terminate_on_current_limit": False,
+        "current_saturation_fraction": 1.15,
+    }
+    saturation_weights = {
+        variant["actuator_regime"]: variant["reward"]["actuator_saturation_weight"]
+        for variant in variants
+        if variant["shape_regime"] == "s0" and variant["ip_regime"] == "i0"
+    }
+    assert saturation_weights == {"a0": 2.0, "a1": 4.0, "a2": 8.0, "a3": 12.0}
 
 
 def test_current_constraint_focused_manifest_uses_center_soft_fractions() -> None:
@@ -245,6 +290,34 @@ def test_fixed_horizon_manifest_has_exact_36_variants() -> None:
     assert broad["fixed_reward"]["action_weight"] == 0.01
     assert broad["fixed_reward"]["delta_action_weight"] == 0.025
     assert broad["fixed_reward"]["terminal_remaining_cost"] == 0.0
+
+
+def test_saturation_manifest_has_exact_36_variants() -> None:
+    broad = build_manifest("broad", profile=PROFILE_SATURATION, runs_per_array_task=3, array_task_count=12)
+    assert broad["profile"] == PROFILE_SATURATION
+    assert broad["variant_count"] == 36
+    assert broad["runs_per_array_task"] == 3
+    assert broad["array_task_count"] == 12
+    assert broad["variants"][0]["folder"] == "s000_s0_i0_a0"
+    assert broad["variants"][-1]["folder"] == "s035_s2_i2_a3"
+    assert broad["fixed_sim"] == {
+        "terminate_on_boundary_loss": False,
+        "terminate_on_current_limit": False,
+        "current_saturation_fraction": 1.15,
+    }
+    assert all("actuator_saturation_weight" in variant["reward"] for variant in broad["variants"])
+
+
+def test_saturation_profile_rejects_focused_pass() -> None:
+    center = {
+        "shape_mean_weight": 1.5,
+        "shape_max_weight": 0.375,
+        "ip_weight": 1.5,
+        "current_weight": 4.2,
+        "derivative_weight": 0.525,
+    }
+    with pytest.raises(ValueError, match="one-pass only"):
+        build_manifest("focused", center, profile=PROFILE_SATURATION, runs_per_array_task=3, array_task_count=12)
 
 
 def test_reward_sweep_array_task_mappings() -> None:
@@ -377,6 +450,61 @@ def test_reward_sweep_candidate_applies_fixed_horizon_sim_overrides(tmp_path: Pa
     assert generated["reward"]["delta_action_weight"] == 0.025
 
 
+def test_reward_sweep_candidate_applies_saturation_overrides(tmp_path: Path, monkeypatch) -> None:
+    variant = build_variants("broad", profile=PROFILE_SATURATION)[0]
+    manifest = tmp_path / "variants.json"
+    manifest.write_text(json.dumps({"variants": [variant]}), encoding="utf-8")
+    base_config = tmp_path / "base.json"
+    base_config.write_text(
+        json.dumps(
+            {
+                "name": "base",
+                "sim": {"terminate_on_boundary_loss": True, "terminate_on_current_limit": True, "max_episode_steps": 2000},
+                "reference": {"ip": {}},
+                "reward": {},
+                "training": {},
+                "learner": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class Result:
+        returncode = 0
+
+    monkeypatch.setattr("scripts.run_reward_sweep_candidate.subprocess.run", lambda *args, **kwargs: Result())
+    sweep_root = tmp_path / "sweep"
+    args = Namespace(
+        manifest=manifest,
+        variant_index=0,
+        base_config=base_config,
+        sweep_root=sweep_root,
+        train_env_steps=100,
+        eval_env_steps=50,
+        num_envs=4,
+        batch_size=2,
+        replay_capacity_episodes=288,
+        rollout_chunk_length=64,
+        updates_per_rollout_chunk=32,
+        wandb_project="test",
+        wandb_mode="offline",
+        device="cuda:0",
+        sim_config_path=Path("/sim.toml"),
+        initial_state_library=Path("/states.npz"),
+        reference_limits=Path("/limits.json"),
+    )
+
+    assert run_candidate(args) == 0
+    generated = json.loads((sweep_root / "generated_configs" / f"{variant['folder']}.json").read_text(encoding="utf-8"))
+    assert generated["sim"]["terminate_on_boundary_loss"] is False
+    assert generated["sim"]["terminate_on_current_limit"] is False
+    assert generated["sim"]["current_saturation_fraction"] == 1.15
+    assert generated["reward"]["actuator_saturation_weight"] == 2.0
+    assert generated["reward"]["current_soft_fraction"] == 0.90
+    assert generated["reward"]["current_bad_fraction"] == 1.20
+    assert generated["reward"]["terminal_remaining_cost"] == 0.0
+
+
 def test_reward_sweep_job_blocks_stale_name_leaks() -> None:
     for path in (
         PASS1_JOB,
@@ -387,6 +515,7 @@ def test_reward_sweep_job_blocks_stale_name_leaks() -> None:
         PASS2_CURRENT_JOB,
         PASS1_FIXED_HORIZON_JOB,
         PASS2_FIXED_HORIZON_JOB,
+        SATURATION_JOB,
         RERUN_JOB,
     ):
         text = path.read_text(encoding="utf-8")
@@ -408,9 +537,11 @@ def test_reward_sweep_job_blocks_stale_name_leaks() -> None:
     assert "REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-288}" in PASS2_CURRENT_JOB.read_text(encoding="utf-8")
     assert "REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-288}" in PASS1_FIXED_HORIZON_JOB.read_text(encoding="utf-8")
     assert "REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-288}" in PASS2_FIXED_HORIZON_JOB.read_text(encoding="utf-8")
+    assert "REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-288}" in SATURATION_JOB.read_text(encoding="utf-8")
     for path in (
         ROOT / "jobs/aggregate_t15_reward_sweep_pass1.sbatch",
         ROOT / "jobs/aggregate_t15_reward_sweep_final.sbatch",
+        SATURATION_AGG_JOB,
         PASS1_12_JOB,
         PASS2_12_JOB,
     ):
@@ -493,6 +624,8 @@ def _write_physical_run(
     ip: float = 40000.0,
     current_max: float = 0.0,
     current_fraction: float = 0.0,
+    saturation_fraction: float = 0.0,
+    saturation_loss: float = 0.0,
     actor_eval: bool = True,
 ) -> None:
     run_dir = root / variant["folder"]
@@ -512,6 +645,9 @@ def _write_physical_run(
             "current_usage_fraction_late_max": 0.8 if current_max == 0.0 else 1.2,
             "action_rms_late": 0.1,
             "delta_action_rms_late": 0.01,
+            "action_saturation_fraction_late": saturation_fraction,
+            "action_saturation_delta_rms_late": saturation_fraction * 0.1,
+            "actuator_saturation_loss_late": saturation_loss,
         }
     (run_dir / "policy_validation.json").write_text(json.dumps(validation), encoding="utf-8")
     with (run_dir / "eval_history.csv").open("w", newline="", encoding="utf-8") as f:
@@ -524,6 +660,8 @@ def _write_physical_run(
                 "shape_error_mean_m_late",
                 "ip_error_a_late",
                 "current_over_limit_fraction_late",
+                "action_saturation_fraction_late",
+                "actuator_saturation_loss_late",
             ],
         )
         writer.writeheader()
@@ -535,6 +673,8 @@ def _write_physical_run(
                 "shape_error_mean_m_late": shape,
                 "ip_error_a_late": ip,
                 "current_over_limit_fraction_late": current_fraction,
+                "action_saturation_fraction_late": saturation_fraction,
+                "actuator_saturation_loss_late": saturation_loss,
             }
         )
 
@@ -622,6 +762,31 @@ def test_physical_sweep_pareto_excludes_dominated_runs(tmp_path: Path) -> None:
 
     front = list(csv.DictReader((out_dir / "physical_pareto_front.csv").open()))
     assert [row["folder"] for row in front] == [variants[0]["folder"]]
+
+
+def test_physical_sweep_penalizes_saturation_usage(tmp_path: Path) -> None:
+    variants = build_variants("broad", profile=PROFILE_SATURATION)[:2]
+    (tmp_path / "variants.json").write_text(json.dumps({"variants": variants}), encoding="utf-8")
+    _write_physical_run(tmp_path, variants[0], saturation_fraction=0.0, saturation_loss=0.0)
+    _write_physical_run(tmp_path, variants[1], saturation_fraction=0.8, saturation_loss=0.4)
+
+    out_dir = tmp_path / "analysis"
+    summarize(
+        tmp_path,
+        out_dir,
+        top=10,
+        min_completion=0.95,
+        min_boundary_late=0.999,
+        max_terminated_boundary=0.001,
+        max_current_over_limit_a_max=250000.0,
+        max_current_over_limit_fraction_late=0.5,
+    )
+
+    rows = list(csv.DictReader((out_dir / "physical_sweep_summary.csv").open()))
+    assert rows[0]["folder"] == variants[0]["folder"]
+    assert rows[0]["action_saturation_fraction_late"] == "0.0"
+    assert rows[1]["folder"] == variants[1]["folder"]
+    assert rows[1]["action_saturation_fraction_late"] == "0.8"
 
 
 def test_physical_sweep_regime_summary_groups_reward_axes(tmp_path: Path) -> None:
@@ -758,3 +923,46 @@ def test_submit_two_pass_chain_uses_slurm_dependencies(tmp_path: Path, monkeypat
     assert payload["pass1_manifest"] == f"{payload['root']}/pass1_broad/variants.json"
     assert payload["pass2_manifest"] == f"{payload['root']}/pass2_focused/variants.json"
     assert released == [["scontrol", "release", "111"]]
+
+
+def test_submit_saturation_onepass_uses_single_array_and_aggregate(tmp_path: Path, monkeypatch) -> None:
+    submitted: list[list[str]] = []
+    released: list[list[str]] = []
+    jobids = iter(["211\n", "212\n"])
+
+    class Result:
+        def __init__(self, stdout: str) -> None:
+            self.stdout = stdout
+            self.stderr = ""
+
+    def fake_run(args, check, text, stdout, stderr):
+        if args[0] == "scontrol":
+            released.append(list(args))
+            return Result("")
+        submitted.append(list(args))
+        return Result(next(jobids))
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("scripts.submit_saturation_reward_sweep.subprocess.run", fake_run)
+
+    payload = submit_onepass(
+        sweep_job=Path("jobs/saturation.sbatch"),
+        aggregate_job=Path("jobs/aggregate.sbatch"),
+        root_prefix="outputs/t15_reward_sweep36_saturation_1m",
+    )
+
+    assert payload["sweep_jobid"] == "211"
+    assert payload["aggregate_jobid"] == "212"
+    assert payload["root"] == "outputs/t15_reward_sweep36_saturation_1m_211"
+    assert "--hold" in submitted[0]
+    assert "--export=ALL,SWEEP_ROOT_PREFIX=outputs/t15_reward_sweep36_saturation_1m" in submitted[0]
+    assert submitted[1][2] == "--dependency=afterany:211"
+    assert len(submitted) == 2
+    assert "center_json" not in payload
+    assert "pass2_jobid" not in payload
+    assert (tmp_path / payload["root"] / "selection" / "submission_chain.json").exists()
+    assert (tmp_path / payload["root"] / "variants.json").exists()
+    manifest = json.loads((tmp_path / payload["root"] / "variants.json").read_text(encoding="utf-8"))
+    assert manifest["profile"] == PROFILE_SATURATION
+    assert manifest["variant_count"] == 36
+    assert released == [["scontrol", "release", "211"]]

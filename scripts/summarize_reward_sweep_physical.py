@@ -21,6 +21,9 @@ LOWER_BETTER = {
     "ip_error_a_late",
     "action_rms_late",
     "delta_action_rms_late",
+    "action_saturation_fraction_late",
+    "action_saturation_delta_rms_late",
+    "actuator_saturation_loss_late",
 }
 HIGHER_BETTER = {"mean_episode_completion", "full_episode_success", "boundary_found_late_min"}
 
@@ -51,6 +54,9 @@ SUMMARY_FIELDS = [
     "current_usage_fraction_late_max",
     "action_rms_late",
     "delta_action_rms_late",
+    "action_saturation_fraction_late",
+    "action_saturation_delta_rms_late",
+    "actuator_saturation_loss_late",
     "shape_regime",
     "ip_regime",
     "current_regime",
@@ -66,6 +72,7 @@ SUMMARY_FIELDS = [
     "derivative_bad_fraction",
     "action_weight",
     "delta_action_weight",
+    "actuator_saturation_weight",
     "terminal_remaining_cost",
     "terminate_on_current_limit",
     "current_termination_over_limit_a",
@@ -77,6 +84,8 @@ SUMMARY_FIELDS = [
     "tail_shape_error_mean_m_late",
     "tail_ip_error_a_late",
     "tail_current_over_limit_fraction_late",
+    "tail_action_saturation_fraction_late",
+    "tail_actuator_saturation_loss_late",
 ]
 
 
@@ -154,7 +163,7 @@ def _discover_variants(root: Path) -> list[dict[str, Any]]:
         return [variant for variant in variants if isinstance(variant, dict)]
 
     discovered: list[dict[str, Any]] = []
-    for run_dir in sorted(path for path in root.iterdir() if path.is_dir() and path.name[:1] in {"v", "b", "f"}):
+    for run_dir in sorted(path for path in root.iterdir() if path.is_dir() and path.name[:1] in {"v", "b", "f", "s"}):
         variant = _variant_from_reward_file(run_dir / "reward_variant.json")
         if not variant:
             variant = {"folder": run_dir.name, "name": run_dir.name, "index": len(discovered)}
@@ -214,6 +223,9 @@ def _physical_priority_score(row: dict[str, Any]) -> float:
     ip_error = _finite(row["ip_error_a_late"], 1.0e9)
     action = _finite(row["action_rms_late"], 10.0)
     delta_action = _finite(row["delta_action_rms_late"], 10.0)
+    saturation_fraction = _finite(row.get("action_saturation_fraction_late"), 0.0)
+    saturation_delta = _finite(row.get("action_saturation_delta_rms_late"), 0.0)
+    saturation_loss = _finite(row.get("actuator_saturation_loss_late"), 0.0)
     terminated_boundary = _finite(row["terminated_boundary"], 1.0)
     termination_failure = _finite(row.get("termination_failure_fraction"), full_success_gap)
     return float(
@@ -230,6 +242,9 @@ def _physical_priority_score(row: dict[str, Any]) -> float:
         + 2.0 * ip_error / 25000.0
         + 0.5 * action / 0.25
         + 0.5 * delta_action / 0.05
+        + 80.0 * saturation_fraction
+        + 2.0 * saturation_delta / 0.25
+        + 2.0 * saturation_loss
     )
 
 
@@ -286,6 +301,15 @@ def summarize_variant(
         "current_usage_fraction_late_max": _metric(actor_eval, "padded_current_usage_fraction_late_max", "padded_current_usage_fraction_max", "current_usage_fraction_late_max", "current_usage_fraction_max", "current_usage_fraction", default=float("nan")),
         "action_rms_late": _metric(actor_eval, "action_rms_late", "action_rms", default=float("nan")),
         "delta_action_rms_late": _metric(actor_eval, "delta_action_rms_late", "delta_action_rms", default=float("nan")),
+        "action_saturation_fraction_late": _metric(
+            actor_eval, "action_saturation_fraction_late", "action_saturation_fraction", default=float("nan")
+        ),
+        "action_saturation_delta_rms_late": _metric(
+            actor_eval, "action_saturation_delta_rms_late", "action_saturation_delta_rms", default=float("nan")
+        ),
+        "actuator_saturation_loss_late": _metric(
+            actor_eval, "actuator_saturation_loss_late", "actuator_saturation_loss", default=float("nan")
+        ),
         "shape_regime": str(variant.get("shape_regime") or ""),
         "ip_regime": str(variant.get("ip_regime") or ""),
         "current_regime": str(variant.get("current_regime") or ""),
@@ -301,6 +325,7 @@ def summarize_variant(
         "derivative_bad_fraction": reward.get("derivative_bad_fraction", ""),
         "action_weight": reward.get("action_weight", ""),
         "delta_action_weight": reward.get("delta_action_weight", ""),
+        "actuator_saturation_weight": reward.get("actuator_saturation_weight", ""),
         "terminal_remaining_cost": reward.get("terminal_remaining_cost", ""),
         "terminate_on_current_limit": sim.get("terminate_on_current_limit", ""),
         "current_termination_over_limit_a": sim.get("current_termination_over_limit_a", ""),
@@ -312,6 +337,8 @@ def summarize_variant(
         "tail_shape_error_mean_m_late": _tail_metric(eval_rows, "padded_shape_error_mean_m_late", "shape_error_mean_m_late", "shape_error_mean_m"),
         "tail_ip_error_a_late": _tail_metric(eval_rows, "padded_ip_error_a_late", "ip_error_a_late", "ip_error_a"),
         "tail_current_over_limit_fraction_late": _tail_metric(eval_rows, "padded_current_over_limit_fraction_late", "current_over_limit_fraction_late", "current_over_limit_fraction"),
+        "tail_action_saturation_fraction_late": _tail_metric(eval_rows, "action_saturation_fraction_late", "action_saturation_fraction"),
+        "tail_actuator_saturation_loss_late": _tail_metric(eval_rows, "actuator_saturation_loss_late", "actuator_saturation_loss"),
     }
     row["selection_valid"], row["selection_reason"] = _selection_reason(
         row,
