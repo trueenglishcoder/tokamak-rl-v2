@@ -1088,7 +1088,7 @@ def _start_wandb(args: argparse.Namespace, cfg: ExperimentConfig, *, output_dir:
     try:
         import wandb
 
-        run = wandb.init(
+        return wandb.init(
             project=args.wandb_project,
             name=args.wandb_name or cfg.name,
             group=args.wandb_group,
@@ -1102,8 +1102,6 @@ def _start_wandb(args: argparse.Namespace, cfg: ExperimentConfig, *, output_dir:
                 "wandb_metric_preset": str(args.wandb_metric_preset),
             },
         )
-        setattr(run, "_tokamak_metric_preset", str(args.wandb_metric_preset))
-        return run
     except Exception as exc:
         if bool(getattr(args, "wandb_optional", False)):
             print(f"warning: W&B init failed and --wandb-optional is set; continuing without W&B: {exc}", file=sys.stderr)
@@ -1122,7 +1120,12 @@ def _wandb_log(wandb_run, prefix: str, metrics: Mapping[str, object], *, step: i
             continue
         if math.isfinite(numeric):
             payload[f"{prefix}/{key}"] = numeric
-    if getattr(wandb_run, "_tokamak_metric_preset", "full") == "focused":
+    preset = "full"
+    try:
+        preset = str(wandb_run.config.get("wandb_metric_preset", "full"))
+    except Exception:
+        preset = "full"
+    if preset == "focused":
         payload = {key: value for key, value in payload.items() if key in _FOCUSED_WANDB_METRICS}
     if payload:
         try:
