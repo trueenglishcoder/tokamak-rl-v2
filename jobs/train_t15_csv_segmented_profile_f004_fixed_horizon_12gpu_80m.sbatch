@@ -83,6 +83,7 @@ sim["max_episode_steps"] = 2000
 sim["csv_initial_state_library"] = "/workspace/tokamak-rl-v2/data/processed/t15_csv_initial_states.npz"
 sim["terminate_on_boundary_loss"] = False
 sim["terminate_on_current_limit"] = False
+sim["current_saturation_fraction"] = 1.15
 
 reference = cfg.setdefault("reference", {})
 reference["duration_s"] = 2.0
@@ -116,6 +117,7 @@ cfg.setdefault("reward", {}).update(
         "reward_scale": 1.0,
         "terminal_reward": -20.0,
         "terminal_remaining_cost": 0.0,
+        "actuator_saturation_weight": 4.0,
         "shape_mean_weight": 0.75,
         "shape_max_weight": 0.1875,
         "ip_weight": 0.75,
@@ -158,6 +160,8 @@ checks = {
     "reward.derivative_weight": cfg["reward"]["derivative_weight"] == 0.525,
     "sim.terminate_on_boundary_loss": cfg["sim"]["terminate_on_boundary_loss"] is False,
     "sim.terminate_on_current_limit": cfg["sim"]["terminate_on_current_limit"] is False,
+    "sim.current_saturation_fraction": float(cfg["sim"]["current_saturation_fraction"]) == 1.15,
+    "reward.actuator_saturation_weight": float(cfg["reward"]["actuator_saturation_weight"]) == 4.0,
     "sim.max_episode_steps": int(cfg["sim"]["max_episode_steps"]) == 2000,
     "reference.duration_s": float(cfg["reference"]["duration_s"]) == 2.0,
     "learner.discount": float(cfg["learner"]["discount"]) == 0.9995,
@@ -187,11 +191,13 @@ cat > "${TRAIN_OUTPUT}/f004_reward.json" <<'JSON'
     "derivative_bad_fraction": 1.2,
     "action_weight": 0.01,
     "delta_action_weight": 0.025,
+    "actuator_saturation_weight": 4.0,
     "terminal_remaining_cost": 0.0
   },
   "sim": {
     "terminate_on_boundary_loss": false,
-    "terminate_on_current_limit": false
+    "terminate_on_current_limit": false,
+    "current_saturation_fraction": 1.15
   }
 }
 JSON

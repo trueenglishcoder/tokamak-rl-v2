@@ -30,6 +30,7 @@ class T15PhysicalReward:
         reference_points: Tensor,
         action: Tensor,
         previous_action: Tensor,
+        requested_action: Tensor | None = None,
         current_over_limit_a: Tensor,
         current_usage_fraction: Tensor,
         current_margin_fraction: Tensor,
@@ -54,10 +55,16 @@ class T15PhysicalReward:
         shape_error_max = torch.max(shape_error, dim=-1).values
 
         ip_error = torch.abs(ip - ip_ref)
+        requested = action if requested_action is None else requested_action.to(dtype=action.dtype, device=action.device)
         delta_action = action - previous_action
         action_rms = torch.sqrt(torch.mean(action.pow(2), dim=-1))
         delta_action_rms = torch.sqrt(torch.mean(delta_action.pow(2), dim=-1))
         max_abs_action = torch.max(torch.abs(action), dim=-1).values
+        saturation_delta = requested - action
+        requested_action_rms = torch.sqrt(torch.mean(requested.pow(2), dim=-1))
+        action_saturation_delta_rms = torch.sqrt(torch.mean(saturation_delta.pow(2), dim=-1))
+        action_saturation_delta_max = torch.max(torch.abs(saturation_delta), dim=-1).values
+        action_saturation_fraction = torch.mean((torch.abs(saturation_delta) > 1.0e-6).to(dtype=action.dtype), dim=-1)
 
         shape_mean_loss = _huber(shape_error_mean / max(float(c.shape_mean_scale_m), 1.0e-12))
         shape_max_loss = _huber(shape_error_max / max(float(c.shape_max_scale_m), 1.0e-12))
@@ -66,6 +73,7 @@ class T15PhysicalReward:
         derivative_loss = _threshold_square(derivative_usage, start=float(c.derivative_soft_fraction), bad=float(c.derivative_bad_fraction))
         action_loss = torch.mean(action.pow(2), dim=-1)
         delta_action_loss = torch.mean(delta_action.pow(2), dim=-1)
+        actuator_saturation_loss = torch.mean(saturation_delta.pow(2), dim=-1)
 
         physical_cost = (
             float(c.shape_mean_weight) * shape_mean_loss
@@ -75,6 +83,7 @@ class T15PhysicalReward:
             + float(c.derivative_weight) * derivative_loss
             + float(c.action_weight) * action_loss
             + float(c.delta_action_weight) * delta_action_loss
+            + float(c.actuator_saturation_weight) * actuator_saturation_loss
         )
         if episode_progress is None:
             progress = torch.zeros_like(physical_cost)
@@ -110,7 +119,12 @@ class T15PhysicalReward:
                 "derivative_usage": torch.clamp(derivative_usage, min=0.0),
                 "max_abs_action": max_abs_action,
                 "action_rms": action_rms,
+                "requested_action_rms": requested_action_rms,
+                "applied_action_rms": action_rms,
                 "delta_action_rms": delta_action_rms,
+                "action_saturation_delta_rms": action_saturation_delta_rms,
+                "action_saturation_delta_max": action_saturation_delta_max,
+                "action_saturation_fraction": action_saturation_fraction,
                 "episode_progress": progress,
                 "physical_cost": physical_cost,
                 "shape_mean_loss": shape_mean_loss,
@@ -120,6 +134,7 @@ class T15PhysicalReward:
                 "derivative_loss": derivative_loss,
                 "action_loss": action_loss,
                 "delta_action_loss": delta_action_loss,
+                "actuator_saturation_loss": actuator_saturation_loss,
                 "terminal_remaining_loss": terminal_remaining_loss,
                 "terminal_total_penalty": terminal_total_penalty,
                 "boundary_found": boundary_found.to(dtype=reward.dtype),

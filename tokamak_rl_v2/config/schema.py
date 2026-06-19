@@ -112,6 +112,7 @@ class RewardConfig:
     derivative_bad_fraction: float = 1.40
     terminal_reward: float = -20.0
     terminal_remaining_cost: float = 0.0
+    actuator_saturation_weight: float = 4.0
     reward_scale: float = 1.0
 
 
@@ -145,6 +146,7 @@ class SimConfig:
     current_termination_over_limit_a: float = 5000.0
     current_termination_grace_steps: int = 8
     current_hard_termination_fraction: float = 1.05
+    current_saturation_fraction: float = 1.15
 
 
 @dataclass(frozen=True, slots=True)

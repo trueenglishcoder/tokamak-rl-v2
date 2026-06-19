@@ -160,6 +160,7 @@ def _sim(raw: Mapping[str, Any], base: Path) -> SimConfig:
         current_termination_over_limit_a=float(raw.get("current_termination_over_limit_a", defaults.current_termination_over_limit_a)),
         current_termination_grace_steps=int(raw.get("current_termination_grace_steps", defaults.current_termination_grace_steps)),
         current_hard_termination_fraction=float(raw.get("current_hard_termination_fraction", defaults.current_hard_termination_fraction)),
+        current_saturation_fraction=float(raw.get("current_saturation_fraction", defaults.current_saturation_fraction)),
     )
 
 
@@ -404,6 +405,8 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
         raise ValueError("sim.current_termination_grace_steps must be positive")
     if not math.isfinite(float(cfg.sim.current_hard_termination_fraction)) or float(cfg.sim.current_hard_termination_fraction) <= 1.0:
         raise ValueError("sim.current_hard_termination_fraction must be finite and > 1")
+    if not math.isfinite(float(cfg.sim.current_saturation_fraction)) or float(cfg.sim.current_saturation_fraction) < 1.0:
+        raise ValueError("sim.current_saturation_fraction must be finite and >= 1")
     _validate_reward_config(cfg.reward, prefix="reward")
     if cfg.randomization.ip_measurement_noise_a < 0.0 or cfg.randomization.current_measurement_noise_a < 0.0:
         raise ValueError("randomization noise values must be non-negative")
@@ -469,7 +472,7 @@ def _validate_reward_config(reward: RewardConfig, *, prefix: str) -> None:
             raise ValueError(f"{prefix}.{name} must be finite and positive")
     if not math.isfinite(float(reward.boundary_missing_error_m)) or float(reward.boundary_missing_error_m) < 0.0:
         raise ValueError(f"{prefix}.boundary_missing_error_m must be finite and non-negative")
-    for name in ("shape_mean_weight", "shape_max_weight", "ip_weight", "current_weight", "derivative_weight", "action_weight", "delta_action_weight"):
+    for name in ("shape_mean_weight", "shape_max_weight", "ip_weight", "current_weight", "derivative_weight", "action_weight", "delta_action_weight", "actuator_saturation_weight"):
         value = float(getattr(reward, name))
         if not math.isfinite(value) or value < 0.0:
             raise ValueError(f"{prefix}.{name} must be finite and non-negative")

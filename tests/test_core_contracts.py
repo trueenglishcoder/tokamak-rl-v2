@@ -26,6 +26,8 @@ from tokamak_rl_v2.training.cli import _device_list
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "configs/experiments/t15_static_boundary.yaml"
 PRODUCTION_CONFIG = ROOT / "configs/experiments/t15_csv_initial_segmented_profile_boundary_mpo.yaml"
+FIXED_HORIZON_HOLD_CONFIG = ROOT / "configs/experiments/t15_csv_hold_ip_fixed_horizon.yaml"
+FIXED_HORIZON_EASY_SEGMENTED_CONFIG = ROOT / "configs/experiments/t15_csv_easy_segmented_fixed_horizon.yaml"
 
 
 def _small_config(tmp_path: Path):
@@ -126,6 +128,36 @@ def test_physical_reward_tracks_errors_and_action_cost() -> None:
     assert active.reward[0] < zero.reward[0]
     assert float(active.components["action_rms"][0].item()) > float(zero.components["action_rms"][0].item())
     assert float(zero.components["physical_cost"][0].item()) == pytest.approx(0.0)
+
+
+def test_physical_reward_penalizes_rejected_actuator_command() -> None:
+    reward_fn = T15PhysicalReward(
+        RewardConfig(reward_scale=1.0, actuator_saturation_weight=4.0, action_weight=0.0, delta_action_weight=0.0),
+        control_rate_hz=1000.0,
+    )
+    ref = torch.zeros((1, 32, 2), dtype=torch.float32)
+    applied = torch.zeros((1, 9), dtype=torch.float32)
+    requested = torch.ones((1, 9), dtype=torch.float32)
+    common = dict(
+        ip=torch.tensor([200000.0]),
+        ip_ref=torch.tensor([200000.0]),
+        boundary_points=ref,
+        reference_points=ref,
+        previous_action=applied,
+        current_over_limit_a=torch.zeros((1,), dtype=torch.float32),
+        current_usage_fraction=torch.full((1,), 0.5, dtype=torch.float32),
+        current_margin_fraction=torch.full((1,), 0.5, dtype=torch.float32),
+        derivative_usage=torch.zeros((1,), dtype=torch.float32),
+        boundary_found=torch.ones((1,), dtype=torch.bool),
+        terminated=torch.zeros((1,), dtype=torch.bool),
+    )
+    clean = reward_fn(action=applied, requested_action=applied, **common)
+    saturated = reward_fn(action=applied, requested_action=requested, **common)
+    assert float(clean.components["actuator_saturation_loss"].item()) == pytest.approx(0.0)
+    assert float(saturated.components["actuator_saturation_loss"].item()) == pytest.approx(1.0)
+    assert float(saturated.components["action_saturation_delta_rms"].item()) == pytest.approx(1.0)
+    assert float(saturated.components["action_saturation_fraction"].item()) == pytest.approx(1.0)
+    assert saturated.reward[0] < clean.reward[0]
 
 
 def test_reward_components_remain_finite_when_boundary_is_missing() -> None:
@@ -414,6 +446,62 @@ def test_action_scale_caps_physical_derivative_usage() -> None:
     comps = result.info["reward_components"]
     assert float(np.nanmax(comps["derivative_usage"])) <= 0.25001
     assert np.allclose(np.asarray(env.normalization()["derivative_scale"]), env.raw_derivative_limits.detach().cpu().numpy() * 0.25)
+
+
+def test_current_aware_saturation_clips_command_before_current_runaway() -> None:
+    cfg = load_experiment_config(CONFIG)
+    cfg = replace(
+        cfg,
+        sim=replace(
+            cfg.sim,
+            compute_backend="cpu",
+            max_episode_steps=4,
+            terminate_on_current_limit=False,
+            current_saturation_fraction=1.15,
+        ),
+        reward=replace(cfg.reward, actuator_saturation_weight=4.0),
+    )
+    env = TokamakMagneticControlEnv(cfg, batch_size=1, device="cpu", seed=12)
+    env.reset()
+    limit = float(env.current_limits[0].item())
+    upper = 1.15 * limit
+    env._cpu_models[0].state.pfc_currents[0] = upper - 1.0
+    action = torch.zeros((1, env.action_dim), dtype=torch.float32)
+    action[0, 0] = 1.0
+    result = env.step(action)
+    comps = result.info["reward_components"]
+    next_current = float(env._cpu_models[0].state.pfc_currents[0])
+    assert next_current <= upper + 1.0e-3
+    assert result.applied_action[0, 0].item() < 1.0
+    assert env.previous_action[0, 0].item() == pytest.approx(result.applied_action[0, 0].item())
+    assert float(np.nanmax(comps["action_saturation_delta_rms"])) > 0.0
+    assert float(np.nanmax(comps["action_saturation_fraction"])) > 0.0
+    assert float(np.nanmax(comps["actuator_saturation_loss"])) > 0.0
+    assert float(np.nanmax(comps["current_usage_fraction"])) > 1.0
+    assert bool(result.terminated[0].item()) is False
+
+
+def test_current_aware_saturation_leaves_safe_command_unchanged() -> None:
+    cfg = load_experiment_config(CONFIG)
+    cfg = replace(
+        cfg,
+        sim=replace(
+            cfg.sim,
+            compute_backend="cpu",
+            max_episode_steps=4,
+            terminate_on_current_limit=False,
+            current_saturation_fraction=1.15,
+        ),
+    )
+    env = TokamakMagneticControlEnv(cfg, batch_size=1, device="cpu", seed=13)
+    env.reset()
+    action = torch.zeros((1, env.action_dim), dtype=torch.float32)
+    action[0, 0] = 0.01
+    result = env.step(action)
+    comps = result.info["reward_components"]
+    assert torch.allclose(result.applied_action, action, atol=1.0e-6)
+    assert float(np.nanmax(comps["action_saturation_delta_rms"])) == pytest.approx(0.0)
+    assert float(np.nanmax(comps["actuator_saturation_loss"])) == pytest.approx(0.0)
 
 
 def test_small_current_limit_violation_gets_grace_before_termination() -> None:
@@ -772,6 +860,46 @@ def test_production_segmented_profile_uses_2000_step_t15_scale_segments() -> Non
     assert int(np.max(lengths)) <= 800
 
 
+def test_fixed_horizon_diagnostic_configs_disable_training_terminations() -> None:
+    hold = load_experiment_config(FIXED_HORIZON_HOLD_CONFIG)
+    easy = load_experiment_config(FIXED_HORIZON_EASY_SEGMENTED_CONFIG)
+    for cfg in (hold, easy):
+        assert cfg.training.production_mode is False
+        assert cfg.sim.reset_source == "csv_initial_states"
+        assert cfg.reference.boundary.kind == "hold_reset_boundary"
+        assert int(cfg.sim.max_episode_steps) == 2000
+        assert cfg.reference.duration_s == pytest.approx(2.0)
+        assert cfg.sim.terminate_on_boundary_loss is False
+        assert cfg.sim.terminate_on_current_limit is False
+        assert cfg.reward.terminal_remaining_cost == pytest.approx(0.0)
+        assert cfg.learner.discount == pytest.approx(0.9995)
+    assert hold.reference.ip.kind == "hold_reset"
+    assert easy.reference.ip.kind == "segmented_profile"
+    assert easy.reference.ip.max_delta_fraction == pytest.approx(0.10)
+    assert int(easy.reference.ip.segment_min_steps) == 800
+    assert int(easy.reference.ip.segment_max_steps) == 1600
+
+
+def test_fixed_horizon_hold_reset_reference_uses_reset_ip() -> None:
+    cfg = load_experiment_config(FIXED_HORIZON_HOLD_CONFIG)
+    reset_ip = np.asarray([123456.0, 234567.0], dtype=float)
+    reset_boundary_points = np.zeros((2, int(cfg.reference.theta_count), 2), dtype=float)
+    reset_boundary_radii = np.ones((2, int(cfg.reference.theta_count)), dtype=float)
+    batch = generate_reference_batch(
+        config=cfg.reference,
+        initial_ip=reset_ip,
+        initial_parameters=np.zeros((2, 5), dtype=float),
+        initial_boundary_points=reset_boundary_points,
+        initial_boundary_radii=reset_boundary_radii,
+        steps=int(cfg.sim.max_episode_steps),
+        device="cpu",
+        seed=11,
+    )
+    assert batch.ip.shape == (2, int(cfg.sim.max_episode_steps) + 1)
+    assert torch.allclose(batch.ip[0], torch.full_like(batch.ip[0], reset_ip[0]))
+    assert torch.allclose(batch.ip[1], torch.full_like(batch.ip[1], reset_ip[1]))
+
+
 def test_hold_reset_ip_reference_uses_actual_reset_ip() -> None:
     cfg = load_experiment_config(CONFIG)
     hold_ip = replace(
@@ -1009,6 +1137,20 @@ def test_config_loader_rejects_invalid_values(tmp_path: Path) -> None:
     bad_terminal_remaining.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(ValueError, match="terminal_remaining_cost"):
         load_experiment_config(bad_terminal_remaining)
+
+    data = json.loads(CONFIG.read_text())
+    data["reward"]["actuator_saturation_weight"] = -1.0
+    bad_saturation_weight = tmp_path / "bad_saturation_weight.json"
+    bad_saturation_weight.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="actuator_saturation_weight"):
+        load_experiment_config(bad_saturation_weight)
+
+    data = json.loads(CONFIG.read_text())
+    data["sim"]["current_saturation_fraction"] = 0.99
+    bad_current_saturation = tmp_path / "bad_current_saturation.json"
+    bad_current_saturation.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="current_saturation_fraction"):
+        load_experiment_config(bad_current_saturation)
 
     data = json.loads(CONFIG.read_text())
     data["reward"]["late_error_weight"] = 1.0

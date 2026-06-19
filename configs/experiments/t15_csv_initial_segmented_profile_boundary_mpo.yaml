@@ -32,7 +32,8 @@
     "terminate_on_current_limit": false,
     "current_termination_over_limit_a": 5000.0,
     "current_termination_grace_steps": 8,
-    "current_hard_termination_fraction": 1.05
+    "current_hard_termination_fraction": 1.05,
+    "current_saturation_fraction": 1.15
   },
   "reference": {
     "duration_s": 2.0,
@@ -90,6 +91,7 @@
     "derivative_bad_fraction": 1.4,
     "terminal_reward": -20.0,
     "terminal_remaining_cost": 0.0,
+    "actuator_saturation_weight": 4.0,
     "reward_scale": 1.0
   },
   "randomization": {
