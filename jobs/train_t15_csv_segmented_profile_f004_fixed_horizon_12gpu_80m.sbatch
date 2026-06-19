@@ -239,6 +239,7 @@ print(int(cfg["sim"]["max_episode_steps"]))
 PYSTEPS
 )
 echo "episode_steps=${EPISODE_STEPS}"
+export EPISODE_STEPS
 
 MIN_LEARNING_ENV_STEPS=$(( NUM_ENVS * EPISODE_STEPS + NUM_ENVS ))
 if (( TRAIN_ENV_STEPS < MIN_LEARNING_ENV_STEPS )); then
