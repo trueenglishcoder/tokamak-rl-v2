@@ -99,6 +99,51 @@ def test_segmented_profile_starts_at_reset_ip_and_stays_positive(tmp_path: Path)
     assert np.any(np.abs(diff) <= 1.0e-9)
 
 
+def test_smoothed_segmented_profile_obeys_signed_rate_limits(tmp_path: Path) -> None:
+    limits_path = _limits(tmp_path / "limits.json")
+    cfg = ReferenceConfig(
+        duration_s=0.5,
+        t_step=0.001,
+        theta_count=4,
+        seed=1,
+        ip=IpReferenceConfig(
+            kind="segmented_profile",
+            limits_path=limits_path,
+            segment_min_steps=40,
+            segment_max_steps=100,
+            segment_count_min=3,
+            segment_count_max=6,
+            hold_min_steps=20,
+            hold_max_steps=100,
+            ramp_up_rate_fraction=0.25,
+            ramp_down_rate_fraction=0.25,
+            max_delta_fraction=0.25,
+            smooth_ramps=True,
+        ),
+        boundary=BoundaryReferenceConfig(kind="hold_reset_boundary"),
+    )
+    points0 = np.zeros((1, 4, 2), dtype=float)
+    radii0 = np.ones((1, 4), dtype=float)
+    for seed in range(1, 24):
+        ref = generate_reference_batch(
+            config=cfg,
+            initial_ip=np.asarray([250000.0], dtype=float),
+            initial_parameters=np.zeros((1, 5), dtype=float),
+            steps=500,
+            device="cpu",
+            seed=seed,
+            initial_boundary_points=points0,
+            initial_boundary_radii=radii0,
+        )
+        rates = np.diff(ref.ip.detach().cpu().numpy()[0]) / 0.001
+        positive = rates[rates > 0.0]
+        negative = -rates[rates < 0.0]
+        if positive.size:
+            assert float(np.nanmax(positive)) <= 0.25 * 2.0e6 * (1.0 + 1.0e-6)
+        if negative.size:
+            assert float(np.nanmax(negative)) <= 0.25 * 2.0e6 * (1.0 + 1.0e-6)
+
+
 def test_segmented_profile_can_start_with_either_ramp_direction_under_fixed_seeds(tmp_path: Path) -> None:
     limits_path = _limits(tmp_path / "limits.json")
     cfg = ReferenceConfig(

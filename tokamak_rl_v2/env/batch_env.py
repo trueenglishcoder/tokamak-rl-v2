@@ -25,6 +25,7 @@ from tokamak_rl_v2.rewards import T15PhysicalReward
 class BatchStep:
     obs: Tensor
     critic_obs: Tensor
+    requested_action: Tensor
     applied_action: Tensor
     reward: Tensor
     terminated: Tensor
@@ -309,7 +310,16 @@ class TokamakMagneticControlEnv:
             reward, terminated, info = self._reward_cpu(applied_action, previous_action, requested_action)
         truncated = self.step_index >= int(self.config.sim.max_episode_steps)
         self.done = terminated | truncated
-        return BatchStep(obs=obs, critic_obs=self.critic_obs(), applied_action=applied_action.detach().clone(), reward=reward, terminated=terminated, truncated=truncated, info=info)
+        return BatchStep(
+            obs=obs,
+            critic_obs=self.critic_obs(),
+            requested_action=requested_action.detach().clone(),
+            applied_action=applied_action.detach().clone(),
+            reward=reward,
+            terminated=terminated,
+            truncated=truncated,
+            info=info,
+        )
 
     def _pre_step_bank_currents(self) -> tuple[Tensor, Tensor]:
         if self.config.sim.compute_backend == "gpu":
@@ -734,6 +744,7 @@ class TokamakMagneticControlEnv:
             "critic_psi_normalization": "per_reset_standardization",
             "t_step": float(self.cfg.physics.t_step),
             "actuator_tau": float(self.cfg.physics.actuator_tau),
+            "current_saturation_fraction": float(self.config.sim.current_saturation_fraction),
         }
 
 

@@ -138,11 +138,13 @@ def _segmented_profile_ip(cfg: IpReferenceConfig, start: float, steps: int, rng:
     negative_rate_min = float(cfg.ramp_down_rate_min_fraction) * float(negative_rate_base)
     negative_rate_max = float(cfg.ramp_down_rate_fraction) * float(negative_rate_base)
     # Cosine-eased ramps have a peak derivative of pi/2 times their mean
-    # derivative. Budget slightly below that so the final signed-rate contract
-    # remains true after discretization.
+    # derivative. Sample the mean ramp below the configured signed-rate limit
+    # so the finite-difference trajectory itself obeys the same bound.
     ramp_peak_factor = 1.7 if bool(cfg.smooth_ramps) else 1.0
-    positive_peak_rate_max = positive_rate_max * ramp_peak_factor
-    negative_peak_rate_max = negative_rate_max * ramp_peak_factor
+    positive_delta_rate_max = positive_rate_max / ramp_peak_factor
+    negative_delta_rate_max = negative_rate_max / ramp_peak_factor
+    positive_peak_rate_max = positive_rate_max
+    negative_peak_rate_max = negative_rate_max
     min_hold = max(1, int(cfg.hold_min_steps))
     max_hold = max(min_hold, int(cfg.hold_max_steps))
     final_hold = min(max(0, int(cfg.final_hold_min_steps)), max(0, int(steps) - 1))
@@ -179,9 +181,9 @@ def _segmented_profile_ip(cfg: IpReferenceConfig, start: float, steps: int, rng:
                 hi=hi,
                 max_delta=max_delta,
                 positive_rate_min=positive_rate_min,
-                positive_rate_max=positive_rate_max,
+                positive_rate_max=positive_delta_rate_max,
                 negative_rate_min=negative_rate_min,
-                negative_rate_max=negative_rate_max,
+                negative_rate_max=negative_delta_rate_max,
                 dt=dt,
                 rng=rng,
             )

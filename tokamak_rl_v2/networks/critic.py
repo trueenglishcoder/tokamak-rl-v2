@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from tokamak_rl_v2.networks.initialization import truncated_fanin_init
 
 
-CRITIC_ACTION_INPUT_KIND = "normalized_action_v1"
+CRITIC_ACTION_INPUT_KIND = "requested_normalized_action_v2"
 
 
 @dataclass(frozen=True, slots=True)

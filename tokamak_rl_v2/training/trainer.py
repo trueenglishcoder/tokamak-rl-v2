@@ -420,7 +420,7 @@ class Trainer:
                 batch_step = self.env.step(action)
                 discount = torch.full((self.num_envs,), float(self.config.learner.discount), dtype=torch.float32, device=self.device)
                 done = batch_step.terminated | batch_step.truncated
-                self.replay.add_batch(obs, batch_step.applied_action, batch_step.reward, discount, batch_step.obs, done, critic_obs=critic_obs, next_critic_obs=batch_step.critic_obs)
+                self.replay.add_batch(obs, batch_step.requested_action, batch_step.reward, discount, batch_step.obs, done, critic_obs=critic_obs, next_critic_obs=batch_step.critic_obs)
                 obs = self.env.reset_indices(done) if bool(torch.any(done).item()) else batch_step.obs
                 critic_obs = self.env.critic_obs() if bool(torch.any(done).item()) else batch_step.critic_obs
                 metrics = None
@@ -569,7 +569,7 @@ class Trainer:
                 batch_step = self.env.step(action)
                 discount = torch.full((self.num_envs,), float(self.config.learner.discount), dtype=torch.float32, device=self.device)
                 done = batch_step.terminated | batch_step.truncated
-                self.replay.add_batch(obs, batch_step.applied_action, batch_step.reward, discount, batch_step.obs, done, critic_obs=critic_obs, next_critic_obs=batch_step.critic_obs)
+                self.replay.add_batch(obs, batch_step.requested_action, batch_step.reward, discount, batch_step.obs, done, critic_obs=critic_obs, next_critic_obs=batch_step.critic_obs)
                 obs = self.env.reset_indices(done) if bool(torch.any(done).item()) else batch_step.obs
                 critic_obs = self.env.critic_obs() if bool(torch.any(done).item()) else batch_step.critic_obs
 
@@ -1049,7 +1049,12 @@ class Trainer:
             "derivative_usage_loss",
             "max_abs_action",
             "action_rms",
+            "requested_action_rms",
+            "applied_action_rms",
             "delta_action_rms",
+            "action_saturation_delta_rms",
+            "action_saturation_delta_max",
+            "action_saturation_fraction",
             "physical_cost",
             "shape_mean_loss",
             "shape_max_loss",
@@ -1058,6 +1063,7 @@ class Trainer:
             "derivative_loss",
             "action_loss",
             "delta_action_loss",
+            "actuator_saturation_loss",
             "terminated_boundary",
             "terminated_current",
             "current_over_limit_steps",

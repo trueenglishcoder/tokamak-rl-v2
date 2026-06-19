@@ -118,7 +118,7 @@ def _actor_loop(
             done = out.terminated | out.truncated
             chunk["obs"].append(obs.detach().cpu())
             chunk["critic_obs"].append(critic_obs.detach().cpu())
-            chunk["action"].append(out.applied_action.detach().cpu())
+            chunk["action"].append(out.requested_action.detach().cpu())
             chunk["reward"].append(out.reward.detach().cpu())
             chunk["discount"].append(torch.full_like(out.reward.detach().cpu(), float(worker_config.learner.discount)))
             chunk["next_obs"].append(out.obs.detach().cpu())

@@ -464,6 +464,7 @@ def test_environment_reset_step_contract() -> None:
     assert "field_scale" not in env.normalization()
     assert "bdot_scale" not in env.normalization()
     assert env.normalization()["critic_psi_normalization"] == "per_reset_standardization"
+    assert env.normalization()["current_saturation_fraction"] == pytest.approx(float(cfg.sim.current_saturation_fraction))
     obs = env.reset()
     assert obs.shape == (2, env.obs_dim)
     assert env.critic_obs().shape == (2, env.critic_obs_dim)
@@ -474,8 +475,10 @@ def test_environment_reset_step_contract() -> None:
     result = env.step(torch.zeros((2, env.action_dim)))
     assert result.obs.shape == (2, env.obs_dim)
     assert result.critic_obs.shape == (2, env.critic_obs_dim)
+    assert result.requested_action.shape == (2, env.action_dim)
     assert result.applied_action.shape == (2, env.action_dim)
     assert result.reward.shape == (2,)
+    assert torch.isfinite(result.requested_action).all()
     assert torch.isfinite(result.reward).all()
     assert torch.isfinite(result.applied_action).all()
 
@@ -805,7 +808,7 @@ def test_environment_reset_indices_only_resets_done_slot() -> None:
     assert torch.allclose(env.previous_action[0], torch.zeros_like(env.previous_action[0]))
 
 
-def test_trainer_replay_stores_applied_env_action(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_trainer_replay_stores_requested_actor_action(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = _small_config(tmp_path)
     cfg = replace(cfg, training=replace(cfg.training, steps=1, eval_interval_steps=99))
     trainer = Trainer(cfg)
@@ -823,6 +826,7 @@ def test_trainer_replay_stores_applied_env_action(tmp_path: Path, monkeypatch: p
         return BatchStep(
             obs=obs1.clone(),
             critic_obs=critic1.clone(),
+            requested_action=raw_action.clone(),
             applied_action=applied_action.clone(),
             reward=torch.zeros((trainer.num_envs,), dtype=torch.float32, device=trainer.device),
             terminated=torch.zeros((trainer.num_envs,), dtype=torch.bool, device=trainer.device),
@@ -839,7 +843,7 @@ def test_trainer_replay_stores_applied_env_action(tmp_path: Path, monkeypatch: p
     trainer.train()
 
     for slot in trainer.replay.active_slots.detach().cpu().tolist():
-        assert torch.allclose(trainer.replay.action[int(slot), 0], applied_action[0])
+        assert torch.allclose(trainer.replay.action[int(slot), 0], raw_action[0])
 
 
 def test_environment_step_uses_post_step_reference_index() -> None:
@@ -1466,6 +1470,11 @@ def test_training_checkpoint_resume_rejects_old_critic_action_input_kind(tmp_pat
     torch.save(state, checkpoint)
 
     resumed = Trainer(cfg, device="cpu", output_dir=tmp_path / "resume", resume_checkpoint=checkpoint)
+    with pytest.raises(ValueError, match="critic action input"):
+        resumed._load_checkpoint(checkpoint)
+
+    state["critic_action_input_kind"] = "normalized_action_v1"
+    torch.save(state, checkpoint)
     with pytest.raises(ValueError, match="critic action input"):
         resumed._load_checkpoint(checkpoint)
 
