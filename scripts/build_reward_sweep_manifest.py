@@ -284,30 +284,20 @@ FIXED_HORIZON_FIXED_SIM = {
 }
 
 SATURATION_BROAD_SHAPE_REGIMES = [
-    {"id": "s0", "shape_mean_weight": 0.08, "shape_max_weight": 0.0200},
+    {"id": "s0", "shape_mean_weight": 0.12, "shape_max_weight": 0.0300},
     {"id": "s1", "shape_mean_weight": 0.20, "shape_max_weight": 0.0500},
-    {"id": "s2", "shape_mean_weight": 0.45, "shape_max_weight": 0.1100},
+    {"id": "s2", "shape_mean_weight": 0.30, "shape_max_weight": 0.0750},
 ]
 
 SATURATION_BROAD_IP_REGIMES = [
-    {"id": "i0", "ip_weight": 0.15},
-    {"id": "i1", "ip_weight": 0.40},
-    {"id": "i2", "ip_weight": 0.80},
+    {"id": "i0", "ip_weight": 0.10},
+    {"id": "i1", "ip_weight": 0.25},
+    {"id": "i2", "ip_weight": 0.50},
 ]
 
 SATURATION_BROAD_SAFETY_REGIMES = [
     {
         "id": "a0",
-        "current_weight": 18.0,
-        "current_soft_fraction": 0.72,
-        "derivative_weight": 0.70,
-        "derivative_soft_fraction": 0.72,
-        "current_usage_weight": 45.0,
-        "derivative_usage_weight": 4.5,
-        "actuator_saturation_weight": 128.0,
-    },
-    {
-        "id": "a1",
         "current_weight": 24.0,
         "current_soft_fraction": 0.68,
         "derivative_weight": 0.85,
@@ -317,7 +307,27 @@ SATURATION_BROAD_SAFETY_REGIMES = [
         "actuator_saturation_weight": 192.0,
     },
     {
+        "id": "a1",
+        "current_weight": 27.0,
+        "current_soft_fraction": 0.67,
+        "derivative_weight": 0.90,
+        "derivative_soft_fraction": 0.67,
+        "current_usage_weight": 68.0,
+        "derivative_usage_weight": 6.8,
+        "actuator_saturation_weight": 216.0,
+    },
+    {
         "id": "a2",
+        "current_weight": 30.0,
+        "current_soft_fraction": 0.66,
+        "derivative_weight": 0.95,
+        "derivative_soft_fraction": 0.66,
+        "current_usage_weight": 74.0,
+        "derivative_usage_weight": 7.4,
+        "actuator_saturation_weight": 240.0,
+    },
+    {
+        "id": "a3",
         "current_weight": 32.0,
         "current_soft_fraction": 0.65,
         "derivative_weight": 1.00,
@@ -325,16 +335,6 @@ SATURATION_BROAD_SAFETY_REGIMES = [
         "current_usage_weight": 80.0,
         "derivative_usage_weight": 8.0,
         "actuator_saturation_weight": 256.0,
-    },
-    {
-        "id": "a3",
-        "current_weight": 44.0,
-        "current_soft_fraction": 0.62,
-        "derivative_weight": 1.25,
-        "derivative_soft_fraction": 0.62,
-        "current_usage_weight": 110.0,
-        "derivative_usage_weight": 11.0,
-        "actuator_saturation_weight": 384.0,
     },
 ]
 
