@@ -13,6 +13,7 @@ try:
         PROFILE_FIXED_HORIZON,
         PROFILE_LEGAL,
         PROFILE_SATURATION,
+        PROFILE_TCV_QUALITY,
         build_manifest,
     )
 except ModuleNotFoundError:  # pragma: no cover - used when run as python3 scripts/...
@@ -21,6 +22,7 @@ except ModuleNotFoundError:  # pragma: no cover - used when run as python3 scrip
         PROFILE_FIXED_HORIZON,
         PROFILE_LEGAL,
         PROFILE_SATURATION,
+        PROFILE_TCV_QUALITY,
         build_manifest,
     )
 
@@ -128,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root-prefix", default="outputs/t15_reward_sweep72_legal_1m")
     parser.add_argument(
         "--profile",
-        choices=(PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON, PROFILE_SATURATION),
+        choices=(PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON, PROFILE_SATURATION, PROFILE_TCV_QUALITY),
         default=PROFILE_LEGAL,
     )
     args = parser.parse_args(argv)

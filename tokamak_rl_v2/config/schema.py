@@ -95,6 +95,7 @@ class ObservationConfig:
 
 @dataclass(frozen=True, slots=True)
 class RewardConfig:
+    kind: Literal["physical_cost", "tcv_quality"] = "physical_cost"
     shape_mean_scale_m: float = 0.03
     shape_max_scale_m: float = 0.08
     ip_scale_a: float = 25000.0
@@ -117,6 +118,7 @@ class RewardConfig:
     terminal_remaining_cost: float = 0.0
     actuator_saturation_weight: float = 4.0
     reward_scale: float = 1.0
+    smoothmax_alpha: float = 5.0
 
 
 @dataclass(frozen=True, slots=True)

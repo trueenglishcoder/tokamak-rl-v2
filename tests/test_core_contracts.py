@@ -13,7 +13,7 @@ from tokamak_rl_v2.config import load_experiment_config
 from tokamak_rl_v2.config.schema import IpReferenceConfig, LearnerConfig, RewardConfig
 from tokamak_rl_v2.env import BatchStep, TokamakMagneticControlEnv
 from tokamak_rl_v2.networks import FeedForwardGaussianActor, RecurrentQCritic
-from tokamak_rl_v2.rewards import T15PhysicalReward
+from tokamak_rl_v2.rewards import T15PhysicalReward, T15TCVQualityReward
 from tokamak_rl_v2.export.cli import main as export_cli_main
 from tokamak_rl_v2.training.mpo import MaximumAPosterioriPolicyOptimiser
 from tokamak_rl_v2.training.policy_pipeline import _ArrayReferenceScenario, _write_baseline_report, evaluate_policy_gates, run_reset_sanity
@@ -128,6 +128,51 @@ def test_physical_reward_tracks_errors_and_action_cost() -> None:
     assert active.reward[0] < zero.reward[0]
     assert float(active.components["action_rms"][0].item()) > float(zero.components["action_rms"][0].item())
     assert float(zero.components["physical_cost"][0].item()) == pytest.approx(0.0)
+
+
+def test_tcv_quality_reward_improves_with_better_physical_errors() -> None:
+    reward_fn = T15TCVQualityReward(
+        RewardConfig(
+            kind="tcv_quality",
+            reward_scale=1.0,
+            smoothmax_alpha=5.0,
+            ip_scale_a=15000.0,
+            boundary_missing_error_m=1.0,
+            boundary_missing_weight=20.0,
+            shape_mean_weight=1.0,
+            shape_max_weight=0.25,
+            ip_weight=1.0,
+            current_weight=1.0,
+            derivative_weight=0.5,
+            actuator_saturation_weight=1.0,
+            action_weight=0.0,
+            delta_action_weight=0.0,
+        ),
+        control_rate_hz=1000.0,
+    )
+    ref = torch.zeros((3, 32, 2), dtype=torch.float32)
+    boundary = ref.clone()
+    boundary[1, :, 0] = 0.20
+    action = torch.zeros((3, 9), dtype=torch.float32)
+    rb = reward_fn(
+        ip=torch.tensor([200000.0, 250000.0, 200000.0]),
+        ip_ref=torch.tensor([200000.0, 200000.0, 200000.0]),
+        boundary_points=boundary,
+        reference_points=ref,
+        action=action,
+        previous_action=action,
+        requested_action=torch.stack([action[0], action[1], torch.ones((9,), dtype=torch.float32)]),
+        current_over_limit_a=torch.zeros((3,), dtype=torch.float32),
+        current_usage_fraction=torch.tensor([0.5, 0.95, 0.5], dtype=torch.float32),
+        current_margin_fraction=torch.tensor([0.5, 0.05, 0.5], dtype=torch.float32),
+        derivative_usage=torch.tensor([0.1, 0.95, 0.1], dtype=torch.float32),
+        boundary_found=torch.tensor([True, True, False]),
+        terminated=torch.tensor([False, False, True]),
+    )
+    assert rb.reward[0] > rb.reward[1]
+    assert rb.reward[1] > rb.reward[2]
+    assert rb.components["physical_cost"][2] > rb.components["physical_cost"][1]
+    assert rb.components["actuator_saturation_loss"][2] > 0.0
 
 
 def test_physical_reward_penalizes_rejected_actuator_command() -> None:

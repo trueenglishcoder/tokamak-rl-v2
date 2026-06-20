@@ -352,6 +352,8 @@ def summarize_variant(
         "ip_regime": str(variant.get("ip_regime") or ""),
         "current_regime": str(variant.get("current_regime") or ""),
         "derivative_regime": str(variant.get("derivative_regime") or variant.get("actuator_regime") or ""),
+        "reward_kind": reward.get("kind", "physical_cost"),
+        "smoothmax_alpha": reward.get("smoothmax_alpha", ""),
         "shape_mean_weight": reward.get("shape_mean_weight", ""),
         "shape_max_weight": reward.get("shape_max_weight", ""),
         "ip_weight": reward.get("ip_weight", ""),

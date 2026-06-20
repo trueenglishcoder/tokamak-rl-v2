@@ -11,6 +11,7 @@ PROFILE_LEGAL = "legal"
 PROFILE_CURRENT_CONSTRAINT = "current_constraint"
 PROFILE_FIXED_HORIZON = "fixed_horizon"
 PROFILE_SATURATION = "saturation"
+PROFILE_TCV_QUALITY = "tcv_quality"
 
 BROAD_SHAPE_REGIMES = [
     {"id": "s0", "shape_mean_weight": 1.5, "shape_max_weight": 0.375},
@@ -393,13 +394,88 @@ SATURATION_FIXED_SIM = {
     "current_saturation_fraction": 1.02,
 }
 
+TCV_QUALITY_BROAD_SHAPE_REGIMES = [
+    {"id": "s0", "shape_mean_weight": 1.0, "shape_max_weight": 0.25},
+    {"id": "s1", "shape_mean_weight": 2.0, "shape_max_weight": 0.50},
+    {"id": "s2", "shape_mean_weight": 4.0, "shape_max_weight": 1.00},
+]
+
+TCV_QUALITY_BROAD_IP_REGIMES = [
+    {"id": "i0", "ip_weight": 0.50},
+    {"id": "i1", "ip_weight": 1.00},
+    {"id": "i2", "ip_weight": 2.00},
+]
+
+TCV_QUALITY_BROAD_SAFETY_REGIMES = [
+    {"id": "a0", "current_weight": 1.0, "derivative_weight": 0.25, "actuator_saturation_weight": 0.25},
+    {"id": "a1", "current_weight": 2.0, "derivative_weight": 0.50, "actuator_saturation_weight": 0.50},
+    {"id": "a2", "current_weight": 4.0, "derivative_weight": 1.00, "actuator_saturation_weight": 1.00},
+    {"id": "a3", "current_weight": 8.0, "derivative_weight": 2.00, "actuator_saturation_weight": 2.00},
+]
+
+TCV_QUALITY_FOCUS_SHAPE_FACTORS = [
+    {"id": "sf0", "factor": 0.80},
+    {"id": "sf1", "factor": 1.00},
+    {"id": "sf2", "factor": 1.25},
+]
+
+TCV_QUALITY_FOCUS_IP_FACTORS = [
+    {"id": "if0", "factor": 0.80},
+    {"id": "if1", "factor": 1.20},
+]
+
+TCV_QUALITY_FOCUS_SAFETY_FACTORS = [
+    {
+        "id": "af0",
+        "current_factor": 0.75,
+        "derivative_factor": 0.75,
+        "actuator_saturation_factor": 0.75,
+    },
+    {
+        "id": "af1",
+        "current_factor": 1.50,
+        "derivative_factor": 1.50,
+        "actuator_saturation_factor": 1.50,
+    },
+]
+
+TCV_QUALITY_FIXED_REWARD = {
+    "kind": "tcv_quality",
+    "shape_mean_scale_m": 0.03,
+    "shape_max_scale_m": 0.08,
+    "ip_scale_a": 15000.0,
+    "boundary_missing_error_m": 1.0,
+    "boundary_missing_weight": 20.0,
+    "reward_scale": 1.0,
+    "smoothmax_alpha": 5.0,
+    "terminal_reward": -20.0,
+    "terminal_remaining_cost": 0.0,
+    "current_soft_fraction": 0.90,
+    "current_bad_fraction": 1.00,
+    "derivative_soft_fraction": 0.90,
+    "derivative_bad_fraction": 1.10,
+    "current_usage_weight": 0.0,
+    "derivative_usage_weight": 0.0,
+    "action_weight": 0.0,
+    "delta_action_weight": 0.0,
+}
+
+TCV_QUALITY_FIXED_SIM = {
+    "terminate_on_boundary_loss": True,
+    "terminate_on_current_limit": True,
+    "current_termination_over_limit_a": 10000.0,
+    "current_termination_grace_steps": 25,
+    "current_hard_termination_fraction": 1.03,
+    "current_saturation_fraction": 1.02,
+}
+
 
 def _rounded(value: float) -> float:
     return float(round(float(value), 8))
 
 
 def _check_profile(profile: str) -> str:
-    if profile not in {PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON, PROFILE_SATURATION}:
+    if profile not in {PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON, PROFILE_SATURATION, PROFILE_TCV_QUALITY}:
         raise ValueError(f"Unknown reward sweep profile: {profile}")
     return profile
 
@@ -412,6 +488,8 @@ def _fixed_reward(profile: str) -> dict[str, Any]:
         return dict(FIXED_HORIZON_FIXED_REWARD)
     if profile == PROFILE_SATURATION:
         return dict(SATURATION_FIXED_REWARD)
+    if profile == PROFILE_TCV_QUALITY:
+        return dict(TCV_QUALITY_FIXED_REWARD)
     return dict(FIXED_REWARD)
 
 
@@ -423,6 +501,8 @@ def _fixed_sim(profile: str) -> dict[str, Any]:
         return dict(FIXED_HORIZON_FIXED_SIM)
     if profile == PROFILE_SATURATION:
         return dict(SATURATION_FIXED_SIM)
+    if profile == PROFILE_TCV_QUALITY:
+        return dict(TCV_QUALITY_FIXED_SIM)
     return {}
 
 
@@ -434,6 +514,8 @@ def _broad_shape_regimes(profile: str) -> list[dict[str, Any]]:
         return FIXED_HORIZON_BROAD_SHAPE_REGIMES
     if profile == PROFILE_SATURATION:
         return SATURATION_BROAD_SHAPE_REGIMES
+    if profile == PROFILE_TCV_QUALITY:
+        return TCV_QUALITY_BROAD_SHAPE_REGIMES
     return BROAD_SHAPE_REGIMES
 
 
@@ -445,6 +527,8 @@ def _broad_ip_regimes(profile: str) -> list[dict[str, Any]]:
         return FIXED_HORIZON_BROAD_IP_REGIMES
     if profile == PROFILE_SATURATION:
         return SATURATION_BROAD_IP_REGIMES
+    if profile == PROFILE_TCV_QUALITY:
+        return TCV_QUALITY_BROAD_IP_REGIMES
     return BROAD_IP_REGIMES
 
 
@@ -456,6 +540,8 @@ def _broad_safety_regimes(profile: str) -> list[dict[str, Any]]:
         return FIXED_HORIZON_BROAD_SAFETY_REGIMES
     if profile == PROFILE_SATURATION:
         return SATURATION_BROAD_SAFETY_REGIMES
+    if profile == PROFILE_TCV_QUALITY:
+        return TCV_QUALITY_BROAD_SAFETY_REGIMES
     return BROAD_ACTUATOR_REGIMES
 
 
@@ -467,6 +553,8 @@ def _focus_shape_factors(profile: str) -> list[dict[str, Any]]:
         return FIXED_HORIZON_FOCUS_SHAPE_FACTORS
     if profile == PROFILE_SATURATION:
         return SATURATION_FOCUS_SHAPE_FACTORS
+    if profile == PROFILE_TCV_QUALITY:
+        return TCV_QUALITY_FOCUS_SHAPE_FACTORS
     return FOCUS_SHAPE_FACTORS
 
 
@@ -478,6 +566,8 @@ def _focus_ip_factors(profile: str) -> list[dict[str, Any]]:
         return FIXED_HORIZON_FOCUS_IP_FACTORS
     if profile == PROFILE_SATURATION:
         return SATURATION_FOCUS_IP_FACTORS
+    if profile == PROFILE_TCV_QUALITY:
+        return TCV_QUALITY_FOCUS_IP_FACTORS
     return FOCUS_IP_FACTORS
 
 
@@ -489,6 +579,8 @@ def _focus_safety_factors(profile: str) -> list[dict[str, Any]]:
         return FIXED_HORIZON_FOCUS_SAFETY_FACTORS
     if profile == PROFILE_SATURATION:
         return SATURATION_FOCUS_SAFETY_FACTORS
+    if profile == PROFILE_TCV_QUALITY:
+        return TCV_QUALITY_FOCUS_SAFETY_FACTORS
     return FOCUS_ACTUATOR_FACTORS
 
 
@@ -800,7 +892,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Write deterministic two-pass reward sweep manifests.")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--pass", dest="sweep_pass", choices=("broad", "focused"), default="broad")
-    parser.add_argument("--profile", choices=(PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON, PROFILE_SATURATION), default=PROFILE_LEGAL)
+    parser.add_argument(
+        "--profile",
+        choices=(PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON, PROFILE_SATURATION, PROFILE_TCV_QUALITY),
+        default=PROFILE_LEGAL,
+    )
     parser.add_argument("--center", type=Path, default=None, help="physical_best_candidate.json for focused pass")
     parser.add_argument("--variant-budget", type=int, default=None)
     parser.add_argument("--runs-per-array-task", type=int, default=None)

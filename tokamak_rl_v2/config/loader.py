@@ -466,7 +466,9 @@ def _sign(value: float) -> int:
 
 
 def _validate_reward_config(reward: RewardConfig, *, prefix: str) -> None:
-    for name in ("shape_mean_scale_m", "shape_max_scale_m", "ip_scale_a", "reward_scale"):
+    if reward.kind not in {"physical_cost", "tcv_quality"}:
+        raise ValueError(f"{prefix}.kind must be physical_cost or tcv_quality")
+    for name in ("shape_mean_scale_m", "shape_max_scale_m", "ip_scale_a", "reward_scale", "smoothmax_alpha"):
         value = float(getattr(reward, name))
         if not math.isfinite(value) or value <= 0.0:
             raise ValueError(f"{prefix}.{name} must be finite and positive")

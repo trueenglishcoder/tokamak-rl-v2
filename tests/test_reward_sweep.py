@@ -11,6 +11,7 @@ from scripts.build_reward_sweep_manifest import (
     PROFILE_CURRENT_CONSTRAINT,
     PROFILE_FIXED_HORIZON,
     PROFILE_SATURATION,
+    PROFILE_TCV_QUALITY,
     build_manifest,
     build_variants,
 )
@@ -36,6 +37,8 @@ SATURATION_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_satu
 SATURATION_AGG_JOB = ROOT / "jobs/aggregate_t15_reward_sweep_onepass.sbatch"
 SATURATION_PASS1_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_saturation_pass1.sbatch"
 SATURATION_PASS2_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_saturation_pass2.sbatch"
+TCV_QUALITY_PASS1_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_tcv_quality_pass1.sbatch"
+TCV_QUALITY_PASS2_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_12gpu_tcv_quality_pass2.sbatch"
 RERUN_JOB = ROOT / "jobs/sweep_t15_csv_segmented_profile_rewards_rerun_1gpu.sbatch"
 
 
@@ -178,6 +181,58 @@ def test_saturation_broad_manifest_has_36_and_saturation_overrides() -> None:
         if variant["shape_regime"] == "s0" and variant["ip_regime"] == "i0"
     }
     assert saturation_weights == {"a0": 2.0, "a1": 4.0, "a2": 8.0, "a3": 12.0}
+
+
+def test_tcv_quality_manifest_has_36_and_operational_termination_overrides() -> None:
+    variants = build_variants("broad", profile=PROFILE_TCV_QUALITY)
+    assert len(variants) == 36
+    assert variants[0]["folder"] == "b000_s0_i0_a0"
+    assert variants[-1]["folder"] == "b035_s2_i2_a3"
+    first = variants[0]
+    assert first["reward"]["kind"] == "tcv_quality"
+    assert first["reward"]["smoothmax_alpha"] == 5.0
+    assert first["reward"]["ip_scale_a"] == 15000.0
+    assert first["reward"]["shape_mean_weight"] == 1.0
+    assert first["reward"]["shape_max_weight"] == 0.25
+    assert first["reward"]["ip_weight"] == 0.5
+    assert first["reward"]["current_weight"] == 1.0
+    assert first["reward"]["derivative_weight"] == 0.25
+    assert first["reward"]["actuator_saturation_weight"] == 0.25
+    assert first["reward"]["action_weight"] == 0.0
+    assert first["reward"]["delta_action_weight"] == 0.0
+    assert first["sim"] == {
+        "terminate_on_boundary_loss": True,
+        "terminate_on_current_limit": True,
+        "current_termination_over_limit_a": 10000.0,
+        "current_termination_grace_steps": 25,
+        "current_hard_termination_fraction": 1.03,
+        "current_saturation_fraction": 1.02,
+    }
+
+
+def test_tcv_quality_focused_manifest_has_12_variants() -> None:
+    center = {
+        "shape_mean_weight": 2.0,
+        "shape_max_weight": 0.5,
+        "ip_weight": 1.0,
+        "current_weight": 2.0,
+        "derivative_weight": 0.5,
+        "actuator_saturation_weight": 0.5,
+    }
+    manifest = build_manifest(
+        "focused",
+        center_reward=center,
+        profile=PROFILE_TCV_QUALITY,
+        runs_per_array_task=1,
+        array_task_count=12,
+    )
+    variants = manifest["variants"]
+    assert manifest["variant_count"] == 12
+    assert variants[0]["folder"] == "f000_sf0_if0_af0"
+    assert variants[-1]["folder"] == "f011_sf2_if1_af1"
+    assert variants[0]["reward"]["kind"] == "tcv_quality"
+    assert variants[0]["reward"]["current_weight"] == 1.5
+    assert variants[-1]["reward"]["current_weight"] == 3.0
 
 
 def test_current_constraint_focused_manifest_uses_center_soft_fractions() -> None:

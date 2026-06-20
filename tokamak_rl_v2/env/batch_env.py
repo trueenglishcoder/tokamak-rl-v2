@@ -18,7 +18,7 @@ from tokamak_control.io.config_io import load_config
 from tokamak_rl_v2.config.schema import ExperimentConfig
 from tokamak_rl_v2.env.references import ReferenceBatch, generate_reference_batch, sample_initial_conditions
 from tokamak_rl_v2.env.t15_csv_initial_states import CsvInitialStateLibrary
-from tokamak_rl_v2.rewards import T15PhysicalReward
+from tokamak_rl_v2.rewards import build_reward
 
 
 @dataclass(slots=True)
@@ -73,7 +73,7 @@ class TokamakMagneticControlEnv:
         self.actor_obs_dim = self._actor_obs_dim()
         self.obs_dim = self.actor_obs_dim
         self.critic_obs_dim = self._critic_obs_dim()
-        self.reward_fn = T15PhysicalReward(config.reward, control_rate_hz=1.0 / float(self.cfg.physics.t_step))
+        self.reward_fn = build_reward(config.reward, control_rate_hz=1.0 / float(self.cfg.physics.t_step))
         self.current_limits = torch.as_tensor(_current_limit_vector(config, self.cfg), dtype=torch.float32, device=self.device)
         self.raw_derivative_limits = torch.as_tensor(np.concatenate([_limit_vec(self.cfg.physics.pfc_deriv_limit, self.cfg.pfc.n_coils), _limit_vec(self.cfg.physics.sol_deriv_limit, self.cfg.sol.n_coils)]), dtype=torch.float32, device=self.device)
         self.derivative_limits = self.raw_derivative_limits * float(config.sim.action_scale)
