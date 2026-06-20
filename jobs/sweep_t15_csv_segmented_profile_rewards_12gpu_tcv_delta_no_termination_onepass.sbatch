@@ -85,7 +85,26 @@ PYPREFLIGHT
 
     mkdir -p "${SWEEP_ROOT}" "${SWEEP_ROOT}/generated_configs"
     if [[ ! -f "${MANIFEST}" ]]; then
-      echo "missing no-termination TCV delta manifest: ${MANIFEST}; launch through scripts/submit_tcv_delta_no_termination_sweep.py" >&2
+      LOCKDIR="${SWEEP_ROOT}/.manifest.lock"
+      if mkdir "${LOCKDIR}" 2>/dev/null; then
+        trap 'rmdir "${LOCKDIR}" 2>/dev/null || true' EXIT
+        python3 scripts/build_reward_sweep_manifest.py \
+          --output "${MANIFEST}" \
+          --profile tcv_delta_no_termination \
+          --pass broad \
+          --runs-per-array-task 3 \
+          --array-task-count 12
+        rmdir "${LOCKDIR}" 2>/dev/null || true
+        trap - EXIT
+      else
+        for _ in $(seq 1 120); do
+          [[ -f "${MANIFEST}" ]] && break
+          sleep 1
+        done
+      fi
+    fi
+    if [[ ! -f "${MANIFEST}" ]]; then
+      echo "failed to create no-termination TCV delta manifest: ${MANIFEST}" >&2
       exit 2
     fi
 
