@@ -14,6 +14,7 @@ PROFILE_SATURATION = "saturation"
 PROFILE_TCV_QUALITY = "tcv_quality"
 PROFILE_TCV_DERIVATIVE = "tcv_derivative"
 PROFILE_TCV_DELTA_JDOT = "tcv_delta_jdot"
+PROFILE_TCV_DELTA_TERMINATION_F002 = "tcv_delta_termination_f002"
 
 BROAD_SHAPE_REGIMES = [
     {"id": "s0", "shape_mean_weight": 1.5, "shape_max_weight": 0.375},
@@ -520,9 +521,22 @@ TCV_DERIVATIVE_FIXED_SIM = {
     "terminate_on_current_limit": True,
     "current_termination_over_limit_a": 0.0,
     "current_termination_grace_steps": 1,
-    "current_hard_termination_fraction": 1.01,
+    "current_hard_termination_fraction": 1.20,
     "current_saturation_fraction": 1.0,
 }
+
+TCV_DELTA_F002_FIXED_REWARD = {
+    **TCV_DERIVATIVE_FIXED_REWARD,
+    "shape_mean_weight": 3.2,
+    "shape_max_weight": 0.8,
+    "ip_weight": 1.8,
+    "current_weight": 0.75,
+    "derivative_weight": 0.1875,
+    "actuator_saturation_weight": 0.1875,
+}
+
+TCV_DELTA_TERMINATION_FRACTIONS = [1.10, 1.15, 1.20, 1.30]
+TCV_DELTA_TERMINATION_GRACE_STEPS = [1, 8, 25]
 
 
 def _rounded(value: float) -> float:
@@ -534,6 +548,8 @@ def _check_profile(profile: str) -> str:
         return PROFILE_TCV_DERIVATIVE
     if profile == PROFILE_TCV_DELTA_JDOT:
         return PROFILE_TCV_DELTA_JDOT
+    if profile == PROFILE_TCV_DELTA_TERMINATION_F002:
+        return PROFILE_TCV_DELTA_TERMINATION_F002
     if profile not in {PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON, PROFILE_SATURATION, PROFILE_TCV_QUALITY}:
         raise ValueError(f"Unknown reward sweep profile: {profile}")
     return profile
@@ -547,6 +563,8 @@ def _fixed_reward(profile: str) -> dict[str, Any]:
         return dict(FIXED_HORIZON_FIXED_REWARD)
     if profile == PROFILE_SATURATION:
         return dict(SATURATION_FIXED_REWARD)
+    if profile == PROFILE_TCV_DELTA_TERMINATION_F002:
+        return dict(TCV_DELTA_F002_FIXED_REWARD)
     if profile in {PROFILE_TCV_DERIVATIVE, PROFILE_TCV_DELTA_JDOT}:
         return dict(TCV_DERIVATIVE_FIXED_REWARD)
     if profile == PROFILE_TCV_QUALITY:
@@ -562,7 +580,7 @@ def _fixed_sim(profile: str) -> dict[str, Any]:
         return dict(FIXED_HORIZON_FIXED_SIM)
     if profile == PROFILE_SATURATION:
         return dict(SATURATION_FIXED_SIM)
-    if profile in {PROFILE_TCV_DERIVATIVE, PROFILE_TCV_DELTA_JDOT}:
+    if profile in {PROFILE_TCV_DERIVATIVE, PROFILE_TCV_DELTA_JDOT, PROFILE_TCV_DELTA_TERMINATION_F002}:
         return dict(TCV_DERIVATIVE_FIXED_SIM)
     if profile == PROFILE_TCV_QUALITY:
         return dict(TCV_QUALITY_FIXED_SIM)
@@ -688,6 +706,8 @@ def _variant(
 
 def build_broad_variants(profile: str = PROFILE_LEGAL) -> list[dict[str, Any]]:
     profile = _check_profile(profile)
+    if profile == PROFILE_TCV_DELTA_TERMINATION_F002:
+        return build_tcv_delta_termination_f002_variants()
     variants: list[dict[str, Any]] = []
     index = 0
     fixed_reward = _fixed_reward(profile)
@@ -734,6 +754,42 @@ def build_broad_variants(profile: str = PROFILE_LEGAL) -> list[dict[str, Any]]:
                     )
                 )
                 index += 1
+    return variants
+
+
+def build_tcv_delta_termination_f002_variants() -> list[dict[str, Any]]:
+    variants: list[dict[str, Any]] = []
+    index = 0
+    fixed_reward = _fixed_reward(PROFILE_TCV_DELTA_TERMINATION_F002)
+    fixed_sim = _fixed_sim(PROFILE_TCV_DELTA_TERMINATION_F002)
+    for fraction in TCV_DELTA_TERMINATION_FRACTIONS:
+        for grace_steps in TCV_DELTA_TERMINATION_GRACE_STEPS:
+            fraction_tag = int(round(float(fraction) * 100.0))
+            name = f"f{fraction_tag:03d}_g{int(grace_steps):03d}"
+            sim = {
+                **fixed_sim,
+                "current_hard_termination_fraction": float(fraction),
+                "current_termination_grace_steps": int(grace_steps),
+            }
+            variants.append(
+                _variant(
+                    index=index,
+                    prefix="t",
+                    name=name,
+                    shape_regime="f002",
+                    ip_regime="f002",
+                    current_regime=name,
+                    derivative_regime=name,
+                    reward=dict(fixed_reward),
+                    extra={
+                        "termination_regime": name,
+                        "current_hard_termination_fraction": float(fraction),
+                        "current_termination_grace_steps": int(grace_steps),
+                        "sim": sim,
+                    },
+                )
+            )
+            index += 1
     return variants
 
 
@@ -971,6 +1027,7 @@ def main(argv: list[str] | None = None) -> int:
             PROFILE_TCV_QUALITY,
             PROFILE_TCV_DERIVATIVE,
             PROFILE_TCV_DELTA_JDOT,
+            PROFILE_TCV_DELTA_TERMINATION_F002,
         ),
         default=PROFILE_LEGAL,
     )

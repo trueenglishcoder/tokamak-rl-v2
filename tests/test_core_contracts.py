@@ -4,6 +4,7 @@ import csv
 from dataclasses import replace
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -79,6 +80,63 @@ def test_network_shapes() -> None:
     q, state = critic(obs, torch.zeros((3, 5)))
     assert q.shape == (3, 1)
     assert state.h.shape[-1] == 16
+
+
+def test_tcv_derivative_current_termination_uses_configured_fraction_and_grace() -> None:
+    env = object.__new__(TokamakMagneticControlEnv)
+    env.config = SimpleNamespace(
+        reward=SimpleNamespace(kind="tcv_derivative"),
+        sim=SimpleNamespace(
+            terminate_on_current_limit=True,
+            current_termination_over_limit_a=0.0,
+            current_termination_grace_steps=2,
+            current_hard_termination_fraction=1.20,
+        ),
+    )
+    env.current_over_limit_steps = torch.zeros(3, dtype=torch.int64)
+    current_over_limit = torch.tensor([1000.0, 1000.0, 1000.0])
+    usage = torch.tensor([1.01, 1.19, 1.21])
+
+    terminated, hard, grace = TokamakMagneticControlEnv._current_termination(
+        env,
+        current_over_limit=current_over_limit,
+        current_usage_fraction=usage,
+    )
+    assert terminated.tolist() == [False, False, False]
+    assert hard.tolist() == [False, False, False]
+    assert grace.tolist() == [False, False, False]
+    assert env.current_over_limit_steps.tolist() == [0, 0, 1]
+
+    terminated, hard, grace = TokamakMagneticControlEnv._current_termination(
+        env,
+        current_over_limit=current_over_limit,
+        current_usage_fraction=usage,
+    )
+    assert terminated.tolist() == [False, False, True]
+    assert hard.tolist() == [False, False, False]
+    assert grace.tolist() == [False, False, True]
+
+
+def test_tcv_derivative_current_termination_grace_one_is_immediate() -> None:
+    env = object.__new__(TokamakMagneticControlEnv)
+    env.config = SimpleNamespace(
+        reward=SimpleNamespace(kind="tcv_derivative"),
+        sim=SimpleNamespace(
+            terminate_on_current_limit=True,
+            current_termination_over_limit_a=0.0,
+            current_termination_grace_steps=1,
+            current_hard_termination_fraction=1.20,
+        ),
+    )
+    env.current_over_limit_steps = torch.zeros(2, dtype=torch.int64)
+
+    terminated, _hard, grace = TokamakMagneticControlEnv._current_termination(
+        env,
+        current_over_limit=torch.tensor([0.0, 0.0]),
+        current_usage_fraction=torch.tensor([1.20, 1.2001]),
+    )
+    assert terminated.tolist() == [False, True]
+    assert grace.tolist() == [False, True]
 
 
 def test_critic_reads_normalized_env_actions_without_extra_squash() -> None:

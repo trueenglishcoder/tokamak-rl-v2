@@ -90,7 +90,7 @@ sim["terminate_on_boundary_loss"] = True
 sim["terminate_on_current_limit"] = True
 sim["current_termination_over_limit_a"] = 0.0
 sim["current_termination_grace_steps"] = 1
-sim["current_hard_termination_fraction"] = 1.01
+sim["current_hard_termination_fraction"] = 1.20
 sim["current_saturation_fraction"] = 1.0
 
 reference = cfg.setdefault("reference", {})
@@ -185,7 +185,7 @@ checks = {
     "sim.terminate_on_current_limit": cfg["sim"]["terminate_on_current_limit"] is True,
     "sim.current_termination_over_limit_a": float(cfg["sim"]["current_termination_over_limit_a"]) == 0.0,
     "sim.current_termination_grace_steps": int(cfg["sim"]["current_termination_grace_steps"]) == 1,
-    "sim.current_hard_termination_fraction": float(cfg["sim"]["current_hard_termination_fraction"]) == 1.01,
+    "sim.current_hard_termination_fraction": float(cfg["sim"]["current_hard_termination_fraction"]) == 1.20,
     "sim.max_episode_steps": int(cfg["sim"]["max_episode_steps"]) == 2000,
     "reference.duration_s": float(cfg["reference"]["duration_s"]) == 2.0,
     "observation.target_preview_steps": int(cfg["observation"]["target_preview_steps"]) == 10,
@@ -222,7 +222,7 @@ cat > "${TRAIN_OUTPUT}/f002_reward.json" <<'JSON'
     "terminate_on_current_limit": true,
     "current_termination_over_limit_a": 0.0,
     "current_termination_grace_steps": 1,
-    "current_hard_termination_fraction": 1.01
+    "current_hard_termination_fraction": 1.20
   }
 }
 JSON

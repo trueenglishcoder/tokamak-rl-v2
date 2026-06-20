@@ -422,7 +422,7 @@ class TokamakMagneticControlEnv:
         current_usage_fraction: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor]:
         if self.config.reward.kind == "tcv_derivative":
-            over = current_usage_fraction > 1.0
+            over = current_usage_fraction > float(self.config.sim.current_hard_termination_fraction)
         else:
             over = current_over_limit > float(self.config.sim.current_termination_over_limit_a)
         self.current_over_limit_steps = torch.where(
@@ -434,8 +434,9 @@ class TokamakMagneticControlEnv:
             zeros = torch.zeros_like(over, dtype=torch.bool)
             return zeros, zeros, zeros
         if self.config.reward.kind == "tcv_derivative":
+            grace = over & (self.current_over_limit_steps >= int(self.config.sim.current_termination_grace_steps))
             zeros = torch.zeros_like(over, dtype=torch.bool)
-            return over, over, zeros
+            return grace, zeros, grace
         hard = current_usage_fraction > float(self.config.sim.current_hard_termination_fraction)
         grace = over & (self.current_over_limit_steps >= int(self.config.sim.current_termination_grace_steps))
         return hard | grace, hard, grace

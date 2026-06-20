@@ -13,6 +13,7 @@ from scripts.build_reward_sweep_manifest import (
     PROFILE_SATURATION,
     PROFILE_TCV_DERIVATIVE,
     PROFILE_TCV_DELTA_JDOT,
+    PROFILE_TCV_DELTA_TERMINATION_F002,
     PROFILE_TCV_QUALITY,
     build_manifest,
     build_variants,
@@ -211,7 +212,7 @@ def test_tcv_derivative_manifest_has_36_and_operational_termination_overrides() 
         "terminate_on_current_limit": True,
         "current_termination_over_limit_a": 0.0,
         "current_termination_grace_steps": 1,
-        "current_hard_termination_fraction": 1.01,
+        "current_hard_termination_fraction": 1.20,
         "current_saturation_fraction": 1.0,
     }
 
@@ -290,6 +291,35 @@ def test_tcv_delta_jdot_focused_manifest_has_12_variants() -> None:
     assert variants[0]["reward"]["current_weight"] == 1.5
     assert variants[-1]["reward"]["current_weight"] == 3.0
     assert all(variant["sim"]["action_contract"] == "delta_jdot" for variant in variants)
+
+
+def test_tcv_delta_termination_f002_manifest_has_12_termination_variants() -> None:
+    manifest = build_manifest(
+        "broad",
+        profile=PROFILE_TCV_DELTA_TERMINATION_F002,
+        runs_per_array_task=1,
+        array_task_count=12,
+    )
+    variants = manifest["variants"]
+    assert manifest["variant_count"] == 12
+    assert manifest["runs_per_array_task"] == 1
+    assert manifest["array_task_count"] == 12
+    assert variants[0]["folder"] == "t000_f110_g001"
+    assert variants[-1]["folder"] == "t011_f130_g025"
+    assert {variant["reward"]["shape_mean_weight"] for variant in variants} == {3.2}
+    assert {variant["reward"]["shape_max_weight"] for variant in variants} == {0.8}
+    assert {variant["reward"]["ip_weight"] for variant in variants} == {1.8}
+    assert {variant["reward"]["current_weight"] for variant in variants} == {0.75}
+    assert {variant["reward"]["derivative_weight"] for variant in variants} == {0.1875}
+    assert {variant["reward"]["actuator_saturation_weight"] for variant in variants} == {0.1875}
+    assert {variant["reward"]["terminal_reward"] for variant in variants} == {-5.0}
+    assert {variant["sim"]["terminate_on_boundary_loss"] for variant in variants} == {True}
+    assert {variant["sim"]["terminate_on_current_limit"] for variant in variants} == {True}
+    assert {variant["sim"]["action_contract"] for variant in variants} == {"delta_jdot"}
+    assert {variant["sim"]["delta_derivative_scale_aps"] for variant in variants} == {500000.0}
+    assert {variant["sim"]["current_hard_termination_fraction"] for variant in variants} == {1.10, 1.15, 1.20, 1.30}
+    assert {variant["sim"]["current_termination_grace_steps"] for variant in variants} == {1, 8, 25}
+    assert all(variant["sim"]["current_termination_over_limit_a"] == 0.0 for variant in variants)
 
 
 def test_current_constraint_focused_manifest_uses_center_soft_fractions() -> None:
