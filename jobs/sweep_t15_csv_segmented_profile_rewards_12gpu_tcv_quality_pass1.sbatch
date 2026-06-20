@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=tokamak-rl-v2-tcvq-p1
+#SBATCH --job-name=tokamak-rl-v2-tcvd-p1
 #SBATCH --partition=batch
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --array=0-11%12
-#SBATCH --output=slurm_logs/tokamak-rl-v2-tcv-quality-half-slope-pass1-1gpu-%A_%a.out
-#SBATCH --error=slurm_logs/tokamak-rl-v2-tcv-quality-half-slope-pass1-1gpu-%A_%a.err
+#SBATCH --output=slurm_logs/tokamak-rl-v2-tcv-derivative-half-slope-pass1-1gpu-%A_%a.out
+#SBATCH --error=slurm_logs/tokamak-rl-v2-tcv-derivative-half-slope-pass1-1gpu-%A_%a.err
 
 set -euo pipefail
 
@@ -21,7 +21,7 @@ export ROLLOUT_CHUNK_LENGTH=${ROLLOUT_CHUNK_LENGTH:-64}
 export UPDATES_PER_ROLLOUT_CHUNK=${UPDATES_PER_ROLLOUT_CHUNK:-32}
 export WANDB_MODE=${WANDB_MODE:-online}
 export WANDB__SERVICE_WAIT=${WANDB__SERVICE_WAIT:-30}
-export SWEEP_ROOT_PREFIX=${SWEEP_ROOT_PREFIX:-outputs/t15_reward_sweep48_tcv_quality_half_slope_2m5m}
+export SWEEP_ROOT_PREFIX=${SWEEP_ROOT_PREFIX:-outputs/t15_reward_sweep48_tcv_derivative_half_slope_2m5m}
 
 srun \
   --container-image /scratch/$USER/tokamak/tokamak-rl-v2.sqsh \
@@ -81,7 +81,7 @@ PYPREFLIGHT
     ARRAY_TASK=${SLURM_ARRAY_TASK_ID:-0}
     SWEEP_PARENT_ROOT=${SWEEP_ROOT_PREFIX}_${ARRAY_JOB}
     SWEEP_ROOT=${SWEEP_PARENT_ROOT}/pass1_broad
-    SWEEP_WANDB_PROJECT=tokamak-rl-v2-tcv-quality-half-slope-pass1-${ARRAY_JOB}
+    SWEEP_WANDB_PROJECT=tokamak-rl-v2-tcv-derivative-half-slope-pass1-${ARRAY_JOB}
     MANIFEST=${SWEEP_ROOT}/variants.json
 
     mkdir -p "${SWEEP_ROOT}" "${SWEEP_ROOT}/generated_configs"
@@ -124,5 +124,5 @@ PYPREFLIGHT
         --wandb-mode "${WANDB_MODE}"
     done
 
-    echo "tcv-quality reward sweep pass1 array task completed at $(date -Is)"
+    echo "tcv-derivative reward sweep pass1 array task completed at $(date -Is)"
   '

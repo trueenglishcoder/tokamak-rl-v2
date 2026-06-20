@@ -12,6 +12,7 @@ PROFILE_CURRENT_CONSTRAINT = "current_constraint"
 PROFILE_FIXED_HORIZON = "fixed_horizon"
 PROFILE_SATURATION = "saturation"
 PROFILE_TCV_QUALITY = "tcv_quality"
+PROFILE_TCV_DERIVATIVE = "tcv_derivative"
 
 BROAD_SHAPE_REGIMES = [
     {"id": "s0", "shape_mean_weight": 1.5, "shape_max_weight": 0.375},
@@ -440,7 +441,7 @@ TCV_QUALITY_FOCUS_SAFETY_FACTORS = [
 ]
 
 TCV_QUALITY_FIXED_REWARD = {
-    "kind": "tcv_quality",
+    "kind": "tcv_quality_legacy",
     "shape_mean_scale_m": 0.03,
     "shape_max_scale_m": 0.08,
     "ip_scale_a": 15000.0,
@@ -449,6 +450,27 @@ TCV_QUALITY_FIXED_REWARD = {
     "reward_scale": 1.0,
     "smoothmax_alpha": 5.0,
     "terminal_reward": -20.0,
+    "terminal_remaining_cost": 0.0,
+    "current_soft_fraction": 0.90,
+    "current_bad_fraction": 1.00,
+    "derivative_soft_fraction": 0.90,
+    "derivative_bad_fraction": 1.10,
+    "current_usage_weight": 0.0,
+    "derivative_usage_weight": 0.0,
+    "action_weight": 0.0,
+    "delta_action_weight": 0.0,
+}
+
+TCV_DERIVATIVE_FIXED_REWARD = {
+    "kind": "tcv_derivative",
+    "shape_mean_scale_m": 0.03,
+    "shape_max_scale_m": 0.08,
+    "ip_scale_a": 15000.0,
+    "boundary_missing_error_m": 1.0,
+    "boundary_missing_weight": 20.0,
+    "reward_scale": 0.01,
+    "smoothmax_alpha": -5.0,
+    "terminal_reward": -5.0,
     "terminal_remaining_cost": 0.0,
     "current_soft_fraction": 0.90,
     "current_bad_fraction": 1.00,
@@ -469,12 +491,23 @@ TCV_QUALITY_FIXED_SIM = {
     "current_saturation_fraction": 1.02,
 }
 
+TCV_DERIVATIVE_FIXED_SIM = {
+    "terminate_on_boundary_loss": True,
+    "terminate_on_current_limit": True,
+    "current_termination_over_limit_a": 0.0,
+    "current_termination_grace_steps": 1,
+    "current_hard_termination_fraction": 1.01,
+    "current_saturation_fraction": 1.0,
+}
+
 
 def _rounded(value: float) -> float:
     return float(round(float(value), 8))
 
 
 def _check_profile(profile: str) -> str:
+    if profile == PROFILE_TCV_DERIVATIVE:
+        return PROFILE_TCV_DERIVATIVE
     if profile not in {PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON, PROFILE_SATURATION, PROFILE_TCV_QUALITY}:
         raise ValueError(f"Unknown reward sweep profile: {profile}")
     return profile
@@ -488,6 +521,8 @@ def _fixed_reward(profile: str) -> dict[str, Any]:
         return dict(FIXED_HORIZON_FIXED_REWARD)
     if profile == PROFILE_SATURATION:
         return dict(SATURATION_FIXED_REWARD)
+    if profile == PROFILE_TCV_DERIVATIVE:
+        return dict(TCV_DERIVATIVE_FIXED_REWARD)
     if profile == PROFILE_TCV_QUALITY:
         return dict(TCV_QUALITY_FIXED_REWARD)
     return dict(FIXED_REWARD)
@@ -501,6 +536,8 @@ def _fixed_sim(profile: str) -> dict[str, Any]:
         return dict(FIXED_HORIZON_FIXED_SIM)
     if profile == PROFILE_SATURATION:
         return dict(SATURATION_FIXED_SIM)
+    if profile == PROFILE_TCV_DERIVATIVE:
+        return dict(TCV_DERIVATIVE_FIXED_SIM)
     if profile == PROFILE_TCV_QUALITY:
         return dict(TCV_QUALITY_FIXED_SIM)
     return {}
@@ -514,7 +551,7 @@ def _broad_shape_regimes(profile: str) -> list[dict[str, Any]]:
         return FIXED_HORIZON_BROAD_SHAPE_REGIMES
     if profile == PROFILE_SATURATION:
         return SATURATION_BROAD_SHAPE_REGIMES
-    if profile == PROFILE_TCV_QUALITY:
+    if profile in {PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE}:
         return TCV_QUALITY_BROAD_SHAPE_REGIMES
     return BROAD_SHAPE_REGIMES
 
@@ -527,7 +564,7 @@ def _broad_ip_regimes(profile: str) -> list[dict[str, Any]]:
         return FIXED_HORIZON_BROAD_IP_REGIMES
     if profile == PROFILE_SATURATION:
         return SATURATION_BROAD_IP_REGIMES
-    if profile == PROFILE_TCV_QUALITY:
+    if profile in {PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE}:
         return TCV_QUALITY_BROAD_IP_REGIMES
     return BROAD_IP_REGIMES
 
@@ -540,7 +577,7 @@ def _broad_safety_regimes(profile: str) -> list[dict[str, Any]]:
         return FIXED_HORIZON_BROAD_SAFETY_REGIMES
     if profile == PROFILE_SATURATION:
         return SATURATION_BROAD_SAFETY_REGIMES
-    if profile == PROFILE_TCV_QUALITY:
+    if profile in {PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE}:
         return TCV_QUALITY_BROAD_SAFETY_REGIMES
     return BROAD_ACTUATOR_REGIMES
 
@@ -553,7 +590,7 @@ def _focus_shape_factors(profile: str) -> list[dict[str, Any]]:
         return FIXED_HORIZON_FOCUS_SHAPE_FACTORS
     if profile == PROFILE_SATURATION:
         return SATURATION_FOCUS_SHAPE_FACTORS
-    if profile == PROFILE_TCV_QUALITY:
+    if profile in {PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE}:
         return TCV_QUALITY_FOCUS_SHAPE_FACTORS
     return FOCUS_SHAPE_FACTORS
 
@@ -566,7 +603,7 @@ def _focus_ip_factors(profile: str) -> list[dict[str, Any]]:
         return FIXED_HORIZON_FOCUS_IP_FACTORS
     if profile == PROFILE_SATURATION:
         return SATURATION_FOCUS_IP_FACTORS
-    if profile == PROFILE_TCV_QUALITY:
+    if profile in {PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE}:
         return TCV_QUALITY_FOCUS_IP_FACTORS
     return FOCUS_IP_FACTORS
 
@@ -579,7 +616,7 @@ def _focus_safety_factors(profile: str) -> list[dict[str, Any]]:
         return FIXED_HORIZON_FOCUS_SAFETY_FACTORS
     if profile == PROFILE_SATURATION:
         return SATURATION_FOCUS_SAFETY_FACTORS
-    if profile == PROFILE_TCV_QUALITY:
+    if profile in {PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE}:
         return TCV_QUALITY_FOCUS_SAFETY_FACTORS
     return FOCUS_ACTUATOR_FACTORS
 
@@ -894,7 +931,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pass", dest="sweep_pass", choices=("broad", "focused"), default="broad")
     parser.add_argument(
         "--profile",
-        choices=(PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON, PROFILE_SATURATION, PROFILE_TCV_QUALITY),
+        choices=(PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON, PROFILE_SATURATION, PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE),
         default=PROFILE_LEGAL,
     )
     parser.add_argument("--center", type=Path, default=None, help="physical_best_candidate.json for focused pass")

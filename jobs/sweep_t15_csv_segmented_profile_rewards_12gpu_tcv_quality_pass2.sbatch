@@ -1,17 +1,17 @@
 #!/bin/bash
-#SBATCH --job-name=tokamak-rl-v2-tcvq-p2
+#SBATCH --job-name=tokamak-rl-v2-tcvd-p2
 #SBATCH --partition=batch
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --array=0-11%12
-#SBATCH --output=slurm_logs/tokamak-rl-v2-tcv-quality-half-slope-pass2-1gpu-%A_%a.out
-#SBATCH --error=slurm_logs/tokamak-rl-v2-tcv-quality-half-slope-pass2-1gpu-%A_%a.err
+#SBATCH --output=slurm_logs/tokamak-rl-v2-tcv-derivative-half-slope-pass2-1gpu-%A_%a.out
+#SBATCH --error=slurm_logs/tokamak-rl-v2-tcv-derivative-half-slope-pass2-1gpu-%A_%a.err
 
 set -euo pipefail
 
 cd /scratch/$USER/tokamak
 
-: "${PASS1_ROOT:?Set PASS1_ROOT to outputs/t15_reward_sweep48_tcv_quality_half_slope_2m5m_<PASS1_JOBID>}"
+: "${PASS1_ROOT:?Set PASS1_ROOT to outputs/t15_reward_sweep48_tcv_derivative_half_slope_2m5m_<PASS1_JOBID>}"
 
 export POLICY_CONFIG=configs/experiments/t15_csv_initial_segmented_profile_boundary_mpo.yaml
 export TRAIN_ENV_STEPS=${TRAIN_ENV_STEPS:-5000000}
@@ -81,7 +81,7 @@ PYPREFLIGHT
     ARRAY_TASK=${SLURM_ARRAY_TASK_ID:-0}
     PASS1_NAME=$(basename "${PASS1_ROOT}")
     SWEEP_ROOT=${PASS1_ROOT}/pass2_focused
-    SWEEP_WANDB_PROJECT=tokamak-rl-v2-tcv-quality-half-slope-pass2-${PASS1_NAME}
+    SWEEP_WANDB_PROJECT=tokamak-rl-v2-tcv-derivative-half-slope-pass2-${PASS1_NAME}
     MANIFEST=${SWEEP_ROOT}/variants.json
 
     mkdir -p "${SWEEP_ROOT}" "${SWEEP_ROOT}/generated_configs"
@@ -121,5 +121,5 @@ PYPREFLIGHT
       --wandb-project "${SWEEP_WANDB_PROJECT}" \
       --wandb-mode "${WANDB_MODE}"
 
-    echo "tcv-quality reward sweep pass2 array task completed at $(date -Is)"
+    echo "tcv-derivative reward sweep pass2 array task completed at $(date -Is)"
   '

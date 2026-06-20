@@ -1455,6 +1455,8 @@ class Trainer:
             raise ValueError(f"checkpoint critic action input convention mismatch: {path}")
         if data.get("schema", {}).get("observation_kind") != self.schema.get("observation_kind"):
             raise ValueError(f"checkpoint observation schema mismatch: {path}")
+        if data.get("schema", {}).get("action_contract") != self.schema.get("action_contract"):
+            raise ValueError(f"checkpoint action contract mismatch: {path}")
         if int(data.get("schema", {}).get("obs_dim", -1)) != int(self.schema.get("obs_dim", -2)):
             raise ValueError(f"checkpoint observation dimension mismatch: {path}")
         if int(data.get("schema", {}).get("action_dim", -1)) != int(self.schema.get("action_dim", -2)):

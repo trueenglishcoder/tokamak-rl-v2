@@ -13,7 +13,7 @@ from tokamak_rl_v2.config import load_experiment_config
 from tokamak_rl_v2.config.schema import IpReferenceConfig, LearnerConfig, RewardConfig
 from tokamak_rl_v2.env import BatchStep, TokamakMagneticControlEnv
 from tokamak_rl_v2.networks import FeedForwardGaussianActor, RecurrentQCritic
-from tokamak_rl_v2.rewards import T15PhysicalReward, T15TCVQualityReward
+from tokamak_rl_v2.rewards import T15PhysicalReward, T15TCVDerivativeReward, T15TCVQualityReward
 from tokamak_rl_v2.export.cli import main as export_cli_main
 from tokamak_rl_v2.training.mpo import MaximumAPosterioriPolicyOptimiser
 from tokamak_rl_v2.training.policy_pipeline import _ArrayReferenceScenario, _write_baseline_report, evaluate_policy_gates, run_reset_sanity
@@ -173,6 +173,50 @@ def test_tcv_quality_reward_improves_with_better_physical_errors() -> None:
     assert rb.reward[1] > rb.reward[2]
     assert rb.components["physical_cost"][2] > rb.components["physical_cost"][1]
     assert rb.components["actuator_saturation_loss"][2] > 0.0
+
+
+def test_tcv_derivative_reward_uses_terminal_reward_replacement() -> None:
+    reward_fn = T15TCVDerivativeReward(
+        RewardConfig(
+            kind="tcv_derivative",
+            reward_scale=0.01,
+            smoothmax_alpha=-5.0,
+            terminal_reward=-5.0,
+            terminal_remaining_cost=0.0,
+            shape_mean_weight=1.0,
+            shape_max_weight=0.25,
+            ip_weight=1.0,
+            current_weight=1.0,
+            derivative_weight=0.5,
+            actuator_saturation_weight=0.5,
+            boundary_missing_weight=20.0,
+            current_usage_weight=0.0,
+            derivative_usage_weight=0.0,
+            action_weight=0.0,
+            delta_action_weight=0.0,
+        ),
+        control_rate_hz=1000.0,
+    )
+    ref = torch.zeros((2, 32, 2), dtype=torch.float32)
+    action = torch.zeros((2, 9), dtype=torch.float32)
+    rb = reward_fn(
+        ip=torch.tensor([200000.0, 200000.0]),
+        ip_ref=torch.tensor([200000.0, 200000.0]),
+        boundary_points=ref,
+        reference_points=ref,
+        action=action,
+        previous_action=action,
+        requested_action=action,
+        current_over_limit_a=torch.zeros((2,), dtype=torch.float32),
+        current_usage_fraction=torch.full((2,), 0.5, dtype=torch.float32),
+        current_margin_fraction=torch.full((2,), 0.5, dtype=torch.float32),
+        derivative_usage=torch.zeros((2,), dtype=torch.float32),
+        boundary_found=torch.tensor([True, True]),
+        terminated=torch.tensor([False, True]),
+    )
+    assert float(rb.reward[0]) > 0.0
+    assert float(rb.reward[1]) == pytest.approx(-0.05)
+    assert float(rb.components["terminal_total_penalty"][1]) == pytest.approx(-0.05)
 
 
 def test_physical_reward_penalizes_rejected_actuator_command() -> None:
@@ -570,6 +614,48 @@ def test_current_aware_saturation_clips_command_before_current_runaway() -> None
     assert float(np.nanmax(comps["actuator_saturation_loss"])) > 0.0
     assert float(np.nanmax(comps["current_usage_fraction"])) > 1.0
     assert bool(result.terminated[0].item()) is False
+
+
+def test_tcv_derivative_mode_does_not_project_current_runaway_command() -> None:
+    cfg = load_experiment_config(CONFIG)
+    cfg = replace(
+        cfg,
+        sim=replace(
+            cfg.sim,
+            compute_backend="cpu",
+            max_episode_steps=4,
+            terminate_on_boundary_loss=True,
+            terminate_on_current_limit=True,
+            current_saturation_fraction=1.0,
+        ),
+        reward=replace(
+            cfg.reward,
+            kind="tcv_derivative",
+            reward_scale=0.01,
+            smoothmax_alpha=-5.0,
+            terminal_reward=-5.0,
+            terminal_remaining_cost=0.0,
+            current_usage_weight=0.0,
+            derivative_usage_weight=0.0,
+            action_weight=0.0,
+            delta_action_weight=0.0,
+        ),
+    )
+    env = TokamakMagneticControlEnv(cfg, batch_size=1, device="cpu", seed=12)
+    env.reset()
+    limit = float(env.current_limits[0].item())
+    env._cpu_models[0].state.pfc_currents[0] = limit - 1.0
+    action = torch.zeros((1, env.action_dim), dtype=torch.float32)
+    action[0, 0] = 1.0
+    result = env.step(action)
+    comps = result.info["reward_components"]
+    assert torch.allclose(result.requested_action, action)
+    assert torch.allclose(result.applied_action, action)
+    assert env.normalization()["action_contract"] == "tcv_derivative_v1"
+    assert "current_saturation_fraction" not in env.normalization()
+    assert bool(result.terminated[0].item()) is True
+    assert float(np.nanmax(comps["terminated_current"])) == pytest.approx(1.0)
+    assert float(np.nanmax(comps["action_saturation_delta_rms"])) == pytest.approx(0.0)
 
 
 def test_current_aware_saturation_leaves_safe_command_unchanged() -> None:

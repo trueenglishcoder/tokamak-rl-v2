@@ -11,6 +11,7 @@ from scripts.build_reward_sweep_manifest import (
     PROFILE_CURRENT_CONSTRAINT,
     PROFILE_FIXED_HORIZON,
     PROFILE_SATURATION,
+    PROFILE_TCV_DERIVATIVE,
     PROFILE_TCV_QUALITY,
     build_manifest,
     build_variants,
@@ -183,14 +184,16 @@ def test_saturation_broad_manifest_has_36_and_saturation_overrides() -> None:
     assert saturation_weights == {"a0": 2.0, "a1": 4.0, "a2": 8.0, "a3": 12.0}
 
 
-def test_tcv_quality_manifest_has_36_and_operational_termination_overrides() -> None:
-    variants = build_variants("broad", profile=PROFILE_TCV_QUALITY)
+def test_tcv_derivative_manifest_has_36_and_operational_termination_overrides() -> None:
+    variants = build_variants("broad", profile=PROFILE_TCV_DERIVATIVE)
     assert len(variants) == 36
     assert variants[0]["folder"] == "b000_s0_i0_a0"
     assert variants[-1]["folder"] == "b035_s2_i2_a3"
     first = variants[0]
-    assert first["reward"]["kind"] == "tcv_quality"
-    assert first["reward"]["smoothmax_alpha"] == 5.0
+    assert first["reward"]["kind"] == "tcv_derivative"
+    assert first["reward"]["smoothmax_alpha"] == -5.0
+    assert first["reward"]["reward_scale"] == 0.01
+    assert first["reward"]["terminal_reward"] == -5.0
     assert first["reward"]["ip_scale_a"] == 15000.0
     assert first["reward"]["shape_mean_weight"] == 1.0
     assert first["reward"]["shape_max_weight"] == 0.25
@@ -203,14 +206,14 @@ def test_tcv_quality_manifest_has_36_and_operational_termination_overrides() -> 
     assert first["sim"] == {
         "terminate_on_boundary_loss": True,
         "terminate_on_current_limit": True,
-        "current_termination_over_limit_a": 10000.0,
-        "current_termination_grace_steps": 25,
-        "current_hard_termination_fraction": 1.03,
-        "current_saturation_fraction": 1.02,
+        "current_termination_over_limit_a": 0.0,
+        "current_termination_grace_steps": 1,
+        "current_hard_termination_fraction": 1.01,
+        "current_saturation_fraction": 1.0,
     }
 
 
-def test_tcv_quality_focused_manifest_has_12_variants() -> None:
+def test_tcv_derivative_focused_manifest_has_12_variants() -> None:
     center = {
         "shape_mean_weight": 2.0,
         "shape_max_weight": 0.5,
@@ -222,7 +225,7 @@ def test_tcv_quality_focused_manifest_has_12_variants() -> None:
     manifest = build_manifest(
         "focused",
         center_reward=center,
-        profile=PROFILE_TCV_QUALITY,
+        profile=PROFILE_TCV_DERIVATIVE,
         runs_per_array_task=1,
         array_task_count=12,
     )
@@ -230,7 +233,7 @@ def test_tcv_quality_focused_manifest_has_12_variants() -> None:
     assert manifest["variant_count"] == 12
     assert variants[0]["folder"] == "f000_sf0_if0_af0"
     assert variants[-1]["folder"] == "f011_sf2_if1_af1"
-    assert variants[0]["reward"]["kind"] == "tcv_quality"
+    assert variants[0]["reward"]["kind"] == "tcv_derivative"
     assert variants[0]["reward"]["current_weight"] == 1.5
     assert variants[-1]["reward"]["current_weight"] == 3.0
 

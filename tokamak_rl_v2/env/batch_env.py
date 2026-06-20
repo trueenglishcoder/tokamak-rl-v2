@@ -292,7 +292,7 @@ class TokamakMagneticControlEnv:
         action = torch.as_tensor(action, dtype=torch.float32, device=self.device).reshape(self.batch_size, self.action_dim)
         commanded = torch.clamp(action, -1.0, 1.0)
         requested_action = torch.clamp(commanded + self.action_offset, -1.0, 1.0)
-        applied_action = self._saturate_action_to_current_limits(requested_action)
+        applied_action = self._apply_action_contract(requested_action)
         physical = applied_action * self.derivative_limits[None, :]
         previous_action = self.previous_action.detach().clone()
         if self.config.sim.compute_backend == "gpu":
@@ -383,13 +383,21 @@ class TokamakMagneticControlEnv:
         )
         return torch.clamp(saturated_physical / scale[None, :], -1.0, 1.0)
 
+    def _apply_action_contract(self, requested_action: Tensor) -> Tensor:
+        if self.config.reward.kind == "tcv_derivative":
+            return torch.clamp(requested_action, -1.0, 1.0)
+        return self._saturate_action_to_current_limits(requested_action)
+
     def _current_termination(
         self,
         *,
         current_over_limit: Tensor,
         current_usage_fraction: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor]:
-        over = current_over_limit > float(self.config.sim.current_termination_over_limit_a)
+        if self.config.reward.kind == "tcv_derivative":
+            over = current_usage_fraction > 1.0
+        else:
+            over = current_over_limit > float(self.config.sim.current_termination_over_limit_a)
         self.current_over_limit_steps = torch.where(
             over,
             self.current_over_limit_steps + 1,
@@ -398,6 +406,9 @@ class TokamakMagneticControlEnv:
         if not self.config.sim.terminate_on_current_limit:
             zeros = torch.zeros_like(over, dtype=torch.bool)
             return zeros, zeros, zeros
+        if self.config.reward.kind == "tcv_derivative":
+            zeros = torch.zeros_like(over, dtype=torch.bool)
+            return over, over, zeros
         hard = current_usage_fraction > float(self.config.sim.current_hard_termination_fraction)
         grace = over & (self.current_over_limit_steps >= int(self.config.sim.current_termination_grace_steps))
         return hard | grace, hard, grace
@@ -733,10 +744,11 @@ class TokamakMagneticControlEnv:
             "target_preview_steps": int(self.config.observation.target_preview_steps),
             "target_preview_stride": int(self.config.observation.target_preview_stride),
             "action_scale": float(self.config.sim.action_scale),
+            "action_contract": self._action_contract_name(),
         }
 
     def normalization(self) -> dict[str, object]:
-        return {
+        out = {
             "ip_scale": 5.0e5,
             "radius_scale": 1.0,
             "current_scale": self.current_limits.detach().cpu().numpy().astype(float).tolist(),
@@ -744,8 +756,16 @@ class TokamakMagneticControlEnv:
             "critic_psi_normalization": "per_reset_standardization",
             "t_step": float(self.cfg.physics.t_step),
             "actuator_tau": float(self.cfg.physics.actuator_tau),
-            "current_saturation_fraction": float(self.config.sim.current_saturation_fraction),
+            "action_contract": self._action_contract_name(),
         }
+        if self.config.reward.kind != "tcv_derivative":
+            out["current_saturation_fraction"] = float(self.config.sim.current_saturation_fraction)
+        return out
+
+    def _action_contract_name(self) -> str:
+        if self.config.reward.kind == "tcv_derivative":
+            return "tcv_derivative_v1"
+        return "requested_with_current_aware_saturation_v2"
 
 
     def state_dict(self) -> dict[str, object]:

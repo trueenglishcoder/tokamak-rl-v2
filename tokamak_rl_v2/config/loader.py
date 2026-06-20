@@ -407,6 +407,13 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
         raise ValueError("sim.current_hard_termination_fraction must be finite and > 1")
     if not math.isfinite(float(cfg.sim.current_saturation_fraction)) or float(cfg.sim.current_saturation_fraction) < 1.0:
         raise ValueError("sim.current_saturation_fraction must be finite and >= 1")
+    if cfg.reward.kind == "tcv_derivative":
+        if not cfg.sim.terminate_on_boundary_loss:
+            raise ValueError("reward.kind=tcv_derivative requires sim.terminate_on_boundary_loss=true")
+        if not cfg.sim.terminate_on_current_limit:
+            raise ValueError("reward.kind=tcv_derivative requires sim.terminate_on_current_limit=true")
+        if not math.isclose(float(cfg.sim.current_saturation_fraction), 1.0, rel_tol=0.0, abs_tol=1.0e-12):
+            raise ValueError("reward.kind=tcv_derivative requires sim.current_saturation_fraction=1.0")
     _validate_reward_config(cfg.reward, prefix="reward")
     if cfg.randomization.ip_measurement_noise_a < 0.0 or cfg.randomization.current_measurement_noise_a < 0.0:
         raise ValueError("randomization noise values must be non-negative")
@@ -466,12 +473,18 @@ def _sign(value: float) -> int:
 
 
 def _validate_reward_config(reward: RewardConfig, *, prefix: str) -> None:
-    if reward.kind not in {"physical_cost", "tcv_quality"}:
-        raise ValueError(f"{prefix}.kind must be physical_cost or tcv_quality")
-    for name in ("shape_mean_scale_m", "shape_max_scale_m", "ip_scale_a", "reward_scale", "smoothmax_alpha"):
+    if reward.kind not in {"physical_cost", "tcv_quality", "tcv_quality_legacy", "tcv_derivative"}:
+        raise ValueError(f"{prefix}.kind must be physical_cost, tcv_quality_legacy, tcv_quality, or tcv_derivative")
+    for name in ("shape_mean_scale_m", "shape_max_scale_m", "ip_scale_a", "reward_scale"):
         value = float(getattr(reward, name))
         if not math.isfinite(value) or value <= 0.0:
             raise ValueError(f"{prefix}.{name} must be finite and positive")
+    if not math.isfinite(float(reward.smoothmax_alpha)) or float(reward.smoothmax_alpha) == 0.0:
+        raise ValueError(f"{prefix}.smoothmax_alpha must be finite and non-zero")
+    if reward.kind in {"tcv_quality", "tcv_quality_legacy"} and float(reward.smoothmax_alpha) <= 0.0:
+        raise ValueError(f"{prefix}.smoothmax_alpha must be positive for legacy tcv_quality")
+    if reward.kind == "tcv_derivative" and float(reward.smoothmax_alpha) >= 0.0:
+        raise ValueError(f"{prefix}.smoothmax_alpha must be negative for tcv_derivative worst-component aggregation")
     if not math.isfinite(float(reward.boundary_missing_error_m)) or float(reward.boundary_missing_error_m) < 0.0:
         raise ValueError(f"{prefix}.boundary_missing_error_m must be finite and non-negative")
     for name in (
@@ -506,6 +519,10 @@ def _validate_reward_config(reward: RewardConfig, *, prefix: str) -> None:
         raise ValueError(f"{prefix}.terminal_reward must be finite")
     if not math.isfinite(float(reward.terminal_remaining_cost)) or float(reward.terminal_remaining_cost) < 0.0:
         raise ValueError(f"{prefix}.terminal_remaining_cost must be finite and non-negative")
+    if reward.kind == "tcv_derivative":
+        for name in ("terminal_remaining_cost", "current_usage_weight", "derivative_usage_weight", "action_weight", "delta_action_weight"):
+            if abs(float(getattr(reward, name))) > 1.0e-12:
+                raise ValueError(f"{prefix}.{name} must be 0 for reward.kind=tcv_derivative")
 
 
 _STALE_REWARD_KEYS = {
