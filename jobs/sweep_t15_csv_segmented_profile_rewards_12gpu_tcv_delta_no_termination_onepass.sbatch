@@ -90,7 +90,7 @@ PYPREFLIGHT
     if [[ ! -f "${MANIFEST}" ]]; then
       LOCKDIR="${SWEEP_ROOT}/.manifest.lock"
       if mkdir "${LOCKDIR}" 2>/dev/null; then
-        trap 'rmdir "${LOCKDIR}" 2>/dev/null || true' EXIT
+        trap "rmdir \"\${LOCKDIR}\" 2>/dev/null || true" EXIT
         python3 scripts/build_reward_sweep_manifest.py \
           --output "${MANIFEST}" \
           --profile tcv_delta_no_termination \
