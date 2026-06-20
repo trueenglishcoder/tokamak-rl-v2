@@ -63,7 +63,7 @@ export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=${MASTER_PORT:-29571}
 export TRAIN_OUTPUT=${TRAIN_OUTPUT:-outputs/t15_csv_segmented_profile_v071_32gpu_500m_${SLURM_JOB_ID:-manual}}
 export RUN_NAME=${RUN_NAME:-t15_csv_segmented_profile_v071_32gpu_500m_${SLURM_JOB_ID:-manual}}
-export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-tokamak-rl-v2-v071-32gpu-${RUN_PRESET}}
+export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-tokamak-rl-v2-v071-32gpu-${RUN_PRESET}-${SLURM_JOB_ID:-manual}}
 export WANDB_MODE=${WANDB_MODE:-online}
 export WANDB__SERVICE_WAIT=${WANDB__SERVICE_WAIT:-60}
 
