@@ -13,6 +13,7 @@ except Exception:  # pragma: no cover - optional local fallback
 from tokamak_rl_v2.config.schema import (
     BoundaryReferenceConfig,
     CurrentSafetyLimits,
+    DeltaDerivativeLimits,
     ExperimentConfig,
     InitialRanges,
     IpReferenceConfig,
@@ -129,6 +130,19 @@ def _current_safety_limits(raw: Mapping[str, Any] | None) -> CurrentSafetyLimits
     )
 
 
+def _delta_derivative_limits(raw: Mapping[str, Any] | None) -> DeltaDerivativeLimits | None:
+    if not raw:
+        return None
+    allowed = {"pfc", "sol", "pfc_currents", "sol_currents", "pfc_delta_jdot", "sol_delta_jdot"}
+    _reject_unknown_keys(raw, allowed, prefix="delta_derivative_limits_aps")
+    pfc_raw = raw.get("pfc", raw.get("pfc_currents", raw.get("pfc_delta_jdot")))
+    sol_raw = raw.get("sol", raw.get("sol_currents", raw.get("sol_delta_jdot")))
+    return DeltaDerivativeLimits(
+        pfc=_float_sequence(pfc_raw, "delta_derivative_limits_aps.pfc"),
+        sol=_float_sequence(sol_raw, "delta_derivative_limits_aps.sol"),
+    )
+
+
 def _sim(raw: Mapping[str, Any], base: Path) -> SimConfig:
     _reject_stale_keys(raw, _STALE_SIM_KEYS, prefix="sim")
     if "shot_fragments" in raw:
@@ -157,6 +171,7 @@ def _sim(raw: Mapping[str, Any], base: Path) -> SimConfig:
         action_scale=float(raw.get("action_scale", 1.0)),
         action_contract=str(raw.get("action_contract", defaults.action_contract)),
         delta_derivative_scale_aps=float(raw.get("delta_derivative_scale_aps", defaults.delta_derivative_scale_aps)),
+        delta_derivative_limits_aps=_delta_derivative_limits(_mapping(raw.get("delta_derivative_limits_aps", {}), "delta_derivative_limits_aps")),
         terminate_on_boundary_loss=bool(raw.get("terminate_on_boundary_loss", True)),
         terminate_on_current_limit=bool(raw.get("terminate_on_current_limit", True)),
         current_termination_over_limit_a=float(raw.get("current_termination_over_limit_a", defaults.current_termination_over_limit_a)),
@@ -401,6 +416,8 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
         raise ValueError("sim.action_contract must be absolute_derivative or delta_jdot")
     if not math.isfinite(float(cfg.sim.delta_derivative_scale_aps)) or float(cfg.sim.delta_derivative_scale_aps) <= 0.0:
         raise ValueError("sim.delta_derivative_scale_aps must be finite and positive")
+    if cfg.sim.delta_derivative_limits_aps is not None:
+        cfg.sim.delta_derivative_limits_aps.validate()
     for name in ("current_limit_scale", "derivative_limit_scale"):
         value = float(getattr(cfg.sim, name))
         if not math.isfinite(value) or value <= 0.0:

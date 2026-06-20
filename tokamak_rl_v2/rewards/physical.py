@@ -71,6 +71,7 @@ class T15PhysicalReward:
         action_rms = torch.sqrt(torch.mean(action.pow(2), dim=-1))
         delta_action_rms = torch.sqrt(torch.mean(delta_action.pow(2), dim=-1))
         max_abs_action = torch.max(torch.abs(action), dim=-1).values
+        max_abs_delta_action = torch.max(torch.abs(delta_action), dim=-1).values
         saturation_reference = action if applied_delta_action is None else delta_action
         saturation_delta = requested - saturation_reference
         requested_action_rms = torch.sqrt(torch.mean(requested.pow(2), dim=-1))
@@ -238,6 +239,7 @@ class T15TCVQualityReward:
         action_rms = torch.sqrt(torch.mean(action.pow(2), dim=-1))
         delta_action_rms = torch.sqrt(torch.mean(delta_action.pow(2), dim=-1))
         max_abs_action = torch.max(torch.abs(action), dim=-1).values
+        max_abs_delta_action = torch.max(torch.abs(delta_action), dim=-1).values
         saturation_reference = action if applied_delta_action is None else delta_action
         saturation_delta = requested - saturation_reference
         requested_action_rms = torch.sqrt(torch.mean(requested.pow(2), dim=-1))
@@ -413,6 +415,7 @@ class T15TCVDerivativeReward:
         action_rms = torch.sqrt(torch.mean(action.pow(2), dim=-1))
         delta_action_rms = torch.sqrt(torch.mean(delta_action.pow(2), dim=-1))
         max_abs_action = torch.max(torch.abs(action), dim=-1).values
+        max_abs_delta_action = torch.max(torch.abs(delta_action), dim=-1).values
         saturation_reference = action if applied_delta_action is None else delta_action
         saturation_delta = requested - saturation_reference
         requested_action_rms = torch.sqrt(torch.mean(requested.pow(2), dim=-1))
@@ -425,7 +428,7 @@ class T15TCVDerivativeReward:
         shape_max_reward = _tcv_softplus(shape_error_max, bad=max(float(c.shape_max_scale_m), 1.0e-12), good=0.0)
         ip_reward = _tcv_softplus(ip_error, bad=max(float(c.ip_scale_a), 1.0e-12), good=0.0)
         current_reward = _tcv_clipped_linear(current_usage_fraction, bad=float(c.current_bad_fraction), good=float(c.current_soft_fraction))
-        derivative_reward = _tcv_softplus(max_abs_action, bad=float(c.derivative_bad_fraction), good=0.0)
+        derivative_reward = _tcv_softplus(max_abs_delta_action, bad=float(c.derivative_bad_fraction), good=0.0)
         actuator_saturation_loss = torch.mean(saturation_delta.pow(2), dim=-1)
         saturation_reward = _tcv_clipped_linear(
             torch.sqrt(torch.clamp(actuator_saturation_loss, min=0.0)),
@@ -505,6 +508,7 @@ class T15TCVDerivativeReward:
                 "derivative_usage": torch.clamp(derivative_usage, min=0.0),
                 "derivative_usage_mean_fraction": derivative_usage_mean,
                 "max_abs_action": max_abs_action,
+                "max_abs_delta_action": max_abs_delta_action,
                 "action_rms": action_rms,
                 "requested_action_rms": requested_action_rms,
                 "applied_action_rms": action_rms,
@@ -572,7 +576,7 @@ def _tcv_logistic(v: Tensor) -> Tensor:
 
 def _tcv_softplus(errors: Tensor, *, bad: float, good: float = 0.0) -> Tensor:
     low = -math.log(19.0)
-    return torch.clamp(2.0 * _tcv_logistic(_tcv_scale(errors, float(bad), float(good), low, 0.0)), 0.0, 1.0)
+    return torch.clamp(2.0 * _tcv_logistic(_tcv_scale(errors, float(good), float(bad), 0.0, low)), 0.0, 1.0)
 
 
 def _tcv_clipped_linear(errors: Tensor, *, bad: float, good: float = 0.0) -> Tensor:

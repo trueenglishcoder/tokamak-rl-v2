@@ -60,6 +60,28 @@ def _max_abs_derivative(times: list[float], values: list[list[float]], *, min_dt
     return max_values, usage
 
 
+def _derivative_series(times: list[float], values: list[list[float]], *, min_dt_s: float) -> list[list[float]]:
+    series: list[list[float]] = []
+    for prev_time, time, prev_row, row in zip(times[:-1], times[1:], values[:-1], values[1:]):
+        dt = float(time) - float(prev_time)
+        if not math.isfinite(dt) or dt < min_dt_s:
+            continue
+        series.append([(float(value) - float(prev_value)) / dt for prev_value, value in zip(prev_row, row)])
+    return series
+
+
+def _max_abs_delta_derivative(derivatives: list[list[float]]) -> list[float]:
+    if not derivatives:
+        return []
+    max_values = [0.0 for _ in derivatives[0]]
+    for prev_row, row in zip(derivatives[:-1], derivatives[1:]):
+        for idx, (prev_value, value) in enumerate(zip(prev_row, row)):
+            delta = abs(float(value) - float(prev_value))
+            if math.isfinite(delta):
+                max_values[idx] = max(max_values[idx], delta)
+    return max_values
+
+
 def analyze(root: Path, *, min_dt_s: float) -> dict[str, object]:
     coil_dir = root / "coils"
     paths = sorted(coil_dir.glob("t15md_*_coils.csv"))
@@ -70,6 +92,8 @@ def analyze(root: Path, *, min_dt_s: float) -> dict[str, object]:
     sol_current_max = [0.0 for _ in SOL_CURRENT_LIMITS]
     pfc_deriv_max = [0.0 for _ in PFC_CURRENT_LIMITS]
     sol_deriv_max = [0.0 for _ in SOL_CURRENT_LIMITS]
+    pfc_delta_deriv_max = [0.0 for _ in PFC_CURRENT_LIMITS]
+    sol_delta_deriv_max = [0.0 for _ in SOL_CURRENT_LIMITS]
     shot_rows: list[dict[str, object]] = []
 
     for path in paths:
@@ -79,11 +103,15 @@ def analyze(root: Path, *, min_dt_s: float) -> dict[str, object]:
         sol_abs, sol_usage = _max_abs(sol, SOL_CURRENT_LIMITS)
         pfc_deriv, pfc_deriv_usage = _max_abs_derivative(times, pfc, min_dt_s=min_dt_s, limit=PFC_DERIV_LIMIT)
         sol_deriv, sol_deriv_usage = _max_abs_derivative(times, sol, min_dt_s=min_dt_s, limit=SOL_DERIV_LIMIT)
+        pfc_delta_deriv = _max_abs_delta_derivative(_derivative_series(times, pfc, min_dt_s=min_dt_s))
+        sol_delta_deriv = _max_abs_delta_derivative(_derivative_series(times, sol, min_dt_s=min_dt_s))
 
         pfc_current_max = [max(a, b) for a, b in zip(pfc_current_max, pfc_abs)]
         sol_current_max = [max(a, b) for a, b in zip(sol_current_max, sol_abs)]
         pfc_deriv_max = [max(a, b) for a, b in zip(pfc_deriv_max, pfc_deriv)]
         sol_deriv_max = [max(a, b) for a, b in zip(sol_deriv_max, sol_deriv)]
+        pfc_delta_deriv_max = [max(a, b) for a, b in zip(pfc_delta_deriv_max, pfc_delta_deriv)]
+        sol_delta_deriv_max = [max(a, b) for a, b in zip(sol_delta_deriv_max, sol_delta_deriv)]
         shot_rows.append(
             {
                 "shot_id": shot_id,
@@ -92,6 +120,8 @@ def analyze(root: Path, *, min_dt_s: float) -> dict[str, object]:
                 "max_sol_current_usage": max(sol_usage) if sol_usage else 0.0,
                 "max_pfc_derivative_usage": max(pfc_deriv_usage) if pfc_deriv_usage else 0.0,
                 "max_sol_derivative_usage": max(sol_deriv_usage) if sol_deriv_usage else 0.0,
+                "max_pfc_delta_derivative": max(pfc_delta_deriv) if pfc_delta_deriv else 0.0,
+                "max_sol_delta_derivative": max(sol_delta_deriv) if sol_delta_deriv else 0.0,
             }
         )
 
@@ -114,6 +144,14 @@ def analyze(root: Path, *, min_dt_s: float) -> dict[str, object]:
             "sol_current": sol_current_max,
             "pfc_derivative": pfc_deriv_max,
             "sol_derivative": sol_deriv_max,
+            "pfc_delta_derivative": pfc_delta_deriv_max,
+            "sol_delta_derivative": sol_delta_deriv_max,
+        },
+        "recommended_limits": {
+            "delta_derivative_aps_plus_20pct": {
+                "pfc": [1.2 * value for value in pfc_delta_deriv_max],
+                "sol": [1.2 * value for value in sol_delta_deriv_max],
+            },
         },
         "max_usage": {
             "pfc_current": pfc_current_usage,

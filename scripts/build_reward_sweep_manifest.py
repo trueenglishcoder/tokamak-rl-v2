@@ -506,6 +506,22 @@ TCV_DERIVATIVE_FIXED_REWARD = {
     "delta_action_weight": 0.0,
 }
 
+TCV_DELTA_DERIVATIVE_LIMITS_APS = {
+    "pfc": {
+        "pfc0": 163347.0,
+        "pfc1": 310755.0,
+        "pfc2": 87838.08,
+        "pfc3": 153214.2,
+        "pfc4": 404364.0,
+        "pfc5": 1191036.96,
+    },
+    "sol": {
+        "sol0": 1437338.8,
+        "sol1": 5889842.0,
+        "sol2": 1946208.8,
+    },
+}
+
 TCV_QUALITY_FIXED_SIM = {
     "terminate_on_boundary_loss": True,
     "terminate_on_current_limit": True,
@@ -518,6 +534,7 @@ TCV_QUALITY_FIXED_SIM = {
 TCV_DERIVATIVE_FIXED_SIM = {
     "action_contract": "delta_jdot",
     "delta_derivative_scale_aps": 500000.0,
+    "delta_derivative_limits_aps": TCV_DELTA_DERIVATIVE_LIMITS_APS,
     "terminate_on_boundary_loss": True,
     "terminate_on_current_limit": True,
     "current_termination_over_limit_a": 0.0,

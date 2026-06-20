@@ -86,6 +86,21 @@ sim["max_episode_steps"] = 2000
 sim["csv_initial_state_library"] = "/workspace/tokamak-rl-v2/data/processed/t15_csv_initial_states.npz"
 sim["action_contract"] = "delta_jdot"
 sim["delta_derivative_scale_aps"] = 500000.0
+sim["delta_derivative_limits_aps"] = {
+    "pfc": {
+        "pfc0": 163347.0,
+        "pfc1": 310755.0,
+        "pfc2": 87838.08,
+        "pfc3": 153214.2,
+        "pfc4": 404364.0,
+        "pfc5": 1191036.96,
+    },
+    "sol": {
+        "sol0": 1437338.8,
+        "sol1": 5889842.0,
+        "sol2": 1946208.8,
+    },
+}
 sim["terminate_on_boundary_loss"] = True
 sim["terminate_on_current_limit"] = True
 sim["current_termination_over_limit_a"] = 0.0
@@ -181,6 +196,7 @@ checks = {
     "reward.derivative_weight": cfg["reward"]["derivative_weight"] == 0.5,
     "reward.actuator_saturation_weight": cfg["reward"]["actuator_saturation_weight"] == 0.5,
     "sim.action_contract": cfg["sim"]["action_contract"] == "delta_jdot",
+    "sim.delta_derivative_limits_aps": cfg["sim"]["delta_derivative_limits_aps"]["sol"]["sol1"] == 5889842.0,
     "sim.terminate_on_boundary_loss": cfg["sim"]["terminate_on_boundary_loss"] is True,
     "sim.terminate_on_current_limit": cfg["sim"]["terminate_on_current_limit"] is True,
     "sim.current_termination_over_limit_a": float(cfg["sim"]["current_termination_over_limit_a"]) == 0.0,
@@ -222,6 +238,10 @@ cat > "${TRAIN_OUTPUT}/balanced_reward.json" <<'JSON'
   "sim": {
     "action_contract": "delta_jdot",
     "delta_derivative_scale_aps": 500000.0,
+    "delta_derivative_limits_aps": {
+      "pfc": [163347.0, 310755.0, 87838.08, 153214.2, 404364.0, 1191036.96],
+      "sol": [1437338.8, 5889842.0, 1946208.8]
+    },
     "terminate_on_boundary_loss": true,
     "terminate_on_current_limit": true,
     "current_termination_over_limit_a": 0.0,

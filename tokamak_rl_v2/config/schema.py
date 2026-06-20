@@ -41,6 +41,22 @@ class CurrentSafetyLimits:
 
 
 @dataclass(frozen=True, slots=True)
+class DeltaDerivativeLimits:
+    pfc: tuple[float, ...]
+    sol: tuple[float, ...]
+
+    def validate(self, *, n_pfc: int | None = None, n_sol: int | None = None) -> None:
+        if n_pfc is not None and len(self.pfc) != int(n_pfc):
+            raise ValueError(f"delta_derivative_limits_aps.pfc must contain {int(n_pfc)} values")
+        if n_sol is not None and len(self.sol) != int(n_sol):
+            raise ValueError(f"delta_derivative_limits_aps.sol must contain {int(n_sol)} values")
+        for name, values in (("pfc", self.pfc), ("sol", self.sol)):
+            for idx, value in enumerate(values):
+                if not math.isfinite(float(value)) or float(value) <= 0.0:
+                    raise ValueError(f"delta_derivative_limits_aps.{name}[{idx}] must be finite and positive")
+
+
+@dataclass(frozen=True, slots=True)
 class IpReferenceConfig:
     min: float = 0.0
     max: float = 1.0
@@ -148,6 +164,7 @@ class SimConfig:
     action_scale: float = 1.0
     action_contract: Literal["absolute_derivative", "delta_jdot"] = "absolute_derivative"
     delta_derivative_scale_aps: float = 500000.0
+    delta_derivative_limits_aps: DeltaDerivativeLimits | None = None
     terminate_on_boundary_loss: bool = True
     terminate_on_current_limit: bool = True
     current_termination_over_limit_a: float = 5000.0

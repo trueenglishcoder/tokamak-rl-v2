@@ -77,9 +77,8 @@ class TokamakMagneticControlEnv:
         self.current_limits = torch.as_tensor(_current_limit_vector(config, self.cfg), dtype=torch.float32, device=self.device)
         self.raw_derivative_limits = torch.as_tensor(np.concatenate([_limit_vec(self.cfg.physics.pfc_deriv_limit, self.cfg.pfc.n_coils), _limit_vec(self.cfg.physics.sol_deriv_limit, self.cfg.sol.n_coils)]), dtype=torch.float32, device=self.device)
         self.derivative_limits = self.raw_derivative_limits * float(config.sim.action_scale)
-        self.delta_derivative_scale = torch.full(
-            (self.action_dim,),
-            float(config.sim.delta_derivative_scale_aps),
+        self.delta_derivative_scale = torch.as_tensor(
+            _delta_derivative_limit_vector(config, self.cfg),
             dtype=torch.float32,
             device=self.device,
         )
@@ -786,6 +785,7 @@ class TokamakMagneticControlEnv:
             "target_preview_stride": int(self.config.observation.target_preview_stride),
             "action_scale": float(self.config.sim.action_scale),
             "delta_derivative_scale_aps": float(self.config.sim.delta_derivative_scale_aps),
+            "delta_derivative_limits_aps": self.delta_derivative_scale.detach().cpu().numpy().astype(float).tolist(),
             "action_contract": self._action_contract_name(),
         }
 
@@ -800,6 +800,7 @@ class TokamakMagneticControlEnv:
             "actuator_tau": float(self.cfg.physics.actuator_tau),
             "action_contract": self._action_contract_name(),
             "delta_derivative_scale_aps": float(self.config.sim.delta_derivative_scale_aps),
+            "delta_derivative_limits_aps": self.delta_derivative_scale.detach().cpu().numpy().astype(float).tolist(),
             "previous_action_semantics": "applied_accumulated_derivative_command",
         }
         if self.config.reward.kind != "tcv_derivative":
@@ -808,6 +809,8 @@ class TokamakMagneticControlEnv:
 
     def _action_contract_name(self) -> str:
         if self._uses_delta_jdot_contract():
+            if self.config.sim.delta_derivative_limits_aps is not None:
+                return "delta_jdot_derivative_command_v2"
             return "delta_jdot_derivative_command_v1"
         if self.config.reward.kind == "tcv_derivative":
             return "tcv_derivative_v1"
@@ -920,6 +923,18 @@ def _current_limit_vector(config: ExperimentConfig, loaded_cfg) -> np.ndarray:
     if not np.all(np.isfinite(out)):
         raise ValueError("Training reward requires explicit finite current_safety_limits when simulator current limits are absent")
     return out
+
+
+def _delta_derivative_limit_vector(config: ExperimentConfig, loaded_cfg) -> np.ndarray:
+    n_pfc = int(loaded_cfg.pfc.n_coils)
+    n_sol = int(loaded_cfg.sol.n_coils)
+    if config.sim.delta_derivative_limits_aps is not None:
+        config.sim.delta_derivative_limits_aps.validate(n_pfc=n_pfc, n_sol=n_sol)
+        return np.concatenate([
+            np.asarray(config.sim.delta_derivative_limits_aps.pfc, dtype=float),
+            np.asarray(config.sim.delta_derivative_limits_aps.sol, dtype=float),
+        ])
+    return np.full((n_pfc + n_sol,), float(config.sim.delta_derivative_scale_aps), dtype=float)
 
 
 def _limit_vec(limit: float | None, n: int) -> np.ndarray:

@@ -206,16 +206,16 @@ def test_tcv_derivative_manifest_has_36_and_operational_termination_overrides() 
     assert first["reward"]["actuator_saturation_weight"] == 0.25
     assert first["reward"]["action_weight"] == 0.0
     assert first["reward"]["delta_action_weight"] == 0.0
-    assert first["sim"] == {
-        "action_contract": "delta_jdot",
-        "delta_derivative_scale_aps": 500000.0,
-        "terminate_on_boundary_loss": True,
-        "terminate_on_current_limit": True,
-        "current_termination_over_limit_a": 0.0,
-        "current_termination_grace_steps": 1,
-        "current_hard_termination_fraction": 1.20,
-        "current_saturation_fraction": 1.0,
-    }
+    assert first["sim"]["action_contract"] == "delta_jdot"
+    assert first["sim"]["delta_derivative_scale_aps"] == 500000.0
+    assert first["sim"]["delta_derivative_limits_aps"]["pfc"]["pfc5"] == 1191036.96
+    assert first["sim"]["delta_derivative_limits_aps"]["sol"]["sol1"] == 5889842.0
+    assert first["sim"]["terminate_on_boundary_loss"] is True
+    assert first["sim"]["terminate_on_current_limit"] is True
+    assert first["sim"]["current_termination_over_limit_a"] == 0.0
+    assert first["sim"]["current_termination_grace_steps"] == 1
+    assert first["sim"]["current_hard_termination_fraction"] == 1.20
+    assert first["sim"]["current_saturation_fraction"] == 1.0
 
 
 def test_tcv_derivative_focused_manifest_has_12_variants() -> None:
@@ -265,6 +265,8 @@ def test_tcv_delta_jdot_manifest_has_60_and_delta_contract() -> None:
     assert variants[-1]["reward"]["current_weight"] == 8.0
     assert variants[0]["sim"]["action_contract"] == "delta_jdot"
     assert variants[0]["sim"]["delta_derivative_scale_aps"] == 500000.0
+    assert variants[0]["sim"]["delta_derivative_limits_aps"]["pfc"]["pfc0"] == 163347.0
+    assert variants[0]["sim"]["delta_derivative_limits_aps"]["sol"]["sol1"] == 5889842.0
     assert variants[0]["sim"]["current_saturation_fraction"] == 1.0
 
 
@@ -292,6 +294,8 @@ def test_tcv_delta_jdot_focused_manifest_has_12_variants() -> None:
     assert variants[0]["reward"]["current_weight"] == 1.5
     assert variants[-1]["reward"]["current_weight"] == 3.0
     assert all(variant["sim"]["action_contract"] == "delta_jdot" for variant in variants)
+    assert all(variant["sim"]["delta_derivative_limits_aps"]["pfc"]["pfc5"] == 1191036.96 for variant in variants)
+    assert all(variant["sim"]["delta_derivative_limits_aps"]["sol"]["sol2"] == 1946208.8 for variant in variants)
 
 
 def test_tcv_delta_termination_f002_manifest_has_12_termination_variants() -> None:
@@ -318,6 +322,8 @@ def test_tcv_delta_termination_f002_manifest_has_12_termination_variants() -> No
     assert {variant["sim"]["terminate_on_current_limit"] for variant in variants} == {True}
     assert {variant["sim"]["action_contract"] for variant in variants} == {"delta_jdot"}
     assert {variant["sim"]["delta_derivative_scale_aps"] for variant in variants} == {500000.0}
+    assert {variant["sim"]["delta_derivative_limits_aps"]["pfc"]["pfc2"] for variant in variants} == {87838.08}
+    assert {variant["sim"]["delta_derivative_limits_aps"]["sol"]["sol0"] for variant in variants} == {1437338.8}
     assert {variant["sim"]["current_hard_termination_fraction"] for variant in variants} == {1.10, 1.15, 1.20, 1.30}
     assert {variant["sim"]["current_termination_grace_steps"] for variant in variants} == {1, 8, 25}
     assert all(variant["sim"]["current_termination_over_limit_a"] == 0.0 for variant in variants)
@@ -339,6 +345,8 @@ def test_tcv_delta_no_termination_manifest_has_36_variants() -> None:
     assert {variant["reward"]["kind"] for variant in variants} == {"tcv_derivative"}
     assert {variant["sim"]["action_contract"] for variant in variants} == {"delta_jdot"}
     assert {variant["sim"]["delta_derivative_scale_aps"] for variant in variants} == {500000.0}
+    assert {variant["sim"]["delta_derivative_limits_aps"]["pfc"]["pfc4"] for variant in variants} == {404364.0}
+    assert {variant["sim"]["delta_derivative_limits_aps"]["sol"]["sol1"] for variant in variants} == {5889842.0}
     assert {variant["sim"]["terminate_on_boundary_loss"] for variant in variants} == {False}
     assert {variant["sim"]["terminate_on_current_limit"] for variant in variants} == {False}
     assert {variant["training"]["production_mode"] for variant in variants} == {False}
