@@ -3,6 +3,9 @@
 #SBATCH --partition=batch
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
 #SBATCH --array=0-11%12
 #SBATCH --output=slurm_logs/tokamak-rl-v2-tcv-delta-noterm-1gpu-%A_%a.out
 #SBATCH --error=slurm_logs/tokamak-rl-v2-tcv-delta-noterm-1gpu-%A_%a.err
