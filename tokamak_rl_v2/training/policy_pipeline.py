@@ -614,10 +614,12 @@ def validate_exported_controller(export_dir: Path | None, config: ExperimentConf
         shape_error_all: list[float] = []
         ip_error_all: list[float] = []
         current_over_all: list[float] = []
+        current_usage_all: list[float] = []
         boundary_late: list[float] = []
         shape_late: list[float] = []
         ip_late: list[float] = []
         current_late: list[float] = []
+        current_usage_late: list[float] = []
 
         for _episode in range(episode_count):
             controller.reset()
@@ -635,6 +637,7 @@ def validate_exported_controller(export_dir: Path | None, config: ExperimentConf
             ep_shape: list[float] = []
             ep_ip: list[float] = []
             ep_current: list[float] = []
+            ep_current_usage: list[float] = []
             for step_index in range(step_count):
                 ref_index = min(step_index, ref_ip.shape[0] - 1)
                 ref_radii = np.nan_to_num(ref_radii_series[ref_index], nan=0.0, posinf=0.0, neginf=0.0)
@@ -670,12 +673,14 @@ def validate_exported_controller(export_dir: Path | None, config: ExperimentConf
                 model.step(pfc_derivs, sol_derivs)
                 currents = np.concatenate([np.asarray(model.state.pfc_currents, dtype=float), np.asarray(model.state.sol_currents, dtype=float)])
                 current_over = float(np.nanmax(np.maximum(np.abs(currents) - current_limits, 0.0)))
+                current_usage = float(np.nanmax(np.abs(currents) / np.maximum(current_limits, 1.0e-12)))
                 if first_failure_step is None and (found < 0.5 or current_over > 0.0):
                     first_failure_step = step_index + 1
                 ep_boundary.append(found)
                 ep_shape.append(shape)
                 ep_ip.append(ip_err)
                 ep_current.append(current_over)
+                ep_current_usage.append(current_usage)
             if first_failure_step is None:
                 first_failure_step = step_count
             completion.append(float(first_failure_step) / float(step_count))
@@ -684,10 +689,12 @@ def validate_exported_controller(export_dir: Path | None, config: ExperimentConf
             shape_error_all.extend(ep_shape)
             ip_error_all.extend(ep_ip)
             current_over_all.extend(ep_current)
+            current_usage_all.extend(ep_current_usage)
             boundary_late.extend(ep_boundary[late_start:])
             shape_late.extend(ep_shape[late_start:])
             ip_late.extend(ep_ip[late_start:])
             current_late.extend(ep_current[late_start:])
+            current_usage_late.extend(ep_current_usage[late_start:])
 
         completion_arr = np.asarray(completion, dtype=float)
         return {
@@ -711,6 +718,12 @@ def validate_exported_controller(export_dir: Path | None, config: ExperimentConf
             "ip_error_late_a": float(np.nanmean(np.asarray(ip_late, dtype=float))) if ip_late else float("nan"),
             "current_over_limit_a_max": float(np.nanmax(np.asarray(current_over_all, dtype=float))) if current_over_all else 0.0,
             "current_over_limit_a_late_max": float(np.nanmax(np.asarray(current_late, dtype=float))) if current_late else 0.0,
+            "current_over_limit_fraction": float(np.nanmean(np.asarray(current_over_all, dtype=float) > 0.0)) if current_over_all else 0.0,
+            "current_over_limit_fraction_late": float(np.nanmean(np.asarray(current_late, dtype=float) > 0.0)) if current_late else 0.0,
+            "current_over_limit_5ka_fraction": float(np.nanmean(np.asarray(current_over_all, dtype=float) > 5000.0)) if current_over_all else 0.0,
+            "current_over_limit_5ka_fraction_late": float(np.nanmean(np.asarray(current_late, dtype=float) > 5000.0)) if current_late else 0.0,
+            "current_over_limit_1pct_fraction": float(np.nanmean(np.asarray(current_usage_all, dtype=float) > 1.01)) if current_usage_all else 0.0,
+            "current_over_limit_1pct_fraction_late": float(np.nanmean(np.asarray(current_usage_late, dtype=float) > 1.01)) if current_usage_late else 0.0,
         }
     except Exception as exc:
         return {"status": "error", "export_dir": str(export_dir), "error": repr(exc)}

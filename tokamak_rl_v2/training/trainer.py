@@ -48,6 +48,8 @@ _FOCUSED_WANDB_METRICS = {
     "eval/current_over_limit_a_max",
     "eval/current_over_limit_a_late_max",
     "eval/current_over_limit_fraction_late",
+    "eval/current_over_limit_5ka_fraction_late",
+    "eval/current_over_limit_1pct_fraction_late",
     "eval/action_rms_late",
     "eval/action_saturation_fraction_late",
     "eval/selection_score",
@@ -58,6 +60,7 @@ _FOCUSED_WANDB_METRICS = {
     "reward/current_usage_mean_fraction",
     "reward/current_usage_loss",
     "reward/current_over_limit_a",
+    "reward/boundary_missing_loss",
     "reward/derivative_usage_mean_fraction",
     "reward/derivative_usage_loss",
     "reward/action_saturation_delta_rms",
@@ -1079,6 +1082,9 @@ class Trainer:
                     metrics[f"{name}_min"] = float(np.nanmin(arr))
                 if name == "current_over_limit_a":
                     metrics["current_over_limit_fraction"] = float(np.nanmean(arr > 0.0))
+                    metrics["current_over_limit_5ka_fraction"] = float(np.nanmean(arr > 5000.0))
+                if name == "current_usage_fraction":
+                    metrics["current_over_limit_1pct_fraction"] = float(np.nanmean(arr > 1.01))
         profile_metrics = max_metrics | min_metrics | {"episode_progress"}
         drift_metrics = {"shape_error_mean_m", "shape_error_max_m", "ip_error_a", "physical_cost", "current_usage_fraction"}
         for name in profile_metrics:
@@ -1094,6 +1100,9 @@ class Trainer:
                     metrics[f"{name}_late_min"] = float(np.nanmin(late))
                 if name == "current_over_limit_a":
                     metrics["current_over_limit_fraction_late"] = float(np.nanmean(late > 0.0))
+                    metrics["current_over_limit_5ka_fraction_late"] = float(np.nanmean(late > 5000.0))
+                if name == "current_usage_fraction":
+                    metrics["current_over_limit_1pct_fraction_late"] = float(np.nanmean(late > 1.01))
             if early.size and late.size and name in drift_metrics:
                 metrics[f"{name}_late_minus_early"] = float(np.nanmean(late) - np.nanmean(early))
         padded_max_metrics = {"shape_error_mean_m", "shape_error_max_m", "ip_error_a", "current_over_limit_a", "current_usage_fraction"}
@@ -1108,6 +1117,9 @@ class Trainer:
                     metrics[f"padded_{name}_min"] = float(np.nanmin(arr))
                 if name == "current_over_limit_a":
                     metrics["padded_current_over_limit_fraction"] = float(np.nanmean(arr > 0.0))
+                    metrics["padded_current_over_limit_5ka_fraction"] = float(np.nanmean(arr > 5000.0))
+                if name == "current_usage_fraction":
+                    metrics["padded_current_over_limit_1pct_fraction"] = float(np.nanmean(arr > 1.01))
         for name, values in padded_late_component_values.items():
             arr = np.asarray(values, dtype=float)
             if arr.size:
@@ -1118,6 +1130,9 @@ class Trainer:
                     metrics[f"padded_{name}_late_min"] = float(np.nanmin(arr))
                 if name == "current_over_limit_a":
                     metrics["padded_current_over_limit_fraction_late"] = float(np.nanmean(arr > 0.0))
+                    metrics["padded_current_over_limit_5ka_fraction_late"] = float(np.nanmean(arr > 5000.0))
+                if name == "current_usage_fraction":
+                    metrics["padded_current_over_limit_1pct_fraction_late"] = float(np.nanmean(arr > 1.01))
         return metrics
 
     def _evaluation_config(self) -> ExperimentConfig:
@@ -1140,7 +1155,14 @@ class Trainer:
         boundary_late = metric("padded_boundary_found_late_min", metric("boundary_found_late_min", metric("boundary_found_min", metric("boundary_found", 0.0))))
         terminated_boundary = metric("terminated_boundary_late_max", metric("terminated_boundary_max", metric("terminated_boundary", 0.0)))
         current_over = metric("padded_current_over_limit_a_late_max", metric("current_over_limit_a_late_max", metric("current_over_limit_a_max", metric("current_over_limit_a", 0.0))))
-        current_fraction = metric("padded_current_over_limit_fraction_late", metric("current_over_limit_fraction_late", metric("current_over_limit_fraction", 0.0)))
+        current_fraction = metric(
+            "padded_current_over_limit_5ka_fraction_late",
+            metric("current_over_limit_5ka_fraction_late", metric("current_over_limit_fraction_late", metric("current_over_limit_fraction", 0.0))),
+        )
+        current_1pct_fraction = metric(
+            "padded_current_over_limit_1pct_fraction_late",
+            metric("current_over_limit_1pct_fraction_late", metric("current_over_limit_fraction_late", metric("current_over_limit_fraction", 0.0))),
+        )
         shape_mean = metric("padded_shape_error_mean_m_late", metric("shape_error_mean_m_late", metric("shape_error_mean_m", 1.0)))
         shape_max = metric("padded_shape_error_max_m_late", metric("shape_error_max_m_late", metric("shape_error_max_m", 1.0)))
         ip_error = metric("padded_ip_error_a_late", metric("ip_error_a_late", metric("ip_error_a", 1.0e6)))
@@ -1155,6 +1177,7 @@ class Trainer:
             + 100.0 * max(terminated_boundary, 0.0)
             + 3.0 * max(current_over, 0.0) / 20000.0
             + 2.0 * max(current_fraction, 0.0)
+            + 1.0 * max(current_1pct_fraction, 0.0)
             + 2.0 * max(shape_mean, 0.0) / 0.03
             + 1.0 * max(shape_max, 0.0) / 0.08
             + 2.0 * max(ip_error, 0.0) / 25000.0

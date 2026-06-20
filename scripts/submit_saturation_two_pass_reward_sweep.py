@@ -14,7 +14,7 @@ except ModuleNotFoundError:  # pragma: no cover - used when run as python3 scrip
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Submit a 36+12 two-pass saturation reward sweep.")
+    parser = argparse.ArgumentParser(description="Submit a 36+12 two-pass boundary-fix saturation reward sweep.")
     parser.add_argument(
         "--pass1-job",
         type=Path,
@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=Path("jobs/aggregate_t15_reward_sweep_final.sbatch"),
     )
-    parser.add_argument("--root-prefix", default="outputs/t15_reward_sweep48_saturation_1m")
+    parser.add_argument("--root-prefix", default="outputs/t15_reward_sweep48_boundaryfix_half_slope_2m5m")
     args = parser.parse_args(argv)
     payload = submit_chain(
         pass1_job=args.pass1_job,

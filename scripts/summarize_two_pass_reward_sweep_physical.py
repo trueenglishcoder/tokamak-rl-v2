@@ -80,6 +80,8 @@ def _reward_from_row(row: dict[str, Any]) -> dict[str, float]:
         "shape_mean_weight",
         "shape_max_weight",
         "ip_weight",
+        "boundary_missing_error_m",
+        "boundary_missing_weight",
         "current_weight",
         "current_soft_fraction",
         "current_bad_fraction",
@@ -165,9 +167,17 @@ def _stable_tail(row: dict[str, Any] | None) -> bool:
     try:
         completion = float(row.get("tail_completion"))
         boundary = float(row.get("tail_boundary_late_min"))
-        current_fraction = float(row.get("tail_current_over_limit_fraction_late"))
     except (TypeError, ValueError):
         return False
+    try:
+        current_fraction = float(row.get("tail_current_over_limit_5ka_fraction_late"))
+    except (TypeError, ValueError):
+        current_fraction = float("nan")
+    if not math.isfinite(current_fraction):
+        try:
+            current_fraction = float(row.get("tail_current_over_limit_fraction_late"))
+        except (TypeError, ValueError):
+            return False
     return completion >= 0.95 and boundary >= 0.999 and current_fraction <= float(THRESHOLDS["max_current_over_limit_fraction_late"])
 
 

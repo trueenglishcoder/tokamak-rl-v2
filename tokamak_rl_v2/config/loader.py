@@ -473,6 +473,7 @@ def _validate_reward_config(reward: RewardConfig, *, prefix: str) -> None:
     if not math.isfinite(float(reward.boundary_missing_error_m)) or float(reward.boundary_missing_error_m) < 0.0:
         raise ValueError(f"{prefix}.boundary_missing_error_m must be finite and non-negative")
     for name in (
+        "boundary_missing_weight",
         "shape_mean_weight",
         "shape_max_weight",
         "ip_weight",

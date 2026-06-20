@@ -57,6 +57,7 @@ class T15PhysicalReward:
         shape_error = torch.where(found, shape_error, finite_missing)
         shape_error_mean = torch.mean(shape_error, dim=-1)
         shape_error_max = torch.max(shape_error, dim=-1).values
+        boundary_missing_loss = (~found.reshape(-1)).to(dtype=boundary_points.dtype, device=boundary_points.device)
 
         ip_error = torch.abs(ip - ip_ref)
         requested = action if requested_action is None else requested_action.to(dtype=action.dtype, device=action.device)
@@ -100,7 +101,8 @@ class T15PhysicalReward:
         actuator_saturation_loss = torch.mean(saturation_delta.pow(2), dim=-1)
 
         physical_cost = (
-            float(c.shape_mean_weight) * shape_mean_loss
+            float(c.boundary_missing_weight) * boundary_missing_loss
+            + float(c.shape_mean_weight) * shape_mean_loss
             + float(c.shape_max_weight) * shape_max_loss
             + float(c.ip_weight) * ip_loss
             + float(c.current_weight) * current_loss
@@ -168,6 +170,7 @@ class T15PhysicalReward:
                 "terminal_remaining_loss": terminal_remaining_loss,
                 "terminal_total_penalty": terminal_total_penalty,
                 "boundary_found": boundary_found.to(dtype=reward.dtype),
+                "boundary_missing_loss": boundary_missing_loss,
             },
         )
 

@@ -99,6 +99,7 @@ class RewardConfig:
     shape_max_scale_m: float = 0.08
     ip_scale_a: float = 25000.0
     boundary_missing_error_m: float = 0.10
+    boundary_missing_weight: float = 0.0
     shape_mean_weight: float = 4.0
     shape_max_weight: float = 1.0
     ip_weight: float = 3.0

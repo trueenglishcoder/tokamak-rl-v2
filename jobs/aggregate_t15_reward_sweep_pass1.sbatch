@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=tokamak-rl-v2-reward72-agg1
+#SBATCH --job-name=tokamak-rl-v2-reward-agg1
 #SBATCH --partition=batch
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
-#SBATCH --output=slurm_logs/tokamak-rl-v2-csv-reward72-agg1-%j.out
-#SBATCH --error=slurm_logs/tokamak-rl-v2-csv-reward72-agg1-%j.err
+#SBATCH --output=slurm_logs/tokamak-rl-v2-csv-reward-agg1-%j.out
+#SBATCH --error=slurm_logs/tokamak-rl-v2-csv-reward-agg1-%j.err
 
 set -euo pipefail
 

@@ -12,6 +12,8 @@ from typing import Any, Iterable
 
 LOWER_BETTER = {
     "current_over_limit_fraction_late",
+    "current_over_limit_5ka_fraction_late",
+    "current_over_limit_1pct_fraction_late",
     "current_over_limit_a_max",
     "current_usage_fraction_late_max",
     "current_usage_loss_late",
@@ -53,6 +55,8 @@ SUMMARY_FIELDS = [
     "current_over_limit_a_late",
     "current_over_limit_a_max",
     "current_over_limit_fraction_late",
+    "current_over_limit_5ka_fraction_late",
+    "current_over_limit_1pct_fraction_late",
     "current_usage_fraction_late_max",
     "current_usage_mean_fraction_late",
     "current_usage_loss_late",
@@ -73,6 +77,8 @@ SUMMARY_FIELDS = [
     "current_weight",
     "current_soft_fraction",
     "current_bad_fraction",
+    "boundary_missing_error_m",
+    "boundary_missing_weight",
     "derivative_weight",
     "current_usage_weight",
     "derivative_usage_weight",
@@ -92,6 +98,8 @@ SUMMARY_FIELDS = [
     "tail_shape_error_mean_m_late",
     "tail_ip_error_a_late",
     "tail_current_over_limit_fraction_late",
+    "tail_current_over_limit_5ka_fraction_late",
+    "tail_current_over_limit_1pct_fraction_late",
     "tail_current_usage_loss_late",
     "tail_derivative_usage_loss_late",
     "tail_action_saturation_fraction_late",
@@ -213,7 +221,14 @@ def _selection_reason(
         ("lost_late_boundary", metrics["boundary_found_late_min"] >= min_boundary_late),
         ("boundary_termination", metrics["terminated_boundary"] <= max_terminated_boundary),
         ("large_current_max", metrics["current_over_limit_a_max"] <= max_current_over_limit_a_max),
-        ("large_current_fraction", metrics["current_over_limit_fraction_late"] <= max_current_over_limit_fraction_late),
+        (
+            "large_current_fraction",
+            _finite(
+                metrics.get("current_over_limit_5ka_fraction_late"),
+                _finite(metrics["current_over_limit_fraction_late"], 1.0),
+            )
+            <= max_current_over_limit_fraction_late,
+        ),
     ]
     for reason, passed in checks:
         if not bool(passed):
@@ -225,7 +240,9 @@ def _physical_priority_score(row: dict[str, Any]) -> float:
     completion_gap = max(0.0, 1.0 - _finite(row["mean_episode_completion"], 0.0))
     full_success_gap = max(0.0, 1.0 - _finite(row.get("full_episode_success"), _finite(row["mean_episode_completion"], 0.0)))
     boundary_gap = max(0.0, 1.0 - _finite(row["boundary_found_late_min"], 0.0))
-    current_fraction = _finite(row["current_over_limit_fraction_late"], 1.0)
+    current_fraction_raw = _finite(row["current_over_limit_fraction_late"], 1.0)
+    current_fraction = _finite(row.get("current_over_limit_5ka_fraction_late"), current_fraction_raw)
+    current_1pct_fraction = _finite(row.get("current_over_limit_1pct_fraction_late"), current_fraction_raw)
     current_max = _finite(row["current_over_limit_a_max"], 1.0e9)
     current_usage_max = _finite(row["current_usage_fraction_late_max"], 10.0)
     current_usage_loss = _finite(row.get("current_usage_loss_late"), current_usage_max * current_usage_max)
@@ -247,6 +264,7 @@ def _physical_priority_score(row: dict[str, Any]) -> float:
         + 200.0 * termination_failure
         + 100.0 * terminated_boundary
         + 60.0 * current_fraction
+        + 30.0 * current_1pct_fraction
         + 6.0 * current_max / 20000.0
         + 20.0 * max(0.0, current_usage_max - 1.0)
         + 5.0 * current_usage_loss
@@ -312,6 +330,8 @@ def summarize_variant(
         "current_over_limit_a_late": _metric(actor_eval, "padded_current_over_limit_a_late", "current_over_limit_a_late", "current_over_limit_a", default=float("nan")),
         "current_over_limit_a_max": _metric(actor_eval, "padded_current_over_limit_a_late_max", "padded_current_over_limit_a_max", "current_over_limit_a_late_max", "current_over_limit_a_max", "current_over_limit_a", default=float("nan")),
         "current_over_limit_fraction_late": _metric(actor_eval, "padded_current_over_limit_fraction_late", "current_over_limit_fraction_late", "current_over_limit_fraction", default=float("nan")),
+        "current_over_limit_5ka_fraction_late": _metric(actor_eval, "padded_current_over_limit_5ka_fraction_late", "current_over_limit_5ka_fraction_late", "current_over_limit_5ka_fraction", default=float("nan")),
+        "current_over_limit_1pct_fraction_late": _metric(actor_eval, "padded_current_over_limit_1pct_fraction_late", "current_over_limit_1pct_fraction_late", "current_over_limit_1pct_fraction", default=float("nan")),
         "current_usage_fraction_late_max": _metric(actor_eval, "padded_current_usage_fraction_late_max", "padded_current_usage_fraction_max", "current_usage_fraction_late_max", "current_usage_fraction_max", "current_usage_fraction", default=float("nan")),
         "current_usage_mean_fraction_late": _metric(actor_eval, "current_usage_mean_fraction_late", "current_usage_mean_fraction", default=float("nan")),
         "current_usage_loss_late": _metric(actor_eval, "current_usage_loss_late", "current_usage_loss", default=float("nan")),
@@ -338,6 +358,8 @@ def summarize_variant(
         "current_weight": reward.get("current_weight", ""),
         "current_soft_fraction": reward.get("current_soft_fraction", ""),
         "current_bad_fraction": reward.get("current_bad_fraction", ""),
+        "boundary_missing_error_m": reward.get("boundary_missing_error_m", ""),
+        "boundary_missing_weight": reward.get("boundary_missing_weight", ""),
         "derivative_weight": reward.get("derivative_weight", ""),
         "current_usage_weight": reward.get("current_usage_weight", ""),
         "derivative_usage_weight": reward.get("derivative_usage_weight", ""),
@@ -357,6 +379,8 @@ def summarize_variant(
         "tail_shape_error_mean_m_late": _tail_metric(eval_rows, "padded_shape_error_mean_m_late", "shape_error_mean_m_late", "shape_error_mean_m"),
         "tail_ip_error_a_late": _tail_metric(eval_rows, "padded_ip_error_a_late", "ip_error_a_late", "ip_error_a"),
         "tail_current_over_limit_fraction_late": _tail_metric(eval_rows, "padded_current_over_limit_fraction_late", "current_over_limit_fraction_late", "current_over_limit_fraction"),
+        "tail_current_over_limit_5ka_fraction_late": _tail_metric(eval_rows, "padded_current_over_limit_5ka_fraction_late", "current_over_limit_5ka_fraction_late", "current_over_limit_5ka_fraction"),
+        "tail_current_over_limit_1pct_fraction_late": _tail_metric(eval_rows, "padded_current_over_limit_1pct_fraction_late", "current_over_limit_1pct_fraction_late", "current_over_limit_1pct_fraction"),
         "tail_current_usage_loss_late": _tail_metric(eval_rows, "current_usage_loss_late", "current_usage_loss"),
         "tail_derivative_usage_loss_late": _tail_metric(eval_rows, "derivative_usage_loss_late", "derivative_usage_loss"),
         "tail_action_saturation_fraction_late": _tail_metric(eval_rows, "action_saturation_fraction_late", "action_saturation_fraction"),
@@ -450,6 +474,8 @@ def regime_summary(rows: list[dict[str, Any]], top_n: int) -> list[dict[str, Any
                 "median_ip_error_a_late": _median(_finite(row["ip_error_a_late"]) for row in valid),
                 "median_current_over_limit_a_max": _median(_finite(row["current_over_limit_a_max"]) for row in valid),
                 "median_current_over_limit_fraction_late": _median(_finite(row["current_over_limit_fraction_late"]) for row in valid),
+                "median_current_over_limit_5ka_fraction_late": _median(_finite(row.get("current_over_limit_5ka_fraction_late")) for row in valid),
+                "median_current_over_limit_1pct_fraction_late": _median(_finite(row.get("current_over_limit_1pct_fraction_late")) for row in valid),
             }
         )
     summaries.sort(key=lambda row: (row["regime_kind"], -int(row["selection_valid_count"]), _finite(row["median_physical_priority_score"], float("inf")), row["regime"]))
