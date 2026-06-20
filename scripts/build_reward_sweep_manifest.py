@@ -15,6 +15,7 @@ PROFILE_TCV_QUALITY = "tcv_quality"
 PROFILE_TCV_DERIVATIVE = "tcv_derivative"
 PROFILE_TCV_DELTA_JDOT = "tcv_delta_jdot"
 PROFILE_TCV_DELTA_TERMINATION_F002 = "tcv_delta_termination_f002"
+PROFILE_TCV_DELTA_NO_TERMINATION = "tcv_delta_no_termination"
 
 BROAD_SHAPE_REGIMES = [
     {"id": "s0", "shape_mean_weight": 1.5, "shape_max_weight": 0.375},
@@ -538,6 +539,31 @@ TCV_DELTA_F002_FIXED_REWARD = {
 TCV_DELTA_TERMINATION_FRACTIONS = [1.10, 1.15, 1.20, 1.30]
 TCV_DELTA_TERMINATION_GRACE_STEPS = [1, 8, 25]
 
+TCV_DELTA_NOTERM_SHAPE_REGIMES = [
+    {"id": "s0", "shape_mean_weight": 1.6, "shape_max_weight": 0.4},
+    {"id": "s1", "shape_mean_weight": 3.2, "shape_max_weight": 0.8},
+    {"id": "s2", "shape_mean_weight": 6.4, "shape_max_weight": 1.6},
+]
+
+TCV_DELTA_NOTERM_IP_REGIMES = [
+    {"id": "i0", "ip_weight": 0.9},
+    {"id": "i1", "ip_weight": 1.8},
+    {"id": "i2", "ip_weight": 3.6},
+]
+
+TCV_DELTA_NOTERM_SAFETY_REGIMES = [
+    {"id": "a0", "current_weight": 0.75, "derivative_weight": 0.1875, "actuator_saturation_weight": 0.1875},
+    {"id": "a1", "current_weight": 1.50, "derivative_weight": 0.3750, "actuator_saturation_weight": 0.3750},
+    {"id": "a2", "current_weight": 3.00, "derivative_weight": 0.7500, "actuator_saturation_weight": 0.7500},
+    {"id": "a3", "current_weight": 6.00, "derivative_weight": 1.5000, "actuator_saturation_weight": 1.5000},
+]
+
+TCV_DELTA_NOTERM_FIXED_SIM = {
+    **TCV_DERIVATIVE_FIXED_SIM,
+    "terminate_on_boundary_loss": False,
+    "terminate_on_current_limit": False,
+}
+
 
 def _rounded(value: float) -> float:
     return float(round(float(value), 8))
@@ -550,6 +576,8 @@ def _check_profile(profile: str) -> str:
         return PROFILE_TCV_DELTA_JDOT
     if profile == PROFILE_TCV_DELTA_TERMINATION_F002:
         return PROFILE_TCV_DELTA_TERMINATION_F002
+    if profile == PROFILE_TCV_DELTA_NO_TERMINATION:
+        return PROFILE_TCV_DELTA_NO_TERMINATION
     if profile not in {PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON, PROFILE_SATURATION, PROFILE_TCV_QUALITY}:
         raise ValueError(f"Unknown reward sweep profile: {profile}")
     return profile
@@ -565,6 +593,8 @@ def _fixed_reward(profile: str) -> dict[str, Any]:
         return dict(SATURATION_FIXED_REWARD)
     if profile == PROFILE_TCV_DELTA_TERMINATION_F002:
         return dict(TCV_DELTA_F002_FIXED_REWARD)
+    if profile == PROFILE_TCV_DELTA_NO_TERMINATION:
+        return dict(TCV_DERIVATIVE_FIXED_REWARD)
     if profile in {PROFILE_TCV_DERIVATIVE, PROFILE_TCV_DELTA_JDOT}:
         return dict(TCV_DERIVATIVE_FIXED_REWARD)
     if profile == PROFILE_TCV_QUALITY:
@@ -582,6 +612,8 @@ def _fixed_sim(profile: str) -> dict[str, Any]:
         return dict(SATURATION_FIXED_SIM)
     if profile in {PROFILE_TCV_DERIVATIVE, PROFILE_TCV_DELTA_JDOT, PROFILE_TCV_DELTA_TERMINATION_F002}:
         return dict(TCV_DERIVATIVE_FIXED_SIM)
+    if profile == PROFILE_TCV_DELTA_NO_TERMINATION:
+        return dict(TCV_DELTA_NOTERM_FIXED_SIM)
     if profile == PROFILE_TCV_QUALITY:
         return dict(TCV_QUALITY_FIXED_SIM)
     return {}
@@ -597,6 +629,8 @@ def _broad_shape_regimes(profile: str) -> list[dict[str, Any]]:
         return SATURATION_BROAD_SHAPE_REGIMES
     if profile == PROFILE_TCV_DELTA_JDOT:
         return TCV_DELTA_BROAD_SHAPE_REGIMES
+    if profile == PROFILE_TCV_DELTA_NO_TERMINATION:
+        return TCV_DELTA_NOTERM_SHAPE_REGIMES
     if profile in {PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE}:
         return TCV_QUALITY_BROAD_SHAPE_REGIMES
     return BROAD_SHAPE_REGIMES
@@ -612,6 +646,8 @@ def _broad_ip_regimes(profile: str) -> list[dict[str, Any]]:
         return SATURATION_BROAD_IP_REGIMES
     if profile == PROFILE_TCV_DELTA_JDOT:
         return TCV_DELTA_BROAD_IP_REGIMES
+    if profile == PROFILE_TCV_DELTA_NO_TERMINATION:
+        return TCV_DELTA_NOTERM_IP_REGIMES
     if profile in {PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE}:
         return TCV_QUALITY_BROAD_IP_REGIMES
     return BROAD_IP_REGIMES
@@ -627,6 +663,8 @@ def _broad_safety_regimes(profile: str) -> list[dict[str, Any]]:
         return SATURATION_BROAD_SAFETY_REGIMES
     if profile == PROFILE_TCV_DELTA_JDOT:
         return TCV_DELTA_BROAD_SAFETY_REGIMES
+    if profile == PROFILE_TCV_DELTA_NO_TERMINATION:
+        return TCV_DELTA_NOTERM_SAFETY_REGIMES
     if profile in {PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE}:
         return TCV_QUALITY_BROAD_SAFETY_REGIMES
     return BROAD_ACTUATOR_REGIMES
@@ -640,7 +678,7 @@ def _focus_shape_factors(profile: str) -> list[dict[str, Any]]:
         return FIXED_HORIZON_FOCUS_SHAPE_FACTORS
     if profile == PROFILE_SATURATION:
         return SATURATION_FOCUS_SHAPE_FACTORS
-    if profile in {PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE, PROFILE_TCV_DELTA_JDOT}:
+    if profile in {PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE, PROFILE_TCV_DELTA_JDOT, PROFILE_TCV_DELTA_NO_TERMINATION}:
         return TCV_QUALITY_FOCUS_SHAPE_FACTORS
     return FOCUS_SHAPE_FACTORS
 
@@ -653,7 +691,7 @@ def _focus_ip_factors(profile: str) -> list[dict[str, Any]]:
         return FIXED_HORIZON_FOCUS_IP_FACTORS
     if profile == PROFILE_SATURATION:
         return SATURATION_FOCUS_IP_FACTORS
-    if profile in {PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE, PROFILE_TCV_DELTA_JDOT}:
+    if profile in {PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE, PROFILE_TCV_DELTA_JDOT, PROFILE_TCV_DELTA_NO_TERMINATION}:
         return TCV_QUALITY_FOCUS_IP_FACTORS
     return FOCUS_IP_FACTORS
 
@@ -666,7 +704,7 @@ def _focus_safety_factors(profile: str) -> list[dict[str, Any]]:
         return FIXED_HORIZON_FOCUS_SAFETY_FACTORS
     if profile == PROFILE_SATURATION:
         return SATURATION_FOCUS_SAFETY_FACTORS
-    if profile in {PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE, PROFILE_TCV_DELTA_JDOT}:
+    if profile in {PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE, PROFILE_TCV_DELTA_JDOT, PROFILE_TCV_DELTA_NO_TERMINATION}:
         return TCV_QUALITY_FOCUS_SAFETY_FACTORS
     return FOCUS_ACTUATOR_FACTORS
 
@@ -712,7 +750,12 @@ def build_broad_variants(profile: str = PROFILE_LEGAL) -> list[dict[str, Any]]:
     index = 0
     fixed_reward = _fixed_reward(profile)
     fixed_sim = _fixed_sim(profile)
-    prefix = "s" if profile == PROFILE_SATURATION else "b"
+    if profile == PROFILE_SATURATION:
+        prefix = "s"
+    elif profile == PROFILE_TCV_DELTA_NO_TERMINATION:
+        prefix = "n"
+    else:
+        prefix = "b"
     for shape in _broad_shape_regimes(profile):
         for ip in _broad_ip_regimes(profile):
             for actuator in _broad_safety_regimes(profile):
@@ -1028,6 +1071,7 @@ def main(argv: list[str] | None = None) -> int:
             PROFILE_TCV_DERIVATIVE,
             PROFILE_TCV_DELTA_JDOT,
             PROFILE_TCV_DELTA_TERMINATION_F002,
+            PROFILE_TCV_DELTA_NO_TERMINATION,
         ),
         default=PROFILE_LEGAL,
     )

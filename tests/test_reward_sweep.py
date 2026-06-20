@@ -13,6 +13,7 @@ from scripts.build_reward_sweep_manifest import (
     PROFILE_SATURATION,
     PROFILE_TCV_DERIVATIVE,
     PROFILE_TCV_DELTA_JDOT,
+    PROFILE_TCV_DELTA_NO_TERMINATION,
     PROFILE_TCV_DELTA_TERMINATION_F002,
     PROFILE_TCV_QUALITY,
     build_manifest,
@@ -320,6 +321,29 @@ def test_tcv_delta_termination_f002_manifest_has_12_termination_variants() -> No
     assert {variant["sim"]["current_hard_termination_fraction"] for variant in variants} == {1.10, 1.15, 1.20, 1.30}
     assert {variant["sim"]["current_termination_grace_steps"] for variant in variants} == {1, 8, 25}
     assert all(variant["sim"]["current_termination_over_limit_a"] == 0.0 for variant in variants)
+
+
+def test_tcv_delta_no_termination_manifest_has_36_variants() -> None:
+    manifest = build_manifest(
+        "broad",
+        profile=PROFILE_TCV_DELTA_NO_TERMINATION,
+        runs_per_array_task=3,
+        array_task_count=12,
+    )
+    variants = manifest["variants"]
+    assert manifest["variant_count"] == 36
+    assert manifest["runs_per_array_task"] == 3
+    assert manifest["array_task_count"] == 12
+    assert variants[0]["folder"] == "n000_s0_i0_a0"
+    assert variants[-1]["folder"] == "n035_s2_i2_a3"
+    assert {variant["reward"]["kind"] for variant in variants} == {"tcv_derivative"}
+    assert {variant["sim"]["action_contract"] for variant in variants} == {"delta_jdot"}
+    assert {variant["sim"]["delta_derivative_scale_aps"] for variant in variants} == {500000.0}
+    assert {variant["sim"]["terminate_on_boundary_loss"] for variant in variants} == {False}
+    assert {variant["sim"]["terminate_on_current_limit"] for variant in variants} == {False}
+    assert {variant["reward"]["shape_mean_weight"] for variant in variants} == {1.6, 3.2, 6.4}
+    assert {variant["reward"]["ip_weight"] for variant in variants} == {0.9, 1.8, 3.6}
+    assert {variant["reward"]["current_weight"] for variant in variants} == {0.75, 1.5, 3.0, 6.0}
 
 
 def test_current_constraint_focused_manifest_uses_center_soft_fractions() -> None:
