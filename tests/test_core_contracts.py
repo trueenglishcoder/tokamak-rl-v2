@@ -553,6 +553,8 @@ def test_environment_reset_step_contract() -> None:
     assert "field_scale" not in env.normalization()
     assert "bdot_scale" not in env.normalization()
     assert env.normalization()["critic_psi_normalization"] == "per_reset_standardization"
+    assert env.normalization()["action_contract"] == "delta_jdot_derivative_command_v1"
+    assert env.normalization()["delta_derivative_scale_aps"] == pytest.approx(500000.0)
     assert env.normalization()["current_saturation_fraction"] == pytest.approx(float(cfg.sim.current_saturation_fraction))
     obs = env.reset()
     assert obs.shape == (2, env.obs_dim)
@@ -574,13 +576,63 @@ def test_environment_reset_step_contract() -> None:
 
 def test_action_scale_caps_physical_derivative_usage() -> None:
     cfg = load_experiment_config(CONFIG)
-    cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=4, action_scale=0.25))
+    cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=4, action_scale=0.25, action_contract="absolute_derivative"))
     env = TokamakMagneticControlEnv(cfg, batch_size=2, device="cpu", seed=2)
     env.reset()
     result = env.step(torch.ones((2, env.action_dim), dtype=torch.float32))
     comps = result.info["reward_components"]
     assert float(np.nanmax(comps["derivative_usage"])) <= 0.25001
     assert np.allclose(np.asarray(env.normalization()["derivative_scale"]), env.raw_derivative_limits.detach().cpu().numpy() * 0.25)
+
+
+def test_delta_jdot_action_accumulates_derivative_command() -> None:
+    cfg = load_experiment_config(CONFIG)
+    cfg = replace(
+        cfg,
+        sim=replace(
+            cfg.sim,
+            compute_backend="cpu",
+            max_episode_steps=4,
+            action_contract="delta_jdot",
+            delta_derivative_scale_aps=500000.0,
+            terminate_on_current_limit=False,
+            current_saturation_fraction=1.0e6,
+        ),
+    )
+    env = TokamakMagneticControlEnv(cfg, batch_size=1, device="cpu", seed=3)
+    env.reset()
+    action = torch.ones((1, env.action_dim), dtype=torch.float32)
+    first = env.step(action)
+    expected_delta = env.delta_action_to_command_norm[None, :]
+    assert torch.allclose(first.requested_action, action)
+    assert torch.allclose(first.applied_action, expected_delta, atol=1.0e-6)
+    second = env.step(action)
+    assert torch.allclose(second.applied_action, torch.clamp(2.0 * expected_delta, -1.0, 1.0), atol=1.0e-6)
+    assert torch.allclose(env.previous_action, second.applied_action)
+
+
+def test_delta_jdot_command_clipping_penalizes_unrealized_delta() -> None:
+    cfg = load_experiment_config(CONFIG)
+    cfg = replace(
+        cfg,
+        sim=replace(
+            cfg.sim,
+            compute_backend="cpu",
+            max_episode_steps=4,
+            action_contract="delta_jdot",
+            delta_derivative_scale_aps=1.0e9,
+            terminate_on_current_limit=False,
+            current_saturation_fraction=1.0e6,
+        ),
+        reward=replace(cfg.reward, actuator_saturation_weight=4.0),
+    )
+    env = TokamakMagneticControlEnv(cfg, batch_size=1, device="cpu", seed=4)
+    env.reset()
+    result = env.step(torch.ones((1, env.action_dim), dtype=torch.float32))
+    comps = result.info["reward_components"]
+    assert torch.allclose(result.applied_action, torch.ones_like(result.applied_action), atol=1.0e-6)
+    assert float(np.nanmax(comps["action_saturation_delta_rms"])) > 0.0
+    assert float(np.nanmax(comps["actuator_saturation_loss"])) > 0.0
 
 
 def test_current_aware_saturation_clips_command_before_current_runaway() -> None:
@@ -624,6 +676,8 @@ def test_tcv_derivative_mode_does_not_project_current_runaway_command() -> None:
             cfg.sim,
             compute_backend="cpu",
             max_episode_steps=4,
+            action_contract="delta_jdot",
+            delta_derivative_scale_aps=500000.0,
             terminate_on_boundary_loss=True,
             terminate_on_current_limit=True,
             current_saturation_fraction=1.0,
@@ -649,9 +703,10 @@ def test_tcv_derivative_mode_does_not_project_current_runaway_command() -> None:
     action[0, 0] = 1.0
     result = env.step(action)
     comps = result.info["reward_components"]
+    expected_command = action * env.delta_action_to_command_norm[None, :]
     assert torch.allclose(result.requested_action, action)
-    assert torch.allclose(result.applied_action, action)
-    assert env.normalization()["action_contract"] == "tcv_derivative_v1"
+    assert torch.allclose(result.applied_action, expected_command, atol=1.0e-6)
+    assert env.normalization()["action_contract"] == "delta_jdot_derivative_command_v1"
     assert "current_saturation_fraction" not in env.normalization()
     assert bool(result.terminated[0].item()) is True
     assert float(np.nanmax(comps["terminated_current"])) == pytest.approx(1.0)
@@ -666,6 +721,7 @@ def test_current_aware_saturation_leaves_safe_command_unchanged() -> None:
             cfg.sim,
             compute_backend="cpu",
             max_episode_steps=4,
+            action_contract="absolute_derivative",
             terminate_on_current_limit=False,
             current_saturation_fraction=1.05,
         ),
@@ -923,7 +979,7 @@ def test_replay_batched_insert_preserves_lane_boundaries_and_size() -> None:
 
 def test_environment_reset_indices_only_resets_done_slot() -> None:
     cfg = load_experiment_config(CONFIG)
-    cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=8))
+    cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=8, action_contract="absolute_derivative"))
     env = TokamakMagneticControlEnv(cfg, batch_size=2, device="cpu", seed=7)
     env.reset()
     ref_before = env.reference.ip.detach().clone()

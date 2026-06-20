@@ -15,6 +15,7 @@ try:
         PROFILE_SATURATION,
         PROFILE_TCV_QUALITY,
         PROFILE_TCV_DERIVATIVE,
+        PROFILE_TCV_DELTA_JDOT,
         build_manifest,
     )
 except ModuleNotFoundError:  # pragma: no cover - used when run as python3 scripts/...
@@ -25,6 +26,7 @@ except ModuleNotFoundError:  # pragma: no cover - used when run as python3 scrip
         PROFILE_SATURATION,
         PROFILE_TCV_QUALITY,
         PROFILE_TCV_DERIVATIVE,
+        PROFILE_TCV_DELTA_JDOT,
         build_manifest,
     )
 
@@ -45,12 +47,18 @@ def _run(args: list[str]) -> None:
     subprocess.run(args, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
-def _write_pass1_manifest(root: str, *, profile: str) -> str:
+def _write_pass1_manifest(root: str, *, profile: str, runs_per_array_task: int, array_task_count: int) -> str:
     manifest_path = Path(root) / "pass1_broad" / "variants.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest = build_manifest("broad", profile=profile, runs_per_array_task=3, array_task_count=12)
-    if int(manifest["variant_count"]) != 36:
-        raise RuntimeError(f"pass1 manifest must contain 36 variants, got {manifest['variant_count']}")
+    manifest = build_manifest(
+        "broad",
+        profile=profile,
+        runs_per_array_task=runs_per_array_task,
+        array_task_count=array_task_count,
+    )
+    expected = int(runs_per_array_task) * int(array_task_count)
+    if int(manifest["variant_count"]) != expected:
+        raise RuntimeError(f"pass1 manifest must contain {expected} variants, got {manifest['variant_count']}")
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return str(manifest_path)
 
@@ -63,11 +71,18 @@ def submit_chain(
     final_aggregate_job: Path,
     root_prefix: str,
     profile: str = PROFILE_LEGAL,
+    pass1_runs_per_array_task: int = 3,
+    pass1_array_task_count: int = 12,
 ) -> dict[str, Any]:
     Path("slurm_logs").mkdir(parents=True, exist_ok=True)
     pass1_jobid = _submit(["sbatch", "--parsable", "--hold", f"--export=ALL,SWEEP_ROOT_PREFIX={root_prefix}", str(pass1_job)])
     root = f"{root_prefix}_{pass1_jobid}"
-    pass1_manifest = _write_pass1_manifest(root, profile=profile)
+    pass1_manifest = _write_pass1_manifest(
+        root,
+        profile=profile,
+        runs_per_array_task=pass1_runs_per_array_task,
+        array_task_count=pass1_array_task_count,
+    )
     center_json = f"{root}/selection/pass1/physical_best_candidate.json"
 
     pass1_aggregate_jobid = _submit(
@@ -114,6 +129,8 @@ def submit_chain(
             "pass2": str(pass2_job),
             "final_aggregate": str(final_aggregate_job),
         },
+        "pass1_runs_per_array_task": int(pass1_runs_per_array_task),
+        "pass1_array_task_count": int(pass1_array_task_count),
     }
 
     out = Path(root) / "selection" / "submission_chain.json"
@@ -132,9 +149,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root-prefix", default="outputs/t15_reward_sweep72_legal_1m")
     parser.add_argument(
         "--profile",
-        choices=(PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON, PROFILE_SATURATION, PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE),
+        choices=(
+            PROFILE_LEGAL,
+            PROFILE_CURRENT_CONSTRAINT,
+            PROFILE_FIXED_HORIZON,
+            PROFILE_SATURATION,
+            PROFILE_TCV_QUALITY,
+            PROFILE_TCV_DERIVATIVE,
+            PROFILE_TCV_DELTA_JDOT,
+        ),
         default=PROFILE_LEGAL,
     )
+    parser.add_argument("--pass1-runs-per-array-task", type=int, default=3)
+    parser.add_argument("--pass1-array-task-count", type=int, default=12)
     args = parser.parse_args(argv)
     payload = submit_chain(
         pass1_job=args.pass1_job,
@@ -143,6 +170,8 @@ def main(argv: list[str] | None = None) -> int:
         final_aggregate_job=args.final_aggregate_job,
         root_prefix=args.root_prefix,
         profile=args.profile,
+        pass1_runs_per_array_task=args.pass1_runs_per_array_task,
+        pass1_array_task_count=args.pass1_array_task_count,
     )
     print(json.dumps(payload, indent=2))
     return 0

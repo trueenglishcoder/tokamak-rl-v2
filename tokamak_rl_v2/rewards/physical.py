@@ -32,6 +32,7 @@ class T15PhysicalReward:
         action: Tensor,
         previous_action: Tensor,
         requested_action: Tensor | None = None,
+        applied_delta_action: Tensor | None = None,
         current_over_limit_a: Tensor,
         current_usage_fraction: Tensor,
         current_margin_fraction: Tensor,
@@ -62,11 +63,16 @@ class T15PhysicalReward:
 
         ip_error = torch.abs(ip - ip_ref)
         requested = action if requested_action is None else requested_action.to(dtype=action.dtype, device=action.device)
-        delta_action = action - previous_action
+        delta_action = (
+            action - previous_action
+            if applied_delta_action is None
+            else applied_delta_action.to(dtype=action.dtype, device=action.device)
+        )
         action_rms = torch.sqrt(torch.mean(action.pow(2), dim=-1))
         delta_action_rms = torch.sqrt(torch.mean(delta_action.pow(2), dim=-1))
         max_abs_action = torch.max(torch.abs(action), dim=-1).values
-        saturation_delta = requested - action
+        saturation_reference = action if applied_delta_action is None else delta_action
+        saturation_delta = requested - saturation_reference
         requested_action_rms = torch.sqrt(torch.mean(requested.pow(2), dim=-1))
         action_saturation_delta_rms = torch.sqrt(torch.mean(saturation_delta.pow(2), dim=-1))
         action_saturation_delta_max = torch.max(torch.abs(saturation_delta), dim=-1).values
@@ -193,6 +199,7 @@ class T15TCVQualityReward:
         action: Tensor,
         previous_action: Tensor,
         requested_action: Tensor | None = None,
+        applied_delta_action: Tensor | None = None,
         current_over_limit_a: Tensor,
         current_usage_fraction: Tensor,
         current_margin_fraction: Tensor,
@@ -223,11 +230,16 @@ class T15TCVQualityReward:
 
         ip_error = torch.abs(ip - ip_ref)
         requested = action if requested_action is None else requested_action.to(dtype=action.dtype, device=action.device)
-        delta_action = action - previous_action
+        delta_action = (
+            action - previous_action
+            if applied_delta_action is None
+            else applied_delta_action.to(dtype=action.dtype, device=action.device)
+        )
         action_rms = torch.sqrt(torch.mean(action.pow(2), dim=-1))
         delta_action_rms = torch.sqrt(torch.mean(delta_action.pow(2), dim=-1))
         max_abs_action = torch.max(torch.abs(action), dim=-1).values
-        saturation_delta = requested - action
+        saturation_reference = action if applied_delta_action is None else delta_action
+        saturation_delta = requested - saturation_reference
         requested_action_rms = torch.sqrt(torch.mean(requested.pow(2), dim=-1))
         action_saturation_delta_rms = torch.sqrt(torch.mean(saturation_delta.pow(2), dim=-1))
         action_saturation_delta_max = torch.max(torch.abs(saturation_delta), dim=-1).values
@@ -362,6 +374,7 @@ class T15TCVDerivativeReward:
         action: Tensor,
         previous_action: Tensor,
         requested_action: Tensor | None = None,
+        applied_delta_action: Tensor | None = None,
         current_over_limit_a: Tensor,
         current_usage_fraction: Tensor,
         current_margin_fraction: Tensor,
@@ -392,11 +405,16 @@ class T15TCVDerivativeReward:
 
         ip_error = torch.abs(ip - ip_ref)
         requested = action if requested_action is None else requested_action.to(dtype=action.dtype, device=action.device)
-        delta_action = action - previous_action
+        delta_action = (
+            action - previous_action
+            if applied_delta_action is None
+            else applied_delta_action.to(dtype=action.dtype, device=action.device)
+        )
         action_rms = torch.sqrt(torch.mean(action.pow(2), dim=-1))
         delta_action_rms = torch.sqrt(torch.mean(delta_action.pow(2), dim=-1))
         max_abs_action = torch.max(torch.abs(action), dim=-1).values
-        saturation_delta = requested - action
+        saturation_reference = action if applied_delta_action is None else delta_action
+        saturation_delta = requested - saturation_reference
         requested_action_rms = torch.sqrt(torch.mean(requested.pow(2), dim=-1))
         action_saturation_delta_rms = torch.sqrt(torch.mean(saturation_delta.pow(2), dim=-1))
         action_saturation_delta_max = torch.max(torch.abs(saturation_delta), dim=-1).values
@@ -407,7 +425,7 @@ class T15TCVDerivativeReward:
         shape_max_reward = _tcv_softplus(shape_error_max, bad=max(float(c.shape_max_scale_m), 1.0e-12), good=0.0)
         ip_reward = _tcv_softplus(ip_error, bad=max(float(c.ip_scale_a), 1.0e-12), good=0.0)
         current_reward = _tcv_clipped_linear(current_usage_fraction, bad=float(c.current_bad_fraction), good=float(c.current_soft_fraction))
-        derivative_reward = _tcv_softplus(derivative_usage, bad=float(c.derivative_bad_fraction), good=0.0)
+        derivative_reward = _tcv_softplus(max_abs_action, bad=float(c.derivative_bad_fraction), good=0.0)
         actuator_saturation_loss = torch.mean(saturation_delta.pow(2), dim=-1)
         saturation_reward = _tcv_clipped_linear(
             torch.sqrt(torch.clamp(actuator_saturation_loss, min=0.0)),

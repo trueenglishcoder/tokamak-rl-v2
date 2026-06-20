@@ -13,6 +13,7 @@ PROFILE_FIXED_HORIZON = "fixed_horizon"
 PROFILE_SATURATION = "saturation"
 PROFILE_TCV_QUALITY = "tcv_quality"
 PROFILE_TCV_DERIVATIVE = "tcv_derivative"
+PROFILE_TCV_DELTA_JDOT = "tcv_delta_jdot"
 
 BROAD_SHAPE_REGIMES = [
     {"id": "s0", "shape_mean_weight": 1.5, "shape_max_weight": 0.375},
@@ -440,6 +441,27 @@ TCV_QUALITY_FOCUS_SAFETY_FACTORS = [
     },
 ]
 
+TCV_DELTA_BROAD_SHAPE_REGIMES = [
+    {"id": "s0", "shape_mean_weight": 0.5, "shape_max_weight": 0.125},
+    {"id": "s1", "shape_mean_weight": 1.0, "shape_max_weight": 0.25},
+    {"id": "s2", "shape_mean_weight": 2.0, "shape_max_weight": 0.50},
+    {"id": "s3", "shape_mean_weight": 4.0, "shape_max_weight": 1.00},
+]
+
+TCV_DELTA_BROAD_IP_REGIMES = [
+    {"id": "i0", "ip_weight": 0.25},
+    {"id": "i1", "ip_weight": 0.75},
+    {"id": "i2", "ip_weight": 1.50},
+]
+
+TCV_DELTA_BROAD_SAFETY_REGIMES = [
+    {"id": "a0", "current_weight": 0.5, "derivative_weight": 0.10, "actuator_saturation_weight": 0.10},
+    {"id": "a1", "current_weight": 1.0, "derivative_weight": 0.25, "actuator_saturation_weight": 0.25},
+    {"id": "a2", "current_weight": 2.0, "derivative_weight": 0.50, "actuator_saturation_weight": 0.50},
+    {"id": "a3", "current_weight": 4.0, "derivative_weight": 1.00, "actuator_saturation_weight": 1.00},
+    {"id": "a4", "current_weight": 8.0, "derivative_weight": 2.00, "actuator_saturation_weight": 2.00},
+]
+
 TCV_QUALITY_FIXED_REWARD = {
     "kind": "tcv_quality_legacy",
     "shape_mean_scale_m": 0.03,
@@ -492,6 +514,8 @@ TCV_QUALITY_FIXED_SIM = {
 }
 
 TCV_DERIVATIVE_FIXED_SIM = {
+    "action_contract": "delta_jdot",
+    "delta_derivative_scale_aps": 500000.0,
     "terminate_on_boundary_loss": True,
     "terminate_on_current_limit": True,
     "current_termination_over_limit_a": 0.0,
@@ -508,6 +532,8 @@ def _rounded(value: float) -> float:
 def _check_profile(profile: str) -> str:
     if profile == PROFILE_TCV_DERIVATIVE:
         return PROFILE_TCV_DERIVATIVE
+    if profile == PROFILE_TCV_DELTA_JDOT:
+        return PROFILE_TCV_DELTA_JDOT
     if profile not in {PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON, PROFILE_SATURATION, PROFILE_TCV_QUALITY}:
         raise ValueError(f"Unknown reward sweep profile: {profile}")
     return profile
@@ -521,7 +547,7 @@ def _fixed_reward(profile: str) -> dict[str, Any]:
         return dict(FIXED_HORIZON_FIXED_REWARD)
     if profile == PROFILE_SATURATION:
         return dict(SATURATION_FIXED_REWARD)
-    if profile == PROFILE_TCV_DERIVATIVE:
+    if profile in {PROFILE_TCV_DERIVATIVE, PROFILE_TCV_DELTA_JDOT}:
         return dict(TCV_DERIVATIVE_FIXED_REWARD)
     if profile == PROFILE_TCV_QUALITY:
         return dict(TCV_QUALITY_FIXED_REWARD)
@@ -536,7 +562,7 @@ def _fixed_sim(profile: str) -> dict[str, Any]:
         return dict(FIXED_HORIZON_FIXED_SIM)
     if profile == PROFILE_SATURATION:
         return dict(SATURATION_FIXED_SIM)
-    if profile == PROFILE_TCV_DERIVATIVE:
+    if profile in {PROFILE_TCV_DERIVATIVE, PROFILE_TCV_DELTA_JDOT}:
         return dict(TCV_DERIVATIVE_FIXED_SIM)
     if profile == PROFILE_TCV_QUALITY:
         return dict(TCV_QUALITY_FIXED_SIM)
@@ -551,6 +577,8 @@ def _broad_shape_regimes(profile: str) -> list[dict[str, Any]]:
         return FIXED_HORIZON_BROAD_SHAPE_REGIMES
     if profile == PROFILE_SATURATION:
         return SATURATION_BROAD_SHAPE_REGIMES
+    if profile == PROFILE_TCV_DELTA_JDOT:
+        return TCV_DELTA_BROAD_SHAPE_REGIMES
     if profile in {PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE}:
         return TCV_QUALITY_BROAD_SHAPE_REGIMES
     return BROAD_SHAPE_REGIMES
@@ -564,6 +592,8 @@ def _broad_ip_regimes(profile: str) -> list[dict[str, Any]]:
         return FIXED_HORIZON_BROAD_IP_REGIMES
     if profile == PROFILE_SATURATION:
         return SATURATION_BROAD_IP_REGIMES
+    if profile == PROFILE_TCV_DELTA_JDOT:
+        return TCV_DELTA_BROAD_IP_REGIMES
     if profile in {PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE}:
         return TCV_QUALITY_BROAD_IP_REGIMES
     return BROAD_IP_REGIMES
@@ -577,6 +607,8 @@ def _broad_safety_regimes(profile: str) -> list[dict[str, Any]]:
         return FIXED_HORIZON_BROAD_SAFETY_REGIMES
     if profile == PROFILE_SATURATION:
         return SATURATION_BROAD_SAFETY_REGIMES
+    if profile == PROFILE_TCV_DELTA_JDOT:
+        return TCV_DELTA_BROAD_SAFETY_REGIMES
     if profile in {PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE}:
         return TCV_QUALITY_BROAD_SAFETY_REGIMES
     return BROAD_ACTUATOR_REGIMES
@@ -590,7 +622,7 @@ def _focus_shape_factors(profile: str) -> list[dict[str, Any]]:
         return FIXED_HORIZON_FOCUS_SHAPE_FACTORS
     if profile == PROFILE_SATURATION:
         return SATURATION_FOCUS_SHAPE_FACTORS
-    if profile in {PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE}:
+    if profile in {PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE, PROFILE_TCV_DELTA_JDOT}:
         return TCV_QUALITY_FOCUS_SHAPE_FACTORS
     return FOCUS_SHAPE_FACTORS
 
@@ -603,7 +635,7 @@ def _focus_ip_factors(profile: str) -> list[dict[str, Any]]:
         return FIXED_HORIZON_FOCUS_IP_FACTORS
     if profile == PROFILE_SATURATION:
         return SATURATION_FOCUS_IP_FACTORS
-    if profile in {PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE}:
+    if profile in {PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE, PROFILE_TCV_DELTA_JDOT}:
         return TCV_QUALITY_FOCUS_IP_FACTORS
     return FOCUS_IP_FACTORS
 
@@ -616,7 +648,7 @@ def _focus_safety_factors(profile: str) -> list[dict[str, Any]]:
         return FIXED_HORIZON_FOCUS_SAFETY_FACTORS
     if profile == PROFILE_SATURATION:
         return SATURATION_FOCUS_SAFETY_FACTORS
-    if profile in {PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE}:
+    if profile in {PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE, PROFILE_TCV_DELTA_JDOT}:
         return TCV_QUALITY_FOCUS_SAFETY_FACTORS
     return FOCUS_ACTUATOR_FACTORS
 
@@ -931,7 +963,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pass", dest="sweep_pass", choices=("broad", "focused"), default="broad")
     parser.add_argument(
         "--profile",
-        choices=(PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON, PROFILE_SATURATION, PROFILE_TCV_QUALITY, PROFILE_TCV_DERIVATIVE),
+        choices=(
+            PROFILE_LEGAL,
+            PROFILE_CURRENT_CONSTRAINT,
+            PROFILE_FIXED_HORIZON,
+            PROFILE_SATURATION,
+            PROFILE_TCV_QUALITY,
+            PROFILE_TCV_DERIVATIVE,
+            PROFILE_TCV_DELTA_JDOT,
+        ),
         default=PROFILE_LEGAL,
     )
     parser.add_argument("--center", type=Path, default=None, help="physical_best_candidate.json for focused pass")

@@ -59,7 +59,7 @@ print(f"pass1_center_reward={center}")
 PYCENTER
 
     mkdir -p "${ROOT}/pass2_focused/generated_configs"
-    if [[ "${PROFILE}" == "saturation" || "${PROFILE}" == "tcv_quality" || "${PROFILE}" == "tcv_derivative" ]]; then
+    if [[ "${PROFILE}" == "saturation" || "${PROFILE}" == "tcv_quality" || "${PROFILE}" == "tcv_derivative" || "${PROFILE}" == "tcv_delta_jdot" ]]; then
       PASS2_RUNS_PER_TASK=1
       PASS2_ARRAY_TASKS=12
     else

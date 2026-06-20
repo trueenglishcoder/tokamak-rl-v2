@@ -12,6 +12,7 @@ from scripts.build_reward_sweep_manifest import (
     PROFILE_FIXED_HORIZON,
     PROFILE_SATURATION,
     PROFILE_TCV_DERIVATIVE,
+    PROFILE_TCV_DELTA_JDOT,
     PROFILE_TCV_QUALITY,
     build_manifest,
     build_variants,
@@ -204,6 +205,8 @@ def test_tcv_derivative_manifest_has_36_and_operational_termination_overrides() 
     assert first["reward"]["action_weight"] == 0.0
     assert first["reward"]["delta_action_weight"] == 0.0
     assert first["sim"] == {
+        "action_contract": "delta_jdot",
+        "delta_derivative_scale_aps": 500000.0,
         "terminate_on_boundary_loss": True,
         "terminate_on_current_limit": True,
         "current_termination_over_limit_a": 0.0,
@@ -236,6 +239,57 @@ def test_tcv_derivative_focused_manifest_has_12_variants() -> None:
     assert variants[0]["reward"]["kind"] == "tcv_derivative"
     assert variants[0]["reward"]["current_weight"] == 1.5
     assert variants[-1]["reward"]["current_weight"] == 3.0
+
+
+def test_tcv_delta_jdot_manifest_has_60_and_delta_contract() -> None:
+    manifest = build_manifest(
+        "broad",
+        profile=PROFILE_TCV_DELTA_JDOT,
+        runs_per_array_task=5,
+        array_task_count=12,
+    )
+    variants = manifest["variants"]
+    assert manifest["variant_count"] == 60
+    assert manifest["runs_per_array_task"] == 5
+    assert manifest["array_task_count"] == 12
+    assert variants[0]["folder"] == "b000_s0_i0_a0"
+    assert variants[-1]["folder"] == "b059_s3_i2_a4"
+    assert variants[0]["reward"]["kind"] == "tcv_derivative"
+    assert variants[0]["reward"]["shape_mean_weight"] == 0.5
+    assert variants[0]["reward"]["ip_weight"] == 0.25
+    assert variants[0]["reward"]["current_weight"] == 0.5
+    assert variants[-1]["reward"]["shape_mean_weight"] == 4.0
+    assert variants[-1]["reward"]["ip_weight"] == 1.5
+    assert variants[-1]["reward"]["current_weight"] == 8.0
+    assert variants[0]["sim"]["action_contract"] == "delta_jdot"
+    assert variants[0]["sim"]["delta_derivative_scale_aps"] == 500000.0
+    assert variants[0]["sim"]["current_saturation_fraction"] == 1.0
+
+
+def test_tcv_delta_jdot_focused_manifest_has_12_variants() -> None:
+    center = {
+        "shape_mean_weight": 1.0,
+        "shape_max_weight": 0.25,
+        "ip_weight": 0.75,
+        "current_weight": 2.0,
+        "derivative_weight": 0.5,
+        "actuator_saturation_weight": 0.5,
+    }
+    manifest = build_manifest(
+        "focused",
+        center_reward=center,
+        profile=PROFILE_TCV_DELTA_JDOT,
+        runs_per_array_task=1,
+        array_task_count=12,
+    )
+    variants = manifest["variants"]
+    assert manifest["variant_count"] == 12
+    assert variants[0]["folder"] == "f000_sf0_if0_af0"
+    assert variants[-1]["folder"] == "f011_sf2_if1_af1"
+    assert variants[0]["reward"]["kind"] == "tcv_derivative"
+    assert variants[0]["reward"]["current_weight"] == 1.5
+    assert variants[-1]["reward"]["current_weight"] == 3.0
+    assert all(variant["sim"]["action_contract"] == "delta_jdot" for variant in variants)
 
 
 def test_current_constraint_focused_manifest_uses_center_soft_fractions() -> None:
@@ -1125,3 +1179,48 @@ def test_submit_saturation_two_pass_uses_36_plus_12_chain(tmp_path: Path, monkey
     assert submitted[2][2] == "--dependency=afterok:312"
     assert submitted[3][2] == "--dependency=afterany:313"
     assert released == [["scontrol", "release", "311"]]
+
+
+def test_submit_chain_supports_60_candidate_pass1(tmp_path: Path, monkeypatch) -> None:
+    submitted: list[list[str]] = []
+    released: list[list[str]] = []
+    jobids = iter(["411\n", "412\n", "413\n", "414\n"])
+
+    class Result:
+        def __init__(self, stdout: str) -> None:
+            self.stdout = stdout
+            self.stderr = ""
+
+    def fake_run(args, check, text, stdout, stderr):
+        if args[0] == "scontrol":
+            released.append(list(args))
+            return Result("")
+        submitted.append(list(args))
+        return Result(next(jobids))
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("scripts.submit_two_pass_reward_sweep.subprocess.run", fake_run)
+
+    payload = submit_chain(
+        pass1_job=Path("jobs/tcv-delta-pass1.sbatch"),
+        pass1_aggregate_job=Path("jobs/agg1.sbatch"),
+        pass2_job=Path("jobs/tcv-delta-pass2.sbatch"),
+        final_aggregate_job=Path("jobs/final.sbatch"),
+        root_prefix="outputs/t15_reward_sweep72_tcv_delta_jdot_2m5m",
+        profile=PROFILE_TCV_DELTA_JDOT,
+        pass1_runs_per_array_task=5,
+        pass1_array_task_count=12,
+    )
+
+    root = tmp_path / "outputs/t15_reward_sweep72_tcv_delta_jdot_2m5m_411"
+    pass1_manifest = json.loads((root / "pass1_broad" / "variants.json").read_text(encoding="utf-8"))
+
+    assert payload["root"] == "outputs/t15_reward_sweep72_tcv_delta_jdot_2m5m_411"
+    assert payload["pass1_runs_per_array_task"] == 5
+    assert payload["pass1_array_task_count"] == 12
+    assert pass1_manifest["profile"] == PROFILE_TCV_DELTA_JDOT
+    assert pass1_manifest["variant_count"] == 60
+    assert pass1_manifest["runs_per_array_task"] == 5
+    assert pass1_manifest["array_task_count"] == 12
+    assert "--export=ALL,SWEEP_ROOT_PREFIX=outputs/t15_reward_sweep72_tcv_delta_jdot_2m5m" in submitted[0]
+    assert released == [["scontrol", "release", "411"]]

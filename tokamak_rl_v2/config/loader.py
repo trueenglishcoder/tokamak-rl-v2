@@ -155,6 +155,8 @@ def _sim(raw: Mapping[str, Any], base: Path) -> SimConfig:
         current_limit_scale=float(raw.get("current_limit_scale", defaults.current_limit_scale)),
         derivative_limit_scale=float(raw.get("derivative_limit_scale", defaults.derivative_limit_scale)),
         action_scale=float(raw.get("action_scale", 1.0)),
+        action_contract=str(raw.get("action_contract", defaults.action_contract)),
+        delta_derivative_scale_aps=float(raw.get("delta_derivative_scale_aps", defaults.delta_derivative_scale_aps)),
         terminate_on_boundary_loss=bool(raw.get("terminate_on_boundary_loss", True)),
         terminate_on_current_limit=bool(raw.get("terminate_on_current_limit", True)),
         current_termination_over_limit_a=float(raw.get("current_termination_over_limit_a", defaults.current_termination_over_limit_a)),
@@ -395,6 +397,10 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
         raise ValueError("observation preview settings are invalid")
     if not math.isfinite(float(cfg.sim.action_scale)) or float(cfg.sim.action_scale) <= 0.0 or float(cfg.sim.action_scale) > 1.0:
         raise ValueError("sim.action_scale must be finite and in (0, 1]")
+    if cfg.sim.action_contract not in {"absolute_derivative", "delta_jdot"}:
+        raise ValueError("sim.action_contract must be absolute_derivative or delta_jdot")
+    if not math.isfinite(float(cfg.sim.delta_derivative_scale_aps)) or float(cfg.sim.delta_derivative_scale_aps) <= 0.0:
+        raise ValueError("sim.delta_derivative_scale_aps must be finite and positive")
     for name in ("current_limit_scale", "derivative_limit_scale"):
         value = float(getattr(cfg.sim, name))
         if not math.isfinite(value) or value <= 0.0:
@@ -408,6 +414,8 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
     if not math.isfinite(float(cfg.sim.current_saturation_fraction)) or float(cfg.sim.current_saturation_fraction) < 1.0:
         raise ValueError("sim.current_saturation_fraction must be finite and >= 1")
     if cfg.reward.kind == "tcv_derivative":
+        if cfg.sim.action_contract != "delta_jdot":
+            raise ValueError("reward.kind=tcv_derivative requires sim.action_contract=delta_jdot")
         if not cfg.sim.terminate_on_boundary_loss:
             raise ValueError("reward.kind=tcv_derivative requires sim.terminate_on_boundary_loss=true")
         if not cfg.sim.terminate_on_current_limit:
@@ -419,6 +427,11 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
         raise ValueError("randomization noise values must be non-negative")
     if cfg.randomization.action_offset_max < cfg.randomization.action_offset_min:
         raise ValueError("randomization.action_offset_max must be >= action_offset_min")
+    if cfg.sim.action_contract == "delta_jdot" and (
+        abs(float(cfg.randomization.action_offset_min)) > 1.0e-12
+        or abs(float(cfg.randomization.action_offset_max)) > 1.0e-12
+    ):
+        raise ValueError("sim.action_contract=delta_jdot requires zero randomization action offsets")
     if cfg.network.hidden_dim <= 0 or cfg.network.critic_hidden_dim <= 0 or cfg.network.critic_mlp_hidden_dim <= 0:
         raise ValueError("network dimensions must be positive")
     if not math.isfinite(float(cfg.network.actor_min_std)) or float(cfg.network.actor_min_std) <= 0.0:

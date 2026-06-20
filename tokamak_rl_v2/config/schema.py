@@ -146,6 +146,8 @@ class SimConfig:
     current_limit_scale: float = 1.0
     derivative_limit_scale: float = 1.0
     action_scale: float = 1.0
+    action_contract: Literal["absolute_derivative", "delta_jdot"] = "absolute_derivative"
+    delta_derivative_scale_aps: float = 500000.0
     terminate_on_boundary_loss: bool = True
     terminate_on_current_limit: bool = True
     current_termination_over_limit_a: float = 5000.0
