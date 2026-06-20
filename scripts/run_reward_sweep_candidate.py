@@ -95,6 +95,8 @@ def run_candidate(args: argparse.Namespace) -> int:
     cfg.setdefault("reference", {}).setdefault("ip", {})["limits_path"] = str(args.reference_limits)
     cfg.setdefault("reward", {}).update(variant["reward"])
     cfg.setdefault("training", {})["steps"] = int(args.train_env_steps)
+    training_overrides = variant.get("training") if isinstance(variant.get("training"), dict) else {}
+    cfg["training"].update(training_overrides)
     cfg["training"]["output_dir"] = str(output_dir)
     cfg["training"]["save_checkpoints"] = False
     cfg["training"]["checkpoint_interval_steps"] = max(1, int(args.train_env_steps))

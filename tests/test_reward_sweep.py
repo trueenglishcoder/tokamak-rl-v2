@@ -341,6 +341,7 @@ def test_tcv_delta_no_termination_manifest_has_36_variants() -> None:
     assert {variant["sim"]["delta_derivative_scale_aps"] for variant in variants} == {500000.0}
     assert {variant["sim"]["terminate_on_boundary_loss"] for variant in variants} == {False}
     assert {variant["sim"]["terminate_on_current_limit"] for variant in variants} == {False}
+    assert {variant["training"]["production_mode"] for variant in variants} == {False}
     assert {variant["reward"]["shape_mean_weight"] for variant in variants} == {1.6, 3.2, 6.4}
     assert {variant["reward"]["ip_weight"] for variant in variants} == {0.9, 1.8, 3.6}
     assert {variant["reward"]["current_weight"] for variant in variants} == {0.75, 1.5, 3.0, 6.0}

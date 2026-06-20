@@ -416,10 +416,10 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
     if cfg.reward.kind == "tcv_derivative":
         if cfg.sim.action_contract != "delta_jdot":
             raise ValueError("reward.kind=tcv_derivative requires sim.action_contract=delta_jdot")
-        if not cfg.sim.terminate_on_boundary_loss:
-            raise ValueError("reward.kind=tcv_derivative requires sim.terminate_on_boundary_loss=true")
-        if not cfg.sim.terminate_on_current_limit:
-            raise ValueError("reward.kind=tcv_derivative requires sim.terminate_on_current_limit=true")
+        if cfg.training.production_mode and not cfg.sim.terminate_on_boundary_loss:
+            raise ValueError("production reward.kind=tcv_derivative requires sim.terminate_on_boundary_loss=true")
+        if cfg.training.production_mode and not cfg.sim.terminate_on_current_limit:
+            raise ValueError("production reward.kind=tcv_derivative requires sim.terminate_on_current_limit=true")
         if not math.isclose(float(cfg.sim.current_saturation_fraction), 1.0, rel_tol=0.0, abs_tol=1.0e-12):
             raise ValueError("reward.kind=tcv_derivative requires sim.current_saturation_fraction=1.0")
     _validate_reward_config(cfg.reward, prefix="reward")

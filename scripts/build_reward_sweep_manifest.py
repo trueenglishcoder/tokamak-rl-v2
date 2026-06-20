@@ -783,6 +783,8 @@ def build_broad_variants(profile: str = PROFILE_LEGAL) -> list[dict[str, Any]]:
                 extra = {"actuator_regime": actuator["id"]}
                 if fixed_sim:
                     extra["sim"] = fixed_sim
+                if profile == PROFILE_TCV_DELTA_NO_TERMINATION:
+                    extra["training"] = {"production_mode": False}
                 variants.append(
                     _variant(
                         index=index,
