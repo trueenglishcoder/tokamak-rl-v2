@@ -16,6 +16,7 @@ PROFILE_TCV_DERIVATIVE = "tcv_derivative"
 PROFILE_TCV_DELTA_JDOT = "tcv_delta_jdot"
 PROFILE_TCV_DELTA_TERMINATION_F002 = "tcv_delta_termination_f002"
 PROFILE_TCV_DELTA_NO_TERMINATION = "tcv_delta_no_termination"
+PROFILE_TCV_DELTA_F002_SEMANTICS = "tcv_delta_f002_semantics"
 
 BROAD_SHAPE_REGIMES = [
     {"id": "s0", "shape_mean_weight": 1.5, "shape_max_weight": 0.375},
@@ -581,6 +582,61 @@ TCV_DELTA_NOTERM_FIXED_SIM = {
     "terminate_on_current_limit": False,
 }
 
+TCV_DELTA_F002_TERMINAL_REGIMES = [
+    {"id": "t0", "terminal_reward": -10.0},
+    {"id": "t1", "terminal_reward": -20.0},
+    {"id": "t2", "terminal_reward": -50.0},
+]
+
+TCV_DELTA_F002_COMBINER_REGIMES = [
+    {"id": "q0", "smoothmax_alpha": -3.0},
+    {"id": "q1", "smoothmax_alpha": -5.0},
+    {"id": "q2", "smoothmax_alpha": -8.0},
+]
+
+TCV_DELTA_F002_SCALE_REGIMES = [
+    {
+        "id": "r0",
+        "shape_mean_scale_m": 0.03,
+        "shape_max_scale_m": 0.08,
+        "ip_scale_a": 15000.0,
+        "current_soft_fraction": 0.90,
+        "current_bad_fraction": 1.00,
+        "derivative_bad_fraction": 1.10,
+        "boundary_missing_weight": 20.0,
+    },
+    {
+        "id": "r1",
+        "shape_mean_scale_m": 0.05,
+        "shape_max_scale_m": 0.12,
+        "ip_scale_a": 25000.0,
+        "current_soft_fraction": 0.90,
+        "current_bad_fraction": 1.10,
+        "derivative_bad_fraction": 1.20,
+        "boundary_missing_weight": 20.0,
+    },
+    {
+        "id": "r2",
+        "shape_mean_scale_m": 0.03,
+        "shape_max_scale_m": 0.08,
+        "ip_scale_a": 25000.0,
+        "current_soft_fraction": 0.85,
+        "current_bad_fraction": 1.00,
+        "derivative_bad_fraction": 1.10,
+        "boundary_missing_weight": 60.0,
+    },
+    {
+        "id": "r3",
+        "shape_mean_scale_m": 0.05,
+        "shape_max_scale_m": 0.12,
+        "ip_scale_a": 35000.0,
+        "current_soft_fraction": 0.85,
+        "current_bad_fraction": 1.10,
+        "derivative_bad_fraction": 1.20,
+        "boundary_missing_weight": 60.0,
+    },
+]
+
 
 def _rounded(value: float) -> float:
     return float(round(float(value), 8))
@@ -595,6 +651,8 @@ def _check_profile(profile: str) -> str:
         return PROFILE_TCV_DELTA_TERMINATION_F002
     if profile == PROFILE_TCV_DELTA_NO_TERMINATION:
         return PROFILE_TCV_DELTA_NO_TERMINATION
+    if profile == PROFILE_TCV_DELTA_F002_SEMANTICS:
+        return PROFILE_TCV_DELTA_F002_SEMANTICS
     if profile not in {PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON, PROFILE_SATURATION, PROFILE_TCV_QUALITY}:
         raise ValueError(f"Unknown reward sweep profile: {profile}")
     return profile
@@ -609,6 +667,8 @@ def _fixed_reward(profile: str) -> dict[str, Any]:
     if profile == PROFILE_SATURATION:
         return dict(SATURATION_FIXED_REWARD)
     if profile == PROFILE_TCV_DELTA_TERMINATION_F002:
+        return dict(TCV_DELTA_F002_FIXED_REWARD)
+    if profile == PROFILE_TCV_DELTA_F002_SEMANTICS:
         return dict(TCV_DELTA_F002_FIXED_REWARD)
     if profile == PROFILE_TCV_DELTA_NO_TERMINATION:
         return dict(TCV_DERIVATIVE_FIXED_REWARD)
@@ -627,7 +687,12 @@ def _fixed_sim(profile: str) -> dict[str, Any]:
         return dict(FIXED_HORIZON_FIXED_SIM)
     if profile == PROFILE_SATURATION:
         return dict(SATURATION_FIXED_SIM)
-    if profile in {PROFILE_TCV_DERIVATIVE, PROFILE_TCV_DELTA_JDOT, PROFILE_TCV_DELTA_TERMINATION_F002}:
+    if profile in {
+        PROFILE_TCV_DERIVATIVE,
+        PROFILE_TCV_DELTA_JDOT,
+        PROFILE_TCV_DELTA_TERMINATION_F002,
+        PROFILE_TCV_DELTA_F002_SEMANTICS,
+    }:
         return dict(TCV_DERIVATIVE_FIXED_SIM)
     if profile == PROFILE_TCV_DELTA_NO_TERMINATION:
         return dict(TCV_DELTA_NOTERM_FIXED_SIM)
@@ -763,6 +828,8 @@ def build_broad_variants(profile: str = PROFILE_LEGAL) -> list[dict[str, Any]]:
     profile = _check_profile(profile)
     if profile == PROFILE_TCV_DELTA_TERMINATION_F002:
         return build_tcv_delta_termination_f002_variants()
+    if profile == PROFILE_TCV_DELTA_F002_SEMANTICS:
+        return build_tcv_delta_f002_semantics_variants()
     variants: list[dict[str, Any]] = []
     index = 0
     fixed_reward = _fixed_reward(profile)
@@ -852,6 +919,49 @@ def build_tcv_delta_termination_f002_variants() -> list[dict[str, Any]]:
                 )
             )
             index += 1
+    return variants
+
+
+def build_tcv_delta_f002_semantics_variants() -> list[dict[str, Any]]:
+    variants: list[dict[str, Any]] = []
+    index = 0
+    fixed_reward = _fixed_reward(PROFILE_TCV_DELTA_F002_SEMANTICS)
+    fixed_sim = _fixed_sim(PROFILE_TCV_DELTA_F002_SEMANTICS)
+    for terminal in TCV_DELTA_F002_TERMINAL_REGIMES:
+        for combiner in TCV_DELTA_F002_COMBINER_REGIMES:
+            for scale in TCV_DELTA_F002_SCALE_REGIMES:
+                name = f"{terminal['id']}_{combiner['id']}_{scale['id']}"
+                reward = {
+                    **fixed_reward,
+                    "terminal_reward": float(terminal["terminal_reward"]),
+                    "smoothmax_alpha": float(combiner["smoothmax_alpha"]),
+                    "shape_mean_scale_m": float(scale["shape_mean_scale_m"]),
+                    "shape_max_scale_m": float(scale["shape_max_scale_m"]),
+                    "ip_scale_a": float(scale["ip_scale_a"]),
+                    "current_soft_fraction": float(scale["current_soft_fraction"]),
+                    "current_bad_fraction": float(scale["current_bad_fraction"]),
+                    "derivative_bad_fraction": float(scale["derivative_bad_fraction"]),
+                    "boundary_missing_weight": float(scale["boundary_missing_weight"]),
+                }
+                variants.append(
+                    _variant(
+                        index=index,
+                        prefix="s",
+                        name=name,
+                        shape_regime="f002",
+                        ip_regime="f002",
+                        current_regime=str(scale["id"]),
+                        derivative_regime=str(scale["id"]),
+                        reward=reward,
+                        extra={
+                            "terminal_regime": terminal["id"],
+                            "combiner_regime": combiner["id"],
+                            "scale_regime": scale["id"],
+                            "sim": fixed_sim,
+                        },
+                    )
+                )
+                index += 1
     return variants
 
 
@@ -1056,13 +1166,22 @@ def build_manifest(
         "variants": variants,
     }
     if sweep_pass == "broad":
-        manifest.update(
-            {
-                "shape_regimes": _broad_shape_regimes(profile),
-                "ip_regimes": _broad_ip_regimes(profile),
-                "actuator_regimes": _broad_safety_regimes(profile),
-            }
-        )
+        if profile == PROFILE_TCV_DELTA_F002_SEMANTICS:
+            manifest.update(
+                {
+                    "terminal_regimes": TCV_DELTA_F002_TERMINAL_REGIMES,
+                    "combiner_regimes": TCV_DELTA_F002_COMBINER_REGIMES,
+                    "scale_regimes": TCV_DELTA_F002_SCALE_REGIMES,
+                }
+            )
+        else:
+            manifest.update(
+                {
+                    "shape_regimes": _broad_shape_regimes(profile),
+                    "ip_regimes": _broad_ip_regimes(profile),
+                    "actuator_regimes": _broad_safety_regimes(profile),
+                }
+            )
     else:
         manifest.update(
             {
@@ -1091,6 +1210,7 @@ def main(argv: list[str] | None = None) -> int:
             PROFILE_TCV_DELTA_JDOT,
             PROFILE_TCV_DELTA_TERMINATION_F002,
             PROFILE_TCV_DELTA_NO_TERMINATION,
+            PROFILE_TCV_DELTA_F002_SEMANTICS,
         ),
         default=PROFILE_LEGAL,
     )

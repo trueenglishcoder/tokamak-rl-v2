@@ -12,6 +12,7 @@ from scripts.build_reward_sweep_manifest import (
     PROFILE_FIXED_HORIZON,
     PROFILE_SATURATION,
     PROFILE_TCV_DERIVATIVE,
+    PROFILE_TCV_DELTA_F002_SEMANTICS,
     PROFILE_TCV_DELTA_JDOT,
     PROFILE_TCV_DELTA_NO_TERMINATION,
     PROFILE_TCV_DELTA_TERMINATION_F002,
@@ -25,6 +26,7 @@ from scripts.summarize_two_pass_reward_sweep_physical import summarize_two_pass
 from scripts.summarize_reward_sweep_physical import summarize
 from scripts.submit_saturation_reward_sweep import submit_onepass
 from scripts.submit_saturation_two_pass_reward_sweep import main as submit_saturation_two_pass_main
+from scripts.submit_tcv_delta_f002_semantics_sweep import submit_f002_semantics_sweep
 from scripts.submit_two_pass_reward_sweep import submit_chain
 
 
@@ -353,6 +355,44 @@ def test_tcv_delta_no_termination_manifest_has_36_variants() -> None:
     assert {variant["reward"]["shape_mean_weight"] for variant in variants} == {1.6, 3.2, 6.4}
     assert {variant["reward"]["ip_weight"] for variant in variants} == {0.9, 1.8, 3.6}
     assert {variant["reward"]["current_weight"] for variant in variants} == {0.75, 1.5, 3.0, 6.0}
+
+
+def test_tcv_delta_f002_semantics_manifest_has_36_variants() -> None:
+    manifest = build_manifest(
+        "broad",
+        profile=PROFILE_TCV_DELTA_F002_SEMANTICS,
+        runs_per_array_task=3,
+        array_task_count=12,
+    )
+    variants = manifest["variants"]
+    assert manifest["variant_count"] == 36
+    assert manifest["runs_per_array_task"] == 3
+    assert manifest["array_task_count"] == 12
+    assert variants[0]["folder"] == "s000_t0_q0_r0"
+    assert variants[-1]["folder"] == "s035_t2_q2_r3"
+    assert {variant["reward"]["kind"] for variant in variants} == {"tcv_derivative"}
+    assert {variant["reward"]["shape_mean_weight"] for variant in variants} == {3.2}
+    assert {variant["reward"]["shape_max_weight"] for variant in variants} == {0.8}
+    assert {variant["reward"]["ip_weight"] for variant in variants} == {1.8}
+    assert {variant["reward"]["current_weight"] for variant in variants} == {0.75}
+    assert {variant["reward"]["derivative_weight"] for variant in variants} == {0.1875}
+    assert {variant["reward"]["actuator_saturation_weight"] for variant in variants} == {0.1875}
+    assert {variant["reward"]["terminal_reward"] for variant in variants} == {-10.0, -20.0, -50.0}
+    assert {variant["reward"]["smoothmax_alpha"] for variant in variants} == {-3.0, -5.0, -8.0}
+    assert {variant["reward"]["shape_mean_scale_m"] for variant in variants} == {0.03, 0.05}
+    assert {variant["reward"]["shape_max_scale_m"] for variant in variants} == {0.08, 0.12}
+    assert {variant["reward"]["ip_scale_a"] for variant in variants} == {15000.0, 25000.0, 35000.0}
+    assert {variant["reward"]["current_soft_fraction"] for variant in variants} == {0.85, 0.90}
+    assert {variant["reward"]["current_bad_fraction"] for variant in variants} == {1.00, 1.10}
+    assert {variant["reward"]["derivative_bad_fraction"] for variant in variants} == {1.10, 1.20}
+    assert {variant["reward"]["boundary_missing_weight"] for variant in variants} == {20.0, 60.0}
+    assert {variant["sim"]["action_contract"] for variant in variants} == {"delta_jdot"}
+    assert {variant["sim"]["delta_derivative_limits_aps"]["pfc"]["pfc0"] for variant in variants} == {163347.0}
+    assert {variant["sim"]["delta_derivative_limits_aps"]["sol"]["sol1"] for variant in variants} == {5889842.0}
+    assert {variant["sim"]["terminate_on_boundary_loss"] for variant in variants} == {True}
+    assert {variant["sim"]["terminate_on_current_limit"] for variant in variants} == {True}
+    assert {variant["sim"]["current_hard_termination_fraction"] for variant in variants} == {1.20}
+    assert {variant["sim"]["current_termination_grace_steps"] for variant in variants} == {1}
 
 
 def test_current_constraint_focused_manifest_uses_center_soft_fractions() -> None:
@@ -1186,6 +1226,51 @@ def test_submit_saturation_onepass_uses_single_array_and_aggregate(tmp_path: Pat
     assert manifest["profile"] == PROFILE_SATURATION
     assert manifest["variant_count"] == 36
     assert released == [["scontrol", "release", "211"]]
+
+
+def test_submit_tcv_delta_f002_semantics_uses_single_array_and_aggregate(tmp_path: Path, monkeypatch) -> None:
+    submitted: list[list[str]] = []
+    released: list[list[str]] = []
+    jobids = iter(["511\n", "512\n"])
+
+    class Result:
+        def __init__(self, stdout: str) -> None:
+            self.stdout = stdout
+            self.stderr = ""
+
+    def fake_run(args, check, text, stdout, stderr):
+        if args[0] == "scontrol":
+            released.append(list(args))
+            return Result("")
+        submitted.append(list(args))
+        return Result(next(jobids))
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("scripts.submit_tcv_delta_f002_semantics_sweep.subprocess.run", fake_run)
+
+    payload = submit_f002_semantics_sweep(
+        sweep_job=Path("jobs/f002-semantics.sbatch"),
+        aggregate_job=Path("jobs/aggregate.sbatch"),
+        root_prefix="outputs/t15_reward_sweep36_tcv_delta_f002_semantics_5m",
+    )
+
+    assert payload["sweep_jobid"] == "511"
+    assert payload["aggregate_jobid"] == "512"
+    assert payload["root"] == "outputs/t15_reward_sweep36_tcv_delta_f002_semantics_5m_511"
+    assert "--hold" in submitted[0]
+    assert "--export=ALL,SWEEP_ROOT_PREFIX=outputs/t15_reward_sweep36_tcv_delta_f002_semantics_5m" in submitted[0]
+    assert submitted[1][2] == "--dependency=afterany:511"
+    assert len(submitted) == 2
+    assert "center_json" not in payload
+    assert "pass2_jobid" not in payload
+    assert (tmp_path / payload["root"] / "selection" / "submission_chain.json").exists()
+    assert (tmp_path / payload["root"] / "variants.json").exists()
+    manifest = json.loads((tmp_path / payload["root"] / "variants.json").read_text(encoding="utf-8"))
+    assert manifest["profile"] == PROFILE_TCV_DELTA_F002_SEMANTICS
+    assert manifest["variant_count"] == 36
+    assert manifest["variants"][0]["folder"] == "s000_t0_q0_r0"
+    assert manifest["variants"][-1]["folder"] == "s035_t2_q2_r3"
+    assert released == [["scontrol", "release", "511"]]
 
 
 def test_submit_saturation_two_pass_uses_36_plus_12_chain(tmp_path: Path, monkeypatch) -> None:
