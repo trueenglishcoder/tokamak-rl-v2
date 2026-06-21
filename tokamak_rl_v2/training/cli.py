@@ -42,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--wandb-project", default="tokamak-rl-v2")
     ap.add_argument("--wandb-name", default=None)
     ap.add_argument("--wandb-mode", choices=("online", "offline", "disabled"), default="online")
-    ap.add_argument("--wandb-metric-preset", choices=("full", "focused"), default="full")
+    ap.add_argument("--wandb-metric-preset", choices=("full", "focused", "sweep"), default="full")
     args = ap.parse_args(argv)
     cfg = load_experiment_config(args.config)
     if args.sim_compute_backend is not None or args.sim_gpu_device is not None:

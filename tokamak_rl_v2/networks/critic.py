@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from tokamak_rl_v2.networks.initialization import truncated_fanin_init
 
 
-CRITIC_ACTION_INPUT_KIND = "requested_delta_jdot_v2"
+CRITIC_ACTION_INPUT_KIND = "requested_delta_jdot_v3"
 
 
 @dataclass(frozen=True, slots=True)

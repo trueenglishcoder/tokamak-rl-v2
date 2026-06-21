@@ -18,6 +18,7 @@ PROFILE_TCV_DELTA_TERMINATION_F002 = "tcv_delta_termination_f002"
 PROFILE_TCV_DELTA_NO_TERMINATION = "tcv_delta_no_termination"
 PROFILE_TCV_DELTA_NO_TERMINATION_SURVIVAL = "tcv_delta_no_termination_survival"
 PROFILE_TCV_DELTA_F002_SEMANTICS = "tcv_delta_f002_semantics"
+PROFILE_TCV_DELTA_CONTRACTFIX = "tcv_delta_contractfix"
 
 BROAD_SHAPE_REGIMES = [
     {"id": "s0", "shape_mean_weight": 1.5, "shape_max_weight": 0.375},
@@ -657,6 +658,25 @@ TCV_DELTA_F002_SCALE_REGIMES = [
     },
 ]
 
+TCV_DELTA_CONTRACTFIX_SURVIVAL_REGIMES = [
+    {"id": "t0", "terminal_reward": -2.0, "boundary_missing_weight": 10.0},
+    {"id": "t1", "terminal_reward": -5.0, "boundary_missing_weight": 20.0},
+    {"id": "t2", "terminal_reward": -10.0, "boundary_missing_weight": 40.0},
+]
+
+TCV_DELTA_CONTRACTFIX_TRACKING_REGIMES = [
+    {"id": "q0", "shape_mean_weight": 2.0, "shape_max_weight": 0.5, "ip_weight": 0.9},
+    {"id": "q1", "shape_mean_weight": 3.2, "shape_max_weight": 0.8, "ip_weight": 1.8},
+    {"id": "q2", "shape_mean_weight": 5.0, "shape_max_weight": 1.25, "ip_weight": 3.0},
+]
+
+TCV_DELTA_CONTRACTFIX_ACTUATOR_REGIMES = [
+    {"id": "a0", "current_weight": 0.5, "derivative_weight": 0.125, "actuator_saturation_weight": 0.125},
+    {"id": "a1", "current_weight": 0.75, "derivative_weight": 0.1875, "actuator_saturation_weight": 0.1875},
+    {"id": "a2", "current_weight": 1.5, "derivative_weight": 0.375, "actuator_saturation_weight": 0.375},
+    {"id": "a3", "current_weight": 3.0, "derivative_weight": 0.75, "actuator_saturation_weight": 0.75},
+]
+
 
 def _rounded(value: float) -> float:
     return float(round(float(value), 8))
@@ -675,6 +695,8 @@ def _check_profile(profile: str) -> str:
         return PROFILE_TCV_DELTA_NO_TERMINATION_SURVIVAL
     if profile == PROFILE_TCV_DELTA_F002_SEMANTICS:
         return PROFILE_TCV_DELTA_F002_SEMANTICS
+    if profile == PROFILE_TCV_DELTA_CONTRACTFIX:
+        return PROFILE_TCV_DELTA_CONTRACTFIX
     if profile not in {PROFILE_LEGAL, PROFILE_CURRENT_CONSTRAINT, PROFILE_FIXED_HORIZON, PROFILE_SATURATION, PROFILE_TCV_QUALITY}:
         raise ValueError(f"Unknown reward sweep profile: {profile}")
     return profile
@@ -692,6 +714,8 @@ def _fixed_reward(profile: str) -> dict[str, Any]:
         return dict(TCV_DELTA_F002_FIXED_REWARD)
     if profile == PROFILE_TCV_DELTA_F002_SEMANTICS:
         return dict(TCV_DELTA_F002_FIXED_REWARD)
+    if profile == PROFILE_TCV_DELTA_CONTRACTFIX:
+        return dict(TCV_DERIVATIVE_FIXED_REWARD)
     if profile in {PROFILE_TCV_DELTA_NO_TERMINATION, PROFILE_TCV_DELTA_NO_TERMINATION_SURVIVAL}:
         return dict(TCV_DERIVATIVE_FIXED_REWARD)
     if profile in {PROFILE_TCV_DERIVATIVE, PROFILE_TCV_DELTA_JDOT}:
@@ -714,6 +738,7 @@ def _fixed_sim(profile: str) -> dict[str, Any]:
         PROFILE_TCV_DELTA_JDOT,
         PROFILE_TCV_DELTA_TERMINATION_F002,
         PROFILE_TCV_DELTA_F002_SEMANTICS,
+        PROFILE_TCV_DELTA_CONTRACTFIX,
     }:
         return dict(TCV_DERIVATIVE_FIXED_SIM)
     if profile in {PROFILE_TCV_DELTA_NO_TERMINATION, PROFILE_TCV_DELTA_NO_TERMINATION_SURVIVAL}:
@@ -858,6 +883,8 @@ def build_broad_variants(profile: str = PROFILE_LEGAL) -> list[dict[str, Any]]:
         return build_tcv_delta_termination_f002_variants()
     if profile == PROFILE_TCV_DELTA_F002_SEMANTICS:
         return build_tcv_delta_f002_semantics_variants()
+    if profile == PROFILE_TCV_DELTA_CONTRACTFIX:
+        return build_tcv_delta_contractfix_variants()
     variants: list[dict[str, Any]] = []
     index = 0
     fixed_reward = _fixed_reward(profile)
@@ -987,6 +1014,48 @@ def build_tcv_delta_f002_semantics_variants() -> list[dict[str, Any]]:
                             "terminal_regime": terminal["id"],
                             "combiner_regime": combiner["id"],
                             "scale_regime": scale["id"],
+                            "sim": fixed_sim,
+                        },
+                    )
+                )
+                index += 1
+    return variants
+
+
+def build_tcv_delta_contractfix_variants() -> list[dict[str, Any]]:
+    variants: list[dict[str, Any]] = []
+    index = 0
+    fixed_reward = _fixed_reward(PROFILE_TCV_DELTA_CONTRACTFIX)
+    fixed_sim = _fixed_sim(PROFILE_TCV_DELTA_CONTRACTFIX)
+    for survival in TCV_DELTA_CONTRACTFIX_SURVIVAL_REGIMES:
+        for tracking in TCV_DELTA_CONTRACTFIX_TRACKING_REGIMES:
+            for actuator in TCV_DELTA_CONTRACTFIX_ACTUATOR_REGIMES:
+                name = f"{survival['id']}_{tracking['id']}_{actuator['id']}"
+                reward = {
+                    **fixed_reward,
+                    "terminal_reward": float(survival["terminal_reward"]),
+                    "boundary_missing_weight": float(survival["boundary_missing_weight"]),
+                    "shape_mean_weight": float(tracking["shape_mean_weight"]),
+                    "shape_max_weight": float(tracking["shape_max_weight"]),
+                    "ip_weight": float(tracking["ip_weight"]),
+                    "current_weight": float(actuator["current_weight"]),
+                    "derivative_weight": float(actuator["derivative_weight"]),
+                    "actuator_saturation_weight": float(actuator["actuator_saturation_weight"]),
+                }
+                variants.append(
+                    _variant(
+                        index=index,
+                        prefix="s",
+                        name=name,
+                        shape_regime=str(tracking["id"]),
+                        ip_regime=str(tracking["id"]),
+                        current_regime=str(actuator["id"]),
+                        derivative_regime=str(actuator["id"]),
+                        reward=reward,
+                        extra={
+                            "survival_regime": survival["id"],
+                            "tracking_regime": tracking["id"],
+                            "actuator_regime": actuator["id"],
                             "sim": fixed_sim,
                         },
                     )
@@ -1204,6 +1273,14 @@ def build_manifest(
                     "scale_regimes": TCV_DELTA_F002_SCALE_REGIMES,
                 }
             )
+        elif profile == PROFILE_TCV_DELTA_CONTRACTFIX:
+            manifest.update(
+                {
+                    "survival_regimes": TCV_DELTA_CONTRACTFIX_SURVIVAL_REGIMES,
+                    "tracking_regimes": TCV_DELTA_CONTRACTFIX_TRACKING_REGIMES,
+                    "actuator_regimes": TCV_DELTA_CONTRACTFIX_ACTUATOR_REGIMES,
+                }
+            )
         else:
             manifest.update(
                 {
@@ -1242,6 +1319,7 @@ def main(argv: list[str] | None = None) -> int:
             PROFILE_TCV_DELTA_NO_TERMINATION,
             PROFILE_TCV_DELTA_NO_TERMINATION_SURVIVAL,
             PROFILE_TCV_DELTA_F002_SEMANTICS,
+            PROFILE_TCV_DELTA_CONTRACTFIX,
         ),
         default=PROFILE_LEGAL,
     )

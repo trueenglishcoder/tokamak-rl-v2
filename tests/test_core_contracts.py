@@ -273,8 +273,8 @@ def test_tcv_derivative_reward_uses_terminal_reward_replacement() -> None:
         terminated=torch.tensor([False, True]),
     )
     assert float(rb.reward[0]) > 0.0
-    assert float(rb.reward[1]) == pytest.approx(-0.05)
-    assert float(rb.components["terminal_total_penalty"][1]) == pytest.approx(-0.05)
+    assert float(rb.reward[1]) == pytest.approx(-5.0)
+    assert float(rb.components["terminal_total_penalty"][1]) == pytest.approx(-5.0)
 
 
 def test_tcv_derivative_current_and_saturation_rewards_are_not_inverted() -> None:
@@ -756,7 +756,12 @@ def test_delta_jdot_action_accumulates_derivative_command() -> None:
     assert torch.allclose(first.applied_action, expected_delta, atol=1.0e-6)
     second = env.step(action)
     assert torch.allclose(second.applied_action, torch.clamp(2.0 * expected_delta, -1.0, 1.0), atol=1.0e-6)
-    assert torch.allclose(env.previous_action, second.applied_action)
+    assert torch.allclose(env.previous_action, action)
+    assert torch.allclose(env.previous_derivative_command, second.applied_action)
+    schema = env.export_schema()
+    assert "previous_derivative_command" in schema["feature_order"]
+    assert env.normalization()["previous_action_semantics"] == "previous_requested_delta_action"
+    assert env.normalization()["previous_derivative_command_semantics"] == "applied_accumulated_derivative_command"
 
 
 def test_delta_jdot_command_clipping_penalizes_unrealized_delta() -> None:
@@ -809,7 +814,8 @@ def test_current_aware_saturation_clips_command_before_current_runaway() -> None
     next_current = float(env._cpu_models[0].state.pfc_currents[0])
     assert next_current <= upper + 1.0e-3
     assert result.applied_action[0, 0].item() < 1.0
-    assert env.previous_action[0, 0].item() == pytest.approx(result.applied_action[0, 0].item())
+    assert env.previous_action[0, 0].item() == pytest.approx(action[0, 0].item())
+    assert env.previous_derivative_command[0, 0].item() == pytest.approx(result.applied_action[0, 0].item())
     assert float(np.nanmax(comps["action_saturation_delta_rms"])) > 0.0
     assert float(np.nanmax(comps["action_saturation_fraction"])) > 0.0
     assert float(np.nanmax(comps["actuator_saturation_loss"])) > 0.0
@@ -860,7 +866,7 @@ def test_tcv_derivative_mode_does_not_project_current_runaway_command() -> None:
     expected_command = action * env.delta_action_to_command_norm[None, :]
     assert torch.allclose(result.requested_action, action)
     assert torch.allclose(result.applied_action, expected_command, atol=1.0e-6)
-    assert env.normalization()["action_contract"] == "delta_jdot_derivative_command_v2"
+    assert env.normalization()["action_contract"] == "delta_jdot_derivative_command_v3"
     assert env.normalization()["delta_derivative_limits_aps"][5] == pytest.approx(1191036.96)
     assert "current_saturation_fraction" not in env.normalization()
     assert bool(result.terminated[0].item()) is True
@@ -934,7 +940,8 @@ def test_small_current_limit_violation_gets_grace_before_termination() -> None:
     assert float(np.nanmax(comps["terminated_current"])) == pytest.approx(1.0)
     assert float(np.nanmax(comps["terminated_current_grace"])) == pytest.approx(1.0)
     assert torch.allclose(result.applied_action, action)
-    assert torch.allclose(env.previous_action, result.applied_action)
+    assert torch.allclose(env.previous_action, action)
+    assert torch.allclose(env.previous_derivative_command, result.applied_action)
 
 
 def test_severe_current_limit_violation_terminates_immediately() -> None:

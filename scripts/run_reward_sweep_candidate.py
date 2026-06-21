@@ -191,6 +191,8 @@ def run_candidate(args: argparse.Namespace) -> int:
         args.wandb_project,
         "--wandb-mode",
         args.wandb_mode,
+        "--wandb-metric-preset",
+        args.wandb_metric_preset,
         "--wandb-optional",
     ]
 
@@ -227,6 +229,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--updates-per-rollout-chunk", type=int, required=True)
     parser.add_argument("--wandb-project", required=True)
     parser.add_argument("--wandb-mode", default="online")
+    parser.add_argument("--wandb-metric-preset", choices=("full", "focused", "sweep"), default="sweep")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--sim-config-path", type=Path, default=Path("/workspace/tokamak-sim/configs/T15MD_new_data.toml"))
     parser.add_argument("--initial-state-library", type=Path, default=Path("/workspace/tokamak-rl-v2/data/processed/t15_csv_initial_states.npz"))

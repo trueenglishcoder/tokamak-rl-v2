@@ -88,6 +88,7 @@ class TokamakMagneticControlEnv:
             torch.ones_like(self.derivative_limits),
         )
         self.previous_action = torch.zeros((self.batch_size, self.action_dim), dtype=torch.float32, device=self.device)
+        self.previous_derivative_command = torch.zeros((self.batch_size, self.action_dim), dtype=torch.float32, device=self.device)
         self.action_offset = torch.zeros((self.batch_size, self.action_dim), dtype=torch.float32, device=self.device)
         self.current_over_limit_steps = torch.zeros((self.batch_size,), dtype=torch.long, device=self.device)
         self.psi_reset_mean = torch.zeros((self.batch_size,), dtype=torch.float32, device=self.device)
@@ -126,6 +127,7 @@ class TokamakMagneticControlEnv:
         ip0, pfc0, sol0, params0 = payload.ip0, payload.pfc0, payload.sol0, payload.params0
         self._record_reset_metadata(payload)
         self.previous_action.zero_()
+        self.previous_derivative_command.zero_()
         self.action_offset = self._sample_action_offset(self.batch_size)
         self.current_over_limit_steps.zero_()
         self.step_index.zero_()
@@ -164,6 +166,7 @@ class TokamakMagneticControlEnv:
         ip0, pfc0, sol0 = payload.ip0, payload.pfc0, payload.sol0
         assert self.reference is not None
         self.previous_action[indices_t] = 0.0
+        self.previous_derivative_command[indices_t] = 0.0
         self.action_offset[indices_t] = self._sample_action_offset(count)
         self.current_over_limit_steps[indices_t] = 0
         self.step_index[indices_t] = 0
@@ -302,13 +305,14 @@ class TokamakMagneticControlEnv:
         action = torch.as_tensor(action, dtype=torch.float32, device=self.device).reshape(self.batch_size, self.action_dim)
         commanded = torch.clamp(action, -1.0, 1.0)
         previous_action = self.previous_action.detach().clone()
+        previous_derivative_command = self.previous_derivative_command.detach().clone()
         if self._uses_delta_jdot_contract():
             requested_action = torch.clamp(commanded + self.action_offset, -1.0, 1.0)
-            requested_command = previous_action + requested_action * self.delta_action_to_command_norm[None, :]
+            requested_command = previous_derivative_command + requested_action * self.delta_action_to_command_norm[None, :]
             requested_command = torch.clamp(requested_command, -1.0, 1.0)
             applied_action = self._apply_action_contract(requested_command)
             applied_delta_action = torch.clamp(
-                (applied_action - previous_action)
+                (applied_action - previous_derivative_command)
                 / torch.clamp(self.delta_action_to_command_norm[None, :], min=1.0e-12),
                 -1.0,
                 1.0,
@@ -316,21 +320,23 @@ class TokamakMagneticControlEnv:
         else:
             requested_action = torch.clamp(commanded + self.action_offset, -1.0, 1.0)
             applied_action = self._apply_action_contract(requested_action)
-            applied_delta_action = applied_action - previous_action
+            applied_delta_action = applied_action - previous_derivative_command
         physical = applied_action * self.derivative_limits[None, :]
         if self.config.sim.compute_backend == "gpu":
             assert self._gpu_sim is not None
             result = self._gpu_sim.step(physical.to(dtype=torch.float64, device=self._gpu_sim.device))
             self.step_index += 1
-            self.previous_action = applied_action.detach().clone()
+            self.previous_action = requested_action.detach().clone()
+            self.previous_derivative_command = applied_action.detach().clone()
             obs = self._obs_gpu(result=result)
-            reward, terminated, info = self._reward_gpu(result, applied_action, previous_action, requested_action, applied_delta_action)
+            reward, terminated, info = self._reward_gpu(result, applied_action, previous_derivative_command, requested_action, applied_delta_action)
         else:
             self._step_cpu(physical)
             self.step_index += 1
-            self.previous_action = applied_action.detach().clone()
+            self.previous_action = requested_action.detach().clone()
+            self.previous_derivative_command = applied_action.detach().clone()
             obs = self._obs_cpu()
-            reward, terminated, info = self._reward_cpu(applied_action, previous_action, requested_action, applied_delta_action)
+            reward, terminated, info = self._reward_cpu(applied_action, previous_derivative_command, requested_action, applied_delta_action)
         truncated = self.step_index >= int(self.config.sim.max_episode_steps)
         self.done = terminated | truncated
         return BatchStep(
@@ -476,6 +482,7 @@ class TokamakMagneticControlEnv:
             ("boundary_radii_error", n_angles),
             ("boundary_found", 1),
             ("previous_action", self.action_dim),
+            ("previous_derivative_command", self.action_dim),
             ("target_preview", preview * (2 + n_angles)),
         )
         out: dict[str, tuple[int, int]] = {}
@@ -562,6 +569,7 @@ class TokamakMagneticControlEnv:
             target_radii - measured_radii,
             boundary_found,
             self.previous_action,
+            self.previous_derivative_command,
             self._preview(),
         ], dim=1)
         actor_obs = torch.nan_to_num(actor_obs, nan=0.0, posinf=0.0, neginf=0.0)
@@ -617,6 +625,7 @@ class TokamakMagneticControlEnv:
                 target_radii - np.nan_to_num(measured_radii, nan=0.0, posinf=0.0, neginf=0.0),
                 np.array([boundary_found], dtype=float),
                 self.previous_action[b].detach().cpu().numpy().astype(float, copy=False),
+                self.previous_derivative_command[b].detach().cpu().numpy().astype(float, copy=False),
                 preview[b],
             ]
             actor = np.concatenate(parts)
@@ -801,7 +810,8 @@ class TokamakMagneticControlEnv:
             "action_contract": self._action_contract_name(),
             "delta_derivative_scale_aps": float(self.config.sim.delta_derivative_scale_aps),
             "delta_derivative_limits_aps": self.delta_derivative_scale.detach().cpu().numpy().astype(float).tolist(),
-            "previous_action_semantics": "applied_accumulated_derivative_command",
+            "previous_action_semantics": "previous_requested_delta_action",
+            "previous_derivative_command_semantics": "applied_accumulated_derivative_command",
         }
         if self.config.reward.kind != "tcv_derivative":
             out["current_saturation_fraction"] = float(self.config.sim.current_saturation_fraction)
@@ -810,7 +820,7 @@ class TokamakMagneticControlEnv:
     def _action_contract_name(self) -> str:
         if self._uses_delta_jdot_contract():
             if self.config.sim.delta_derivative_limits_aps is not None:
-                return "delta_jdot_derivative_command_v2"
+                return "delta_jdot_derivative_command_v3"
             return "delta_jdot_derivative_command_v1"
         if self.config.reward.kind == "tcv_derivative":
             return "tcv_derivative_v1"
@@ -834,6 +844,7 @@ class TokamakMagneticControlEnv:
             "step_index": self.step_index.detach().cpu(),
             "done": self.done.detach().cpu(),
             "previous_action": self.previous_action.detach().cpu(),
+            "previous_derivative_command": self.previous_derivative_command.detach().cpu(),
             "action_offset": self.action_offset.detach().cpu(),
             "current_over_limit_steps": self.current_over_limit_steps.detach().cpu(),
             "psi_reset_mean": self.psi_reset_mean.detach().cpu(),
@@ -873,6 +884,8 @@ class TokamakMagneticControlEnv:
         self.step_index = torch.as_tensor(state["step_index"], dtype=torch.long, device=self.device).clone()
         self.done = torch.as_tensor(state["done"], dtype=torch.bool, device=self.device).clone()
         self.previous_action = torch.as_tensor(state["previous_action"], dtype=torch.float32, device=self.device).clone()
+        previous_derivative_command = state.get("previous_derivative_command", state["previous_action"])
+        self.previous_derivative_command = torch.as_tensor(previous_derivative_command, dtype=torch.float32, device=self.device).clone()
         self.action_offset = torch.as_tensor(state["action_offset"], dtype=torch.float32, device=self.device).clone()
         self.current_over_limit_steps = torch.as_tensor(state.get("current_over_limit_steps", torch.zeros((self.batch_size,), dtype=torch.long)), dtype=torch.long, device=self.device).clone()
         self.psi_reset_mean = torch.as_tensor(state.get("psi_reset_mean", torch.zeros((self.batch_size,), dtype=torch.float32)), dtype=torch.float32, device=self.device).clone()

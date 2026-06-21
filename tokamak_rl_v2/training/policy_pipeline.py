@@ -19,7 +19,7 @@ from tokamak_rl_v2.config.loader import _validate_experiment_config
 from tokamak_rl_v2.config.schema import ExperimentConfig
 from tokamak_rl_v2.env import TokamakMagneticControlEnv
 from tokamak_rl_v2.training.cli import _device_list
-from tokamak_rl_v2.training.trainer import Trainer, _FOCUSED_WANDB_METRICS, _eval_max_steps_for_config
+from tokamak_rl_v2.training.trainer import Trainer, _eval_max_steps_for_config, filter_wandb_metrics
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -846,7 +846,7 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--wandb-group", default=None)
     ap.add_argument("--wandb-mode", choices=("online", "offline", "disabled"), default="online")
     ap.add_argument("--wandb-optional", action="store_true", help="Continue if W&B init fails.")
-    ap.add_argument("--wandb-metric-preset", choices=("full", "focused"), default="full")
+    ap.add_argument("--wandb-metric-preset", choices=("full", "focused", "sweep"), default="full")
     return ap
 
 
@@ -1138,8 +1138,7 @@ def _wandb_log(wandb_run, prefix: str, metrics: Mapping[str, object], *, step: i
         preset = str(wandb_run.config.get("wandb_metric_preset", "full"))
     except Exception:
         preset = "full"
-    if preset == "focused":
-        payload = {key: value for key, value in payload.items() if key in _FOCUSED_WANDB_METRICS}
+    payload = filter_wandb_metrics(payload, preset)
     if payload:
         try:
             wandb_run.log({"global_step": int(step), **payload}, step=int(step))

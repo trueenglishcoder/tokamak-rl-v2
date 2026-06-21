@@ -75,6 +75,63 @@ _FOCUSED_WANDB_METRICS = {
     "train/policy_weight_max",
 }
 
+_SWEEP_WANDB_METRICS = {
+    "global_step",
+    "env_step",
+    "decision_step",
+    "eval/mean_episode_completion",
+    "eval/min_episode_completion",
+    "eval/full_episode_success",
+    "eval/termination_failure_fraction",
+    "eval/terminated_current",
+    "eval/terminated_boundary",
+    "eval/boundary_found_late_min",
+    "eval/shape_error_mean_m_late",
+    "eval/ip_error_a_late",
+    "eval/current_over_limit_a_max",
+    "eval/current_over_limit_a_late_max",
+    "eval/current_over_limit_fraction_late",
+    "eval/current_over_limit_5ka_fraction_late",
+    "eval/current_over_limit_1pct_fraction_late",
+    "eval/current_usage_fraction_late_max",
+    "eval/action_saturation_fraction_late",
+    "eval/selection_score",
+    "reward/tcv_quality",
+    "reward/physical_cost",
+    "reward/boundary_found",
+    "reward/terminated_current",
+    "reward/terminated_boundary",
+    "reward/current_usage_fraction",
+    "reward/current_usage_mean_fraction",
+    "reward/current_over_limit_a",
+    "reward/derivative_usage",
+    "reward/action_saturation_fraction",
+    "reward/action_saturation_delta_rms",
+    "reward/terminal_total_penalty",
+    "train/replay_mean_episode_length",
+    "train/replay_min_episode_length",
+    "train/replay_max_episode_length",
+    "train/replay_size",
+    "train/updates",
+    "train/critic_loss",
+    "train/actor_loss",
+    "train/q_mean",
+    "train/sampled_q_spread",
+    "train/policy_weight_max",
+}
+
+_WANDB_METRIC_PRESETS = {
+    "focused": _FOCUSED_WANDB_METRICS,
+    "sweep": _SWEEP_WANDB_METRICS,
+}
+
+
+def filter_wandb_metrics(payload: dict[str, object], preset: str) -> dict[str, object]:
+    keys = _WANDB_METRIC_PRESETS.get(str(preset))
+    if keys is None:
+        return payload
+    return {key: value for key, value in payload.items() if key in keys}
+
 
 def _value_to_numpy(value: object) -> np.ndarray:
     if torch.is_tensor(value):
@@ -324,8 +381,7 @@ class Trainer:
             decision_step = raw_step
             env_step = raw_step * self.num_envs
         payload = {"global_step": int(env_step), "env_step": int(env_step), "decision_step": int(decision_step), **values}
-        if self.wandb_metric_preset == "focused":
-            payload = {key: value for key, value in payload.items() if key in _FOCUSED_WANDB_METRICS}
+        payload = filter_wandb_metrics(payload, self.wandb_metric_preset)
         try:
             self.wandb_run.log(payload, step=int(env_step))
         except Exception as exc:

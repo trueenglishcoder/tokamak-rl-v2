@@ -13,6 +13,7 @@ from scripts.build_reward_sweep_manifest import (
     PROFILE_SATURATION,
     PROFILE_TCV_DERIVATIVE,
     PROFILE_TCV_DELTA_F002_SEMANTICS,
+    PROFILE_TCV_DELTA_CONTRACTFIX,
     PROFILE_TCV_DELTA_JDOT,
     PROFILE_TCV_DELTA_NO_TERMINATION,
     PROFILE_TCV_DELTA_NO_TERMINATION_SURVIVAL,
@@ -28,6 +29,7 @@ from scripts.summarize_reward_sweep_physical import summarize
 from scripts.submit_saturation_reward_sweep import submit_onepass
 from scripts.submit_saturation_two_pass_reward_sweep import main as submit_saturation_two_pass_main
 from scripts.submit_tcv_delta_f002_semantics_sweep import submit_f002_semantics_sweep
+from scripts.submit_tcv_delta_contractfix_sweep import submit_contractfix_sweep
 from scripts.submit_two_pass_reward_sweep import submit_chain
 
 
@@ -419,6 +421,34 @@ def test_tcv_delta_f002_semantics_manifest_has_36_variants() -> None:
     assert {variant["sim"]["action_contract"] for variant in variants} == {"delta_jdot"}
     assert {variant["sim"]["delta_derivative_limits_aps"]["pfc"]["pfc0"] for variant in variants} == {163347.0}
     assert {variant["sim"]["delta_derivative_limits_aps"]["sol"]["sol1"] for variant in variants} == {5889842.0}
+    assert {variant["sim"]["terminate_on_boundary_loss"] for variant in variants} == {True}
+    assert {variant["sim"]["terminate_on_current_limit"] for variant in variants} == {True}
+    assert {variant["sim"]["current_hard_termination_fraction"] for variant in variants} == {1.20}
+    assert {variant["sim"]["current_termination_grace_steps"] for variant in variants} == {1}
+
+
+def test_tcv_delta_contractfix_manifest_has_36_variants() -> None:
+    manifest = build_manifest(
+        "broad",
+        profile=PROFILE_TCV_DELTA_CONTRACTFIX,
+        runs_per_array_task=3,
+        array_task_count=12,
+    )
+    variants = manifest["variants"]
+    assert manifest["variant_count"] == 36
+    assert variants[0]["folder"] == "s000_t0_q0_a0"
+    assert variants[-1]["folder"] == "s035_t2_q2_a3"
+    assert {variant["reward"]["kind"] for variant in variants} == {"tcv_derivative"}
+    assert {variant["reward"]["terminal_reward"] for variant in variants} == {-2.0, -5.0, -10.0}
+    assert {variant["reward"]["boundary_missing_weight"] for variant in variants} == {10.0, 20.0, 40.0}
+    assert {variant["reward"]["shape_mean_weight"] for variant in variants} == {2.0, 3.2, 5.0}
+    assert {variant["reward"]["shape_max_weight"] for variant in variants} == {0.5, 0.8, 1.25}
+    assert {variant["reward"]["ip_weight"] for variant in variants} == {0.9, 1.8, 3.0}
+    assert {variant["reward"]["current_weight"] for variant in variants} == {0.5, 0.75, 1.5, 3.0}
+    assert {variant["reward"]["derivative_weight"] for variant in variants} == {0.125, 0.1875, 0.375, 0.75}
+    assert {variant["reward"]["actuator_saturation_weight"] for variant in variants} == {0.125, 0.1875, 0.375, 0.75}
+    assert {variant["sim"]["action_contract"] for variant in variants} == {"delta_jdot"}
+    assert {variant["sim"]["delta_derivative_limits_aps"]["pfc"]["pfc0"] for variant in variants} == {163347.0}
     assert {variant["sim"]["terminate_on_boundary_loss"] for variant in variants} == {True}
     assert {variant["sim"]["terminate_on_current_limit"] for variant in variants} == {True}
     assert {variant["sim"]["current_hard_termination_fraction"] for variant in variants} == {1.20}
@@ -1301,6 +1331,47 @@ def test_submit_tcv_delta_f002_semantics_uses_single_array_and_aggregate(tmp_pat
     assert manifest["variants"][0]["folder"] == "s000_t0_q0_r0"
     assert manifest["variants"][-1]["folder"] == "s035_t2_q2_r3"
     assert released == [["scontrol", "release", "511"]]
+
+
+def test_submit_tcv_delta_contractfix_uses_single_array_and_aggregate(tmp_path: Path, monkeypatch) -> None:
+    submitted: list[list[str]] = []
+    released: list[list[str]] = []
+    jobids = iter(["611\n", "612\n"])
+
+    class Result:
+        def __init__(self, stdout: str) -> None:
+            self.stdout = stdout
+            self.stderr = ""
+
+    def fake_run(args, check, text, stdout, stderr):
+        if args[0] == "scontrol":
+            released.append(list(args))
+            return Result("")
+        submitted.append(list(args))
+        return Result(next(jobids))
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("scripts.submit_tcv_delta_contractfix_sweep.subprocess.run", fake_run)
+
+    payload = submit_contractfix_sweep(
+        sweep_job=Path("jobs/contractfix.sbatch"),
+        aggregate_job=Path("jobs/aggregate.sbatch"),
+        root_prefix="outputs/t15_reward_sweep36_tcv_delta_contractfix_1m",
+    )
+
+    assert payload["sweep_jobid"] == "611"
+    assert payload["aggregate_jobid"] == "612"
+    assert payload["root"] == "outputs/t15_reward_sweep36_tcv_delta_contractfix_1m_611"
+    assert "--hold" in submitted[0]
+    assert "--export=ALL,SWEEP_ROOT_PREFIX=outputs/t15_reward_sweep36_tcv_delta_contractfix_1m" in submitted[0]
+    assert submitted[1][2] == "--dependency=afterany:611"
+    assert len(submitted) == 2
+    manifest = json.loads((tmp_path / payload["root"] / "variants.json").read_text(encoding="utf-8"))
+    assert manifest["profile"] == PROFILE_TCV_DELTA_CONTRACTFIX
+    assert manifest["variant_count"] == 36
+    assert manifest["variants"][0]["folder"] == "s000_t0_q0_a0"
+    assert manifest["variants"][-1]["folder"] == "s035_t2_q2_a3"
+    assert released == [["scontrol", "release", "611"]]
 
 
 def test_submit_saturation_two_pass_uses_36_plus_12_chain(tmp_path: Path, monkeypatch) -> None:

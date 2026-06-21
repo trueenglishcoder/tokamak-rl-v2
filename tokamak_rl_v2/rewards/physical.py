@@ -470,7 +470,7 @@ class T15TCVDerivativeReward:
         normal_reward = float(c.reward_scale) * quality
 
         terminal_mask = terminated.to(dtype=torch.bool, device=quality.device).reshape_as(quality)
-        terminal_reward = torch.full_like(normal_reward, float(c.terminal_reward) * float(c.reward_scale))
+        terminal_reward = torch.full_like(normal_reward, float(c.terminal_reward))
         reward = torch.where(terminal_mask, terminal_reward, normal_reward)
         if episode_progress is None:
             progress = torch.zeros_like(quality)
