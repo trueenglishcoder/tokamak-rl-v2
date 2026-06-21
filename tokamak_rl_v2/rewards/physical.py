@@ -565,9 +565,11 @@ def _threshold_square(x: Tensor, *, start: float, bad: float) -> Tensor:
 
 
 def _tcv_scale(v: Tensor, a: float, b: float, c: float, d: float) -> Tensor:
-    den = max(float(b) - float(a), 1.0e-12)
+    den = float(b) - float(a)
+    if abs(den) < 1.0e-12:
+        den = 1.0e-12 if den >= 0.0 else -1.0e-12
     v01 = (v - float(a)) / den
-    return float(c) - v01 * (float(c) - float(d))
+    return float(c) + v01 * (float(d) - float(c))
 
 
 def _tcv_logistic(v: Tensor) -> Tensor:

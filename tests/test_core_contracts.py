@@ -277,6 +277,49 @@ def test_tcv_derivative_reward_uses_terminal_reward_replacement() -> None:
     assert float(rb.components["terminal_total_penalty"][1]) == pytest.approx(-0.05)
 
 
+def test_tcv_derivative_current_and_saturation_rewards_are_not_inverted() -> None:
+    reward_fn = T15TCVDerivativeReward(
+        RewardConfig(
+            kind="tcv_derivative",
+            reward_scale=1.0,
+            smoothmax_alpha=-5.0,
+            shape_mean_weight=0.0,
+            shape_max_weight=0.0,
+            ip_weight=0.0,
+            current_weight=1.0,
+            derivative_weight=0.0,
+            actuator_saturation_weight=1.0,
+            boundary_missing_weight=0.0,
+            current_soft_fraction=0.9,
+            current_bad_fraction=1.0,
+        ),
+        control_rate_hz=1000.0,
+    )
+    ref = torch.zeros((2, 32, 2), dtype=torch.float32)
+    action = torch.zeros((2, 9), dtype=torch.float32)
+    rb = reward_fn(
+        ip=torch.full((2,), 200000.0),
+        ip_ref=torch.full((2,), 200000.0),
+        boundary_points=ref,
+        reference_points=ref,
+        action=action,
+        previous_action=action,
+        requested_action=torch.stack([torch.zeros((9,), dtype=torch.float32), torch.ones((9,), dtype=torch.float32)]),
+        applied_delta_action=torch.zeros((2, 9), dtype=torch.float32),
+        current_over_limit_a=torch.tensor([0.0, 1000.0], dtype=torch.float32),
+        current_usage_fraction=torch.tensor([0.5, 1.2], dtype=torch.float32),
+        current_margin_fraction=torch.tensor([0.5, -0.2], dtype=torch.float32),
+        derivative_usage=torch.zeros((2,), dtype=torch.float32),
+        boundary_found=torch.ones((2,), dtype=torch.bool),
+        terminated=torch.zeros((2,), dtype=torch.bool),
+    )
+    assert float(rb.components["current_loss"][0]) == pytest.approx(0.0)
+    assert float(rb.components["current_loss"][1]) == pytest.approx(1.0)
+    assert float(rb.components["tcv_saturation_component_loss"][0]) == pytest.approx(0.0)
+    assert float(rb.components["tcv_saturation_component_loss"][1]) == pytest.approx(1.0)
+    assert float(rb.components["tcv_quality"][0]) > float(rb.components["tcv_quality"][1])
+
+
 def test_tcv_derivative_actuator_effort_uses_realized_delta_jdot() -> None:
     reward_fn = T15TCVDerivativeReward(
         RewardConfig(
@@ -1826,6 +1869,11 @@ def test_training_checkpoint_resume_rejects_old_critic_action_input_kind(tmp_pat
         resumed._load_checkpoint(checkpoint)
 
     state["critic_action_input_kind"] = "normalized_action_v1"
+    torch.save(state, checkpoint)
+    with pytest.raises(ValueError, match="critic action input"):
+        resumed._load_checkpoint(checkpoint)
+
+    state["critic_action_input_kind"] = "requested_delta_jdot_v1"
     torch.save(state, checkpoint)
     with pytest.raises(ValueError, match="critic action input"):
         resumed._load_checkpoint(checkpoint)
