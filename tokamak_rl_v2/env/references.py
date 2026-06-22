@@ -39,6 +39,7 @@ class T15ReplayBoundaryEntry:
     angles: np.ndarray
     steps: np.ndarray
     time_s: np.ndarray
+    ip: np.ndarray
     radii: np.ndarray
 
     @property
@@ -107,6 +108,27 @@ class T15ReplayBoundaryLibrary:
         delta = segment - segment[0:1, :]
         return reset[None, :] + delta
 
+    def ip_for_segment(
+        self,
+        shot_id: int | str,
+        *,
+        steps: int,
+        source_index: int | None = None,
+        source_time_s: float | None = None,
+    ) -> np.ndarray:
+        entry = self._entry(shot_id)
+        start_idx = self._segment_start_index(entry, source_index=source_index, source_time_s=source_time_s)
+        wanted = int(steps) + 1
+        if wanted <= 0:
+            return np.zeros((0,), dtype=float)
+        segment = entry.ip[start_idx : start_idx + wanted]
+        if segment.shape[0] == 0:
+            segment = entry.ip[entry.last_index : entry.last_index + 1]
+        if segment.shape[0] < wanted:
+            pad = np.repeat(segment[-1:], wanted - int(segment.shape[0]), axis=0)
+            segment = np.concatenate([segment, pad], axis=0)
+        return np.asarray(segment, dtype=float)
+
     def _entry(self, shot_id: int | str) -> T15ReplayBoundaryEntry:
         key = str(int(shot_id))
         try:
@@ -137,6 +159,8 @@ class T15ReplayBoundaryLibrary:
             radii = np.asarray(data["radii_true"], dtype=float)
             steps = np.asarray(data["step"], dtype=float).reshape(-1) if "step" in data.files else np.arange(radii.shape[0], dtype=float)
             time_s = np.asarray(data["t"], dtype=float).reshape(-1) if "t" in data.files else np.arange(radii.shape[0], dtype=float)
+            ip_key = "Ip_ref" if "Ip_ref" in data.files else "Ip"
+            ip = np.asarray(data[ip_key], dtype=float).reshape(-1)
             found = (
                 np.asarray(data["boundary_found"], dtype=bool).reshape(-1)
                 if "boundary_found" in data.files
@@ -148,9 +172,9 @@ class T15ReplayBoundaryLibrary:
             raise ValueError(f"{path} radii_true must have at least {self.theta_count} columns")
         radii = radii[:, : self.theta_count]
         angles = angles[: self.theta_count]
-        if steps.shape[0] != radii.shape[0] or time_s.shape[0] != radii.shape[0] or found.shape[0] != radii.shape[0]:
-            raise ValueError(f"{path} step/time/boundary arrays must have the same length")
-        mask = found & np.isfinite(steps) & np.isfinite(time_s) & np.all(np.isfinite(radii), axis=1) & np.all(radii > 0.0, axis=1)
+        if steps.shape[0] != radii.shape[0] or time_s.shape[0] != radii.shape[0] or found.shape[0] != radii.shape[0] or ip.shape[0] != radii.shape[0]:
+            raise ValueError(f"{path} step/time/ip/boundary arrays must have the same length")
+        mask = found & np.isfinite(steps) & np.isfinite(time_s) & np.isfinite(ip) & np.all(np.isfinite(radii), axis=1) & np.all(radii > 0.0, axis=1)
         if int(np.count_nonzero(mask)) < 2:
             raise ValueError(f"{path} has fewer than two usable boundary samples")
         return T15ReplayBoundaryEntry(
@@ -158,6 +182,7 @@ class T15ReplayBoundaryLibrary:
             angles=angles.astype(float),
             steps=steps[mask].astype(float),
             time_s=time_s[mask].astype(float),
+            ip=ip[mask].astype(float),
             radii=radii[mask].astype(float),
         )
 
@@ -226,6 +251,11 @@ def generate_reference_batch(
             raise ValueError("t15_replay_segment_conditioned source_indices must match batch size")
         if source_time_arr is not None and source_time_arr.shape[0] != B:
             raise ValueError("t15_replay_segment_conditioned source_times_s must match batch size")
+    if config.ip.kind == "replay_window":
+        if shot_id_arr is None or shot_id_arr.shape[0] != B:
+            raise ValueError("replay_window Ip requires one shot id per reset")
+        if boundary_replay_library is None:
+            raise ValueError("replay_window Ip requires a T15ReplayBoundaryLibrary")
 
     for b in range(B):
         if config.ip.kind == "hold_reset":
@@ -237,6 +267,25 @@ def generate_reference_batch(
                 int(steps),
                 rng,
                 dt=float(config.t_step),
+            )
+        elif config.ip.kind == "single_segment_profile":
+            ip[b] = _single_segment_profile_ip(
+                config.ip,
+                float(initial_ip_np[b]),
+                int(steps),
+                rng,
+                dt=float(config.t_step),
+            )
+        elif config.ip.kind == "replay_window":
+            assert boundary_replay_library is not None
+            assert shot_id_arr is not None
+            source_index = None if source_index_arr is None else int(source_index_arr[b])
+            source_time_s = None if source_time_arr is None else float(source_time_arr[b])
+            ip[b] = boundary_replay_library.ip_for_segment(
+                shot_id_arr[b],
+                steps=int(steps),
+                source_index=source_index,
+                source_time_s=source_time_s,
             )
         else:
             ip[b] = _segmented_ip(config.ip, float(initial_ip_np[b]), int(steps), rng, dt=float(config.t_step))
@@ -408,6 +457,77 @@ def _segmented_profile_ip(
         ):
             return out
     raise ValueError("failed to sample a segmented_profile Ip reference that fits the episode")
+
+
+def _single_segment_profile_ip(
+    cfg: IpReferenceConfig,
+    start: float,
+    steps: int,
+    rng: np.random.Generator,
+    *,
+    dt: float,
+) -> np.ndarray:
+    if cfg.limits_path is None:
+        raise ValueError("single_segment_profile requires limits_path")
+    limits = load_reference_limits(cfg.limits_path)
+    lo = float(limits.ip_p01_a)
+    hi = float(limits.ip_p99_a)
+    start_ip = float(start)
+    if not (lo <= start_ip <= hi):
+        raise ValueError(f"single_segment_profile reset Ip {start_ip:g} is outside production bounds [{lo:g}, {hi:g}]")
+    step_count = int(steps)
+    if step_count <= 0:
+        raise ValueError("single_segment_profile requires at least one step")
+
+    width = max(hi - lo, 1.0)
+    max_delta = float(cfg.max_delta_fraction) * width
+    positive_rate_base, negative_rate_base = _segmented_profile_rate_bases(cfg, limits)
+    positive_rate_min = float(cfg.ramp_up_rate_min_fraction) * float(positive_rate_base)
+    positive_rate_max = float(cfg.ramp_up_rate_fraction) * float(positive_rate_base)
+    negative_rate_min = float(cfg.ramp_down_rate_min_fraction) * float(negative_rate_base)
+    negative_rate_max = float(cfg.ramp_down_rate_fraction) * float(negative_rate_base)
+    ramp_peak_factor = 1.7 if bool(cfg.smooth_ramps) else 1.0
+    positive_delta_rate_max = positive_rate_max / ramp_peak_factor
+    negative_delta_rate_max = negative_rate_max / ramp_peak_factor
+
+    for _attempt in range(512):
+        mode = int(rng.integers(0, 3))
+        if mode == 0:
+            return np.full((step_count + 1,), start_ip, dtype=float)
+
+        direction = 1 if mode == 1 else -1
+        if direction > 0:
+            room = max(hi - start_ip, 0.0)
+            rate_low = positive_rate_min
+            rate_high = positive_delta_rate_max
+            peak_rate_max = positive_rate_max
+            negative_peak_rate_max = negative_rate_max
+        else:
+            room = max(start_ip - lo, 0.0)
+            rate_low = negative_rate_min
+            rate_high = negative_delta_rate_max
+            peak_rate_max = positive_rate_max
+            negative_peak_rate_max = negative_rate_max
+        if not np.isfinite(rate_high) or rate_high <= 0.0:
+            continue
+        delta_low = max(0.0, float(rate_low) * float(dt) * float(step_count))
+        delta_high = min(float(max_delta), float(room), float(rate_high) * float(dt) * float(step_count))
+        if delta_high <= 1.0e-6:
+            continue
+        delta_low = max(delta_low, 1.0e-6)
+        if delta_low > delta_high:
+            continue
+        delta = float(rng.uniform(delta_low, delta_high))
+        target = start_ip + float(direction) * delta
+        out = _monotone_ramp(start_ip, target, step_count, smooth=False)
+        if (
+            np.all(np.isfinite(out))
+            and np.nanmin(out) >= lo
+            and np.nanmax(out) <= hi
+            and _reference_signed_rate_ok(out, max_positive_rate=peak_rate_max, max_negative_abs_rate=negative_peak_rate_max, dt=dt)
+        ):
+            return out
+    raise ValueError("failed to sample a single_segment_profile Ip reference that fits the episode")
 
 
 def _segmented_profile_rate_bases(cfg: IpReferenceConfig, limits: T15ReferenceLimits) -> tuple[float, float]:

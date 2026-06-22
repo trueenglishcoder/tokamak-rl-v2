@@ -27,6 +27,7 @@ from tokamak_rl_v2.training.cli import _device_list
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "configs/experiments/t15_static_boundary.yaml"
 PRODUCTION_CONFIG = ROOT / "configs/experiments/t15_csv_initial_segmented_profile_boundary_mpo.yaml"
+SHORT_SINGLE_SEGMENT_CONFIG = ROOT / "configs/experiments/t15_csv_initial_single_segment_0p1s_static_boundary_mpo.yaml"
 FIXED_HORIZON_HOLD_CONFIG = ROOT / "configs/experiments/t15_csv_hold_ip_fixed_horizon.yaml"
 FIXED_HORIZON_EASY_SEGMENTED_CONFIG = ROOT / "configs/experiments/t15_csv_easy_segmented_fixed_horizon.yaml"
 
@@ -1265,6 +1266,26 @@ def test_production_segmented_profile_uses_2000_step_t15_scale_segments() -> Non
     assert 3 <= len(lengths) <= 5
     assert int(np.min(lengths)) >= 300
     assert int(np.max(lengths)) <= 800
+
+
+def test_short_single_segment_config_uses_100_step_static_boundary() -> None:
+    cfg = load_experiment_config(SHORT_SINGLE_SEGMENT_CONFIG)
+    assert int(cfg.sim.max_episode_steps) == 100
+    assert cfg.reference.duration_s == pytest.approx(0.1)
+    assert cfg.reference.duration_s == pytest.approx(float(cfg.sim.max_episode_steps) * float(cfg.reference.t_step))
+    assert int(cfg.training.eval_max_steps) == 100
+    assert cfg.reference.ip.kind == "single_segment_profile"
+    assert cfg.reference.boundary.kind == "hold_reset_boundary"
+    assert cfg.reference.ip.ramp_rate_reference == "robust_mean"
+    assert cfg.reference.ip.ramp_up_rate_min_fraction == pytest.approx(0.3)
+    assert cfg.reference.ip.ramp_up_rate_fraction == pytest.approx(0.55)
+    assert cfg.reference.ip.ramp_down_rate_min_fraction == pytest.approx(0.3)
+    assert cfg.reference.ip.ramp_down_rate_fraction == pytest.approx(0.55)
+    assert cfg.reference.ip.smooth_ramps is False
+    assert int(cfg.observation.target_preview_steps) == 10
+    assert int(cfg.observation.target_preview_stride) == 10
+    assert int(cfg.observation.target_preview_steps) * int(cfg.observation.target_preview_stride) <= int(cfg.sim.max_episode_steps)
+    assert cfg.training.production_mode is True
 
 
 def test_production_config_loads_real_t15_delta_jdot_limits() -> None:

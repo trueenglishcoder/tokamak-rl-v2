@@ -99,6 +99,69 @@ def test_segmented_profile_starts_at_reset_ip_and_stays_positive(tmp_path: Path)
     assert np.any(np.abs(diff) <= 1.0e-9)
 
 
+def test_single_segment_profile_samples_hold_up_and_down_with_static_boundary(tmp_path: Path) -> None:
+    limits_path = _limits(tmp_path / "limits.json")
+    cfg = ReferenceConfig(
+        duration_s=0.1,
+        t_step=0.001,
+        theta_count=4,
+        seed=1,
+        ip=IpReferenceConfig(
+            kind="single_segment_profile",
+            limits_path=limits_path,
+            ramp_rate_reference="robust_mean",
+            ramp_up_rate_min_fraction=0.3,
+            ramp_up_rate_fraction=0.55,
+            ramp_down_rate_min_fraction=0.3,
+            ramp_down_rate_fraction=0.55,
+            max_delta_fraction=0.6,
+            smooth_ramps=False,
+        ),
+        boundary=BoundaryReferenceConfig(kind="hold_reset_boundary"),
+    )
+    sample_count = 96
+    points0 = np.zeros((sample_count, 4, 2), dtype=float)
+    radii0 = np.ones((sample_count, 4), dtype=float)
+    initial_ip = np.linspace(180000.0, 320000.0, sample_count, dtype=float)
+    ref = generate_reference_batch(
+        config=cfg,
+        initial_ip=initial_ip,
+        initial_parameters=np.zeros((sample_count, 5), dtype=float),
+        steps=100,
+        device="cpu",
+        seed=123,
+        initial_boundary_points=points0,
+        initial_boundary_radii=radii0,
+    )
+    arr = ref.ip.detach().cpu().numpy()
+    assert arr.shape == (sample_count, 101)
+    assert np.allclose(arr[:, 0], initial_ip)
+    assert float(np.min(arr)) >= 100000.0
+    assert float(np.max(arr)) <= 400000.0
+    delta = arr[:, -1] - arr[:, 0]
+    assert np.any(np.isclose(delta, 0.0, atol=1.0e-6))
+    assert np.any(delta > 1.0e-6)
+    assert np.any(delta < -1.0e-6)
+    for row, total_delta in zip(arr, delta, strict=True):
+        diff = np.diff(row)
+        if abs(float(total_delta)) <= 1.0e-6:
+            assert np.allclose(row, row[0])
+        elif total_delta > 0.0:
+            assert np.all(diff >= -1.0e-7)
+            assert diff[0] > 0.0
+            assert np.allclose(diff, diff[0], rtol=1.0e-6, atol=1.0e-6)
+        else:
+            assert np.all(diff <= 1.0e-7)
+            assert diff[0] < 0.0
+            assert np.allclose(diff, diff[0], rtol=1.0e-6, atol=1.0e-6)
+    rates = np.diff(arr, axis=1) / 0.001
+    assert float(np.nanmax(rates)) <= 0.55 * 1.0e6 * (1.0 + 1.0e-6)
+    assert float(np.nanmax(-rates)) <= 0.55 * 1.0e6 * (1.0 + 1.0e-6)
+    radii = ref.radii.detach().cpu().numpy()
+    assert radii.shape == (sample_count, 101, 4)
+    assert np.allclose(radii, radii[:, :1, :])
+
+
 def test_smoothed_segmented_profile_obeys_signed_rate_limits(tmp_path: Path) -> None:
     limits_path = _limits(tmp_path / "limits.json")
     cfg = ReferenceConfig(

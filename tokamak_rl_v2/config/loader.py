@@ -190,7 +190,7 @@ def _reference(raw: Mapping[str, Any], base: Path) -> ReferenceConfig:
     _reject_unknown_keys(ip_raw, set(IpReferenceConfig.__dataclass_fields__), prefix="reference.ip")
     _reject_unknown_keys(b_raw, set(BoundaryReferenceConfig.__dataclass_fields__), prefix="reference.boundary")
     kind = str(ip_raw.get("kind", "segmented")).lower()
-    if kind == "segmented_profile":
+    if kind in {"segmented_profile", "single_segment_profile", "replay_window"}:
         min_value = float(ip_raw.get("min", 1.0))
         max_value = float(ip_raw.get("max", min_value))
         rate_limit = float(ip_raw.get("rate_limit", 1.0))
@@ -344,9 +344,9 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
     if int(cfg.reference.theta_count) <= 0:
         raise ValueError("reference.theta_count must be positive")
     ip = cfg.reference.ip
-    if ip.kind not in {"segmented", "hold_reset", "segmented_profile"}:
+    if ip.kind not in {"segmented", "hold_reset", "segmented_profile", "single_segment_profile", "replay_window"}:
         raise ValueError("reference.ip.kind is unsupported")
-    if ip.kind != "segmented_profile":
+    if ip.kind not in {"segmented_profile", "single_segment_profile", "replay_window"}:
         if not (math.isfinite(ip.min) and math.isfinite(ip.max) and ip.max >= ip.min):
             raise ValueError("reference.ip min/max are invalid")
         if _range_crosses_or_touches_zero(float(ip.min), float(ip.max)):
@@ -357,15 +357,16 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
                 raise ValueError("sim.initial_ranges.ip must stay strictly on one side of zero")
             if _sign(float(initial_ip.min)) != _sign(float(ip.min)):
                 raise ValueError("sim.initial_ranges.ip must have the same sign as reference.ip")
-    if ip.kind == "segmented_profile":
+    if ip.kind in {"segmented_profile", "single_segment_profile"}:
         if ip.limits_path is None:
-            raise ValueError("reference.ip.kind=segmented_profile requires reference.ip.limits_path")
+            raise ValueError(f"reference.ip.kind={ip.kind} requires reference.ip.limits_path")
         if ip.start_mode != "reset_ip":
-            raise ValueError("reference.ip.segmented_profile only supports start_mode=reset_ip")
-        if ip.segment_min_steps <= 0 or ip.segment_max_steps < ip.segment_min_steps:
-            raise ValueError("reference.ip segmented_profile step bounds are invalid")
-        if ip.segment_count_min < 2 or ip.segment_count_max < ip.segment_count_min:
-            raise ValueError("reference.ip segmented_profile count bounds are invalid")
+            raise ValueError(f"reference.ip.{ip.kind} only supports start_mode=reset_ip")
+        if ip.kind == "segmented_profile":
+            if ip.segment_min_steps <= 0 or ip.segment_max_steps < ip.segment_min_steps:
+                raise ValueError("reference.ip segmented_profile step bounds are invalid")
+            if ip.segment_count_min < 2 or ip.segment_count_max < ip.segment_count_min:
+                raise ValueError("reference.ip segmented_profile count bounds are invalid")
         if ip.ramp_rate_reference not in {"p95", "robust_mean"}:
             raise ValueError("reference.ip.ramp_rate_reference must be 'p95' or 'robust_mean'")
         for name in (
@@ -397,7 +398,7 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
                 raise ValueError(f"reference.ip.{name} must be non-negative")
         if int(ip.hold_max_steps) < int(ip.hold_min_steps):
             raise ValueError("reference.ip hold step bounds are invalid")
-    if ip.kind != "segmented_profile":
+    if ip.kind not in {"segmented_profile", "single_segment_profile", "replay_window"}:
         if not math.isfinite(ip.rate_limit) or ip.rate_limit < 0.0:
             raise ValueError("reference.ip.rate_limit must be finite and non-negative")
         if ip.segment_min_steps <= 0 or ip.segment_max_steps < ip.segment_min_steps:
@@ -508,15 +509,20 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
             raise ValueError("training.production_mode requires sim.reset_source=csv_initial_states")
         if cfg.sim.csv_initial_state_split != "train":
             raise ValueError("training.production_mode requires sim.csv_initial_state_split=train")
-        if cfg.sim.config_path.name != "T15MD_new_data.toml":
-            raise ValueError("training.production_mode requires the current T15 tokamak-sim config")
+        if cfg.sim.config_path.name not in {"T15MD_new_data.toml", "T15MD_4pfc.toml"}:
+            raise ValueError("training.production_mode requires a current T15 tokamak-sim config")
         if cfg.sim.action_contract != "delta_jdot" or cfg.sim.delta_derivative_limits_aps is None:
             raise ValueError("training.production_mode requires delta-Jdot action contract with per-coil limits")
         if not cfg.sim.terminate_on_boundary_loss or not cfg.sim.terminate_on_current_limit:
             raise ValueError("training.production_mode requires boundary and current terminations")
-        if cfg.reference.ip.kind != "segmented_profile":
-            raise ValueError("training.production_mode requires reference.ip.kind=segmented_profile")
-        if cfg.reference.boundary.kind != "t15_replay_segment_conditioned":
+        if cfg.sim.config_path.name == "T15MD_new_data.toml" and cfg.reference.ip.kind not in {"segmented_profile", "single_segment_profile"}:
+            raise ValueError("T15MD_new_data production requires reference.ip.kind=segmented_profile or single_segment_profile")
+        if cfg.sim.config_path.name == "T15MD_4pfc.toml" and cfg.reference.ip.kind != "replay_window":
+            raise ValueError("T15MD_4pfc production requires reference.ip.kind=replay_window")
+        if cfg.reference.ip.kind == "single_segment_profile":
+            if cfg.reference.boundary.kind != "hold_reset_boundary":
+                raise ValueError("training.production_mode single_segment_profile requires reference.boundary.kind=hold_reset_boundary")
+        elif cfg.reference.boundary.kind != "t15_replay_segment_conditioned":
             raise ValueError("training.production_mode requires reference.boundary.kind=t15_replay_segment_conditioned")
         if cfg.reward.kind != "tcv_derivative":
             raise ValueError("training.production_mode requires reward.kind=tcv_derivative")
