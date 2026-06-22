@@ -1070,6 +1070,8 @@ def _resolve_device(value: str) -> torch.device:
     if dev.type == "cuda":
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA device requested but torch.cuda.is_available() is false")
+        if dev.index is None:
+            return torch.device("cuda:0")
         if dev.index is not None and dev.index >= torch.cuda.device_count():
             raise RuntimeError(f"CUDA device index is not visible: {value}; visible device count is {torch.cuda.device_count()}")
     return dev

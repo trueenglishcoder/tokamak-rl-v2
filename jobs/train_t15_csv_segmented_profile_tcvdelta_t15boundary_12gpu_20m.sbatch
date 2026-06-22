@@ -245,7 +245,7 @@ PYCUDA
         --config "/workspace/tokamak-rl-v2/${GENERATED_CONFIG}" \
         --output-dir "/workspace/tokamak-rl-v2/${TRAIN_OUTPUT}" \
         --steps "${TRAIN_ENV_STEPS}" \
-        --device cuda \
+        --device cuda:0 \
         --sim-compute-backend gpu \
         --sim-gpu-device cuda \
         --num-envs "${NUM_ENVS}" \
