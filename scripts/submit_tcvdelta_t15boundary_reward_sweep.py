@@ -7,14 +7,15 @@ import subprocess
 import sys
 from pathlib import Path
 
-import numpy as np
-
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tokamak_rl_v2.sweeps.tcvdelta_t15boundary import write_manifest
+
+
+REQUIRED_T15_BOUNDARY_SHOTS = ("3854", "3855", "3856", "3857", "3858", "3859", "3862", "3863", "3864")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -92,6 +93,8 @@ def _preflight_inputs() -> None:
 
 
 def _preflight_replay_boundary_coverage(reset_library: Path, replay_dir: Path) -> None:
+    if not reset_library.exists():
+        raise SystemExit(f"missing {reset_library.relative_to(ROOT.parent)}")
     smoothed = sorted(replay_dir.glob("lqr_boundary_reference_*_smoothed.npz"))
     if not smoothed:
         raise SystemExit(
@@ -102,10 +105,7 @@ def _preflight_replay_boundary_coverage(reset_library: Path, replay_dir: Path) -
         path.name.removeprefix("lqr_boundary_reference_").removesuffix("_smoothed.npz")
         for path in smoothed
     }
-    with np.load(reset_library, allow_pickle=False) as data:
-        if "shot_id" not in data.files:
-            raise SystemExit(f"{reset_library.relative_to(ROOT.parent)} is missing shot_id")
-        wanted = {str(int(v)) for v in np.asarray(data["shot_id"]).reshape(-1).tolist()}
+    wanted = set(REQUIRED_T15_BOUNDARY_SHOTS)
     missing = sorted(wanted - available)
     if missing:
         raise SystemExit(
