@@ -7,6 +7,22 @@
     "gpu_device": "cuda:0",
     "angles": 32,
     "max_episode_steps": 1000,
+    "action_contract": "delta_jdot",
+    "delta_derivative_limits_aps": {
+      "pfc": [
+        163347.0,
+        310755.0,
+        87838.08,
+        153214.2,
+        404364.0,
+        1191036.96
+      ],
+      "sol": [
+        1437338.8,
+        5889842.0,
+        1946208.8
+      ]
+    },
     "initial_ranges": {
       "ip": {
         "min": 124750.45168962443,
@@ -119,18 +135,20 @@
     "target_preview_stride": 10
   },
   "reward": {
-    "shape_good_m": 0.005,
-    "shape_bad_m": 0.05,
-    "ip_good_a": 500.0,
-    "ip_bad_a": 20000.0,
+    "shape_mean_scale_m": 0.03,
+    "shape_max_scale_m": 0.08,
+    "ip_scale_a": 25000.0,
     "boundary_missing_error_m": 0.1,
-    "shape_weight": 3.0,
-    "ip_weight": 2.0,
+    "shape_mean_weight": 4.0,
+    "shape_max_weight": 1.0,
+    "ip_weight": 3.0,
     "current_weight": 2.0,
-    "current_good_fraction": 0.85,
-    "current_bad_fraction": 1.0,
-    "max_episode_reward": 100.0,
-    "terminal_reward": -100.0,
+    "derivative_weight": 0.5,
+    "action_weight": 0.02,
+    "delta_action_weight": 0.05,
+    "current_soft_fraction": 0.9,
+    "derivative_soft_fraction": 0.9,
+    "terminal_reward": -20.0,
     "reward_scale": 1.0
   },
   "randomization": {

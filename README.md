@@ -9,8 +9,9 @@ The maintained production path is intentionally narrow:
 CSV initial-state resets
 + aggregate CSV reference limits
 + generated segmented_profile Ip targets
-+ hold_reset_boundary
-+ dense negative physical-cost reward
++ T15 replay-derived segment-conditioned boundary targets
++ TCV-derivative positive quality reward
++ delta-Jdot actor contract
 + feedforward actor + recurrent critic + MPO + replay
 + deterministic actor export
 + full-episode actor eval + full-episode exported-controller validation
@@ -38,7 +39,9 @@ Production mode is strict:
 
 - it requires `sim.reset_source = csv_initial_states`
 - it requires `reference.ip.kind = segmented_profile`
-- it requires `reference.boundary.kind = hold_reset_boundary`
+- it requires `reference.boundary.kind = t15_replay_segment_conditioned`
+- it requires `reward.kind = tcv_derivative`
+- it requires per-coil `delta_derivative_limits_aps`
 - it rejects `--allow-failed-gates`
 - it rejects controller-rollout bypasses
 - it evaluates and validates on the full configured episode horizon
@@ -100,15 +103,15 @@ Slurm launch:
 
 ```bash
 cd /scratch/$USER/tokamak/tokamak-rl-v2
-sbatch jobs/train_t15_csv_initial_segmented_profile_boundary_mpo_1gpu.sbatch
+sbatch jobs/train_t15_csv_segmented_profile_tcvdelta_t15boundary_12gpu_20m.sbatch
 ```
 
 That job writes to:
 
 ```text
-outputs/t15_csv_initial_segmented_profile_boundary_mpo_1gpu_<jobid>
-slurm_logs/tokamak-rl-v2-csv-mpo-1gpu-<jobid>.out
-slurm_logs/tokamak-rl-v2-csv-mpo-1gpu-<jobid>.err
+outputs/t15_csv_segmented_profile_tcvdelta_t15boundary_12gpu_20m_<jobid>
+slurm_logs/tokamak-rl-v2-tcvd-t15boundary-12gpu-20m-<jobid>.out
+slurm_logs/tokamak-rl-v2-tcvd-t15boundary-12gpu-20m-<jobid>.err
 ```
 
 ## Production Runtime Contract
@@ -118,14 +121,18 @@ At runtime, training reads only processed artifacts:
 ```text
 data/processed/t15_csv_initial_states.npz
 data/processed/t15_reference_limits.json
+../tokamak-sim/runs/t15md_limited_replay_dataset/
 ```
 
 The environment does not read raw T15 CSV traces during rollout. Raw CSVs are
-used only by the offline builders that produce those processed artifacts.
+used only by offline builders and replay runs that produce the processed reset,
+Ip-limit, and boundary-reference artifacts.
 
-Boundary targets come from the simulator-found reset boundary. Ip targets are
-generated online as bounded `segmented_profile` programs that start at reset Ip,
-stay positive, stay inside aggregate limits, and obey signed ramp-rate limits.
+Boundary targets come from smoothed T15 replay boundary segments matched by shot
+id and reset time, then shifted so step 0 equals the reset boundary. Ip targets
+are generated online as bounded `segmented_profile` programs that start at reset
+Ip, stay positive, stay inside aggregate limits, and obey signed ramp-rate
+limits.
 
 ## Outputs
 
@@ -161,7 +168,7 @@ PYTHONPATH=.:../tokamak-sim python3 scripts/export_policy.py \
 Manual export accepts only checkpoints with the production actor schema:
 
 ```text
-controller_state_v2
+controller_state_v3
 ```
 
 ## More Detail

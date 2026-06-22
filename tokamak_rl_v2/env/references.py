@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -19,6 +20,137 @@ class ReferenceBatch:
     points: Tensor
     radii: Tensor
     theta: Tensor
+
+
+@dataclass(frozen=True, slots=True)
+class T15ReplayBoundaryEntry:
+    """Smoothed boundary replay data for one T15 shot."""
+
+    shot_id: str
+    angles: np.ndarray
+    steps: np.ndarray
+    time_s: np.ndarray
+    radii: np.ndarray
+
+    @property
+    def sample_count(self) -> int:
+        return int(self.radii.shape[0])
+
+    @property
+    def last_index(self) -> int:
+        return max(0, self.sample_count - 1)
+
+
+class T15ReplayBoundaryLibrary:
+    """Replay-derived T15 boundary trajectories indexed by shot and time."""
+
+    def __init__(self, root: str | Path, *, theta_count: int) -> None:
+        self.root = Path(root).expanduser().resolve()
+        self.theta_count = int(theta_count)
+        if self.theta_count <= 0:
+            raise ValueError("theta_count must be positive")
+        if not self.root.exists():
+            raise FileNotFoundError(f"T15 replay boundary directory does not exist: {self.root}")
+        entries: dict[str, T15ReplayBoundaryEntry] = {}
+        files = sorted(self.root.glob("lqr_boundary_reference_*_smoothed.npz"))
+        if not files:
+            raise FileNotFoundError(f"no smoothed T15 boundary references found in {self.root}")
+        for path in files:
+            entry = self._load_entry(path)
+            entries[entry.shot_id] = entry
+        self._entries = entries
+
+    @property
+    def shot_ids(self) -> tuple[str, ...]:
+        return tuple(sorted(self._entries))
+
+    def assert_shots_available(self, shot_ids: np.ndarray | list[int] | tuple[int, ...]) -> None:
+        wanted = {str(int(v)) for v in np.asarray(shot_ids).reshape(-1).tolist()}
+        missing = sorted(wanted - set(self._entries))
+        if missing:
+            raise ValueError(
+                "T15 replay boundary references are missing shots: "
+                + ", ".join(missing)
+                + f" (directory: {self.root})"
+            )
+
+    def radii_for_segment(
+        self,
+        shot_id: int | str,
+        *,
+        steps: int,
+        reset_radii: np.ndarray,
+        source_index: int | None = None,
+        source_time_s: float | None = None,
+    ) -> np.ndarray:
+        entry = self._entry(shot_id)
+        reset = np.asarray(reset_radii, dtype=float).reshape(self.theta_count)
+        start_idx = self._segment_start_index(entry, source_index=source_index, source_time_s=source_time_s)
+        wanted = int(steps) + 1
+        if wanted <= 0:
+            return np.zeros((0, self.theta_count), dtype=float)
+        segment = entry.radii[start_idx : start_idx + wanted]
+        if segment.shape[0] == 0:
+            segment = entry.radii[entry.last_index : entry.last_index + 1]
+        if segment.shape[0] < wanted:
+            pad = np.repeat(segment[-1:, :], wanted - int(segment.shape[0]), axis=0)
+            segment = np.concatenate([segment, pad], axis=0)
+        delta = segment - segment[0:1, :]
+        return reset[None, :] + delta
+
+    def _entry(self, shot_id: int | str) -> T15ReplayBoundaryEntry:
+        key = str(int(shot_id))
+        try:
+            return self._entries[key]
+        except KeyError as exc:
+            raise ValueError(f"no T15 replay boundary reference for shot {key}") from exc
+
+    @staticmethod
+    def _segment_start_index(
+        entry: T15ReplayBoundaryEntry,
+        *,
+        source_index: int | None,
+        source_time_s: float | None,
+    ) -> int:
+        if source_time_s is not None and np.isfinite(float(source_time_s)):
+            return int(np.argmin(np.abs(entry.time_s - float(source_time_s))))
+        if source_index is not None:
+            raw = int(source_index)
+            step_target = raw + 1 if entry.steps.size and int(entry.steps[0]) == 1 else raw
+            return int(np.argmin(np.abs(entry.steps - float(step_target))))
+        return 0
+
+    def _load_entry(self, path: Path) -> T15ReplayBoundaryEntry:
+        with np.load(path) as data:
+            shot_raw = data["shot"]
+            shot_id = str(int(np.asarray(shot_raw).reshape(-1)[0]))
+            angles = np.asarray(data["angles_rad"], dtype=float).reshape(-1)
+            radii = np.asarray(data["radii_true"], dtype=float)
+            steps = np.asarray(data["step"], dtype=float).reshape(-1) if "step" in data.files else np.arange(radii.shape[0], dtype=float)
+            time_s = np.asarray(data["t"], dtype=float).reshape(-1) if "t" in data.files else np.arange(radii.shape[0], dtype=float)
+            found = (
+                np.asarray(data["boundary_found"], dtype=bool).reshape(-1)
+                if "boundary_found" in data.files
+                else np.ones((radii.shape[0],), dtype=bool)
+            )
+        if angles.size < self.theta_count:
+            raise ValueError(f"{path} has {angles.size} angles, expected at least {self.theta_count}")
+        if radii.ndim != 2 or radii.shape[1] < self.theta_count:
+            raise ValueError(f"{path} radii_true must have at least {self.theta_count} columns")
+        radii = radii[:, : self.theta_count]
+        angles = angles[: self.theta_count]
+        if steps.shape[0] != radii.shape[0] or time_s.shape[0] != radii.shape[0] or found.shape[0] != radii.shape[0]:
+            raise ValueError(f"{path} step/time/boundary arrays must have the same length")
+        mask = found & np.isfinite(steps) & np.isfinite(time_s) & np.all(np.isfinite(radii), axis=1) & np.all(radii > 0.0, axis=1)
+        if int(np.count_nonzero(mask)) < 2:
+            raise ValueError(f"{path} has fewer than two usable boundary samples")
+        return T15ReplayBoundaryEntry(
+            shot_id=shot_id,
+            angles=angles.astype(float),
+            steps=steps[mask].astype(float),
+            time_s=time_s[mask].astype(float),
+            radii=radii[mask].astype(float),
+        )
 
 
 def boundary_points_from_parameters(parameters: Tensor, theta: Tensor) -> Tensor:
@@ -55,6 +187,11 @@ def generate_reference_batch(
     seed: int,
     initial_boundary_points: Tensor | np.ndarray | None = None,
     initial_boundary_radii: Tensor | np.ndarray | None = None,
+    shot_ids: np.ndarray | None = None,
+    source_indices: np.ndarray | None = None,
+    source_times_s: np.ndarray | None = None,
+    boundary_replay_library: T15ReplayBoundaryLibrary | None = None,
+    boundary_center: tuple[float, float] | np.ndarray | None = None,
 ) -> ReferenceBatch:
     dev = torch.device(device)
     rng = np.random.default_rng(int(seed))
@@ -62,14 +199,37 @@ def generate_reference_batch(
     ip = np.zeros((B, int(steps) + 1), dtype=np.float64)
     params = np.zeros((B, int(steps) + 1, 5), dtype=np.float64)
     theta = torch.linspace(-torch.pi, torch.pi, int(config.theta_count) + 1, dtype=torch.float64, device=dev)[:-1]
+    shot_id_arr = None if shot_ids is None else np.asarray(shot_ids).reshape(-1)
+    source_index_arr = None if source_indices is None else np.asarray(source_indices).reshape(-1)
+    source_time_arr = None if source_times_s is None else np.asarray(source_times_s, dtype=float).reshape(-1)
+    if config.boundary.kind == "t15_replay_segment_conditioned":
+        if shot_id_arr is None or shot_id_arr.shape[0] != B:
+            raise ValueError("t15_replay_segment_conditioned requires one shot id per reset")
+        if boundary_replay_library is None:
+            raise ValueError("t15_replay_segment_conditioned requires a T15ReplayBoundaryLibrary")
+        if initial_boundary_points is None or initial_boundary_radii is None:
+            raise ValueError("t15_replay_segment_conditioned requires initial boundary points and radii")
+        if boundary_center is None:
+            raise ValueError("t15_replay_segment_conditioned requires boundary_center")
+        if source_index_arr is not None and source_index_arr.shape[0] != B:
+            raise ValueError("t15_replay_segment_conditioned source_indices must match batch size")
+        if source_time_arr is not None and source_time_arr.shape[0] != B:
+            raise ValueError("t15_replay_segment_conditioned source_times_s must match batch size")
+
     for b in range(B):
         if config.ip.kind == "hold_reset":
             ip[b] = float(initial_ip[b])
         elif config.ip.kind == "segmented_profile":
-            ip[b] = _segmented_profile_ip(config.ip, float(initial_ip[b]), int(steps), rng, dt=float(config.t_step))
+            ip[b] = _segmented_profile_ip(
+                config.ip,
+                float(initial_ip[b]),
+                int(steps),
+                rng,
+                dt=float(config.t_step),
+            )
         else:
             ip[b] = _segmented_ip(config.ip, float(initial_ip[b]), int(steps), rng, dt=float(config.t_step))
-        if config.boundary.kind != "hold_reset_boundary":
+        if config.boundary.kind not in {"hold_reset_boundary", "t15_replay_segment_conditioned"}:
             params[b] = _boundary_params(config.boundary, np.asarray(initial_parameters[b], dtype=float), int(steps), rng, dt=float(config.t_step))
     params_t = torch.as_tensor(params, dtype=torch.float64, device=dev)
     if config.boundary.kind == "hold_reset_boundary":
@@ -82,6 +242,29 @@ def generate_reference_batch(
         centers = torch.mean(points0, dim=1)
         params_t = torch.zeros((B, int(steps) + 1, 5), dtype=torch.float64, device=dev)
         params_t[..., 0:2] = centers[:, None, :]
+    elif config.boundary.kind == "t15_replay_segment_conditioned":
+        radii_np = np.zeros((B, int(steps) + 1, int(config.theta_count)), dtype=np.float64)
+        radii0_np = np.asarray(initial_boundary_radii, dtype=float).reshape(B, int(config.theta_count))
+        if not np.all(np.isfinite(radii0_np)) or not np.all(radii0_np > 0.0):
+            raise ValueError("t15_replay_segment_conditioned reset boundary radii must be finite and positive")
+        assert boundary_replay_library is not None
+        assert shot_id_arr is not None
+        for b in range(B):
+            source_index = None if source_index_arr is None else int(source_index_arr[b])
+            source_time_s = None if source_time_arr is None else float(source_time_arr[b])
+            radii_np[b] = boundary_replay_library.radii_for_segment(
+                shot_id_arr[b],
+                steps=int(steps),
+                reset_radii=radii0_np[b],
+                source_index=source_index,
+                source_time_s=source_time_s,
+            )
+        radii = torch.as_tensor(radii_np, dtype=torch.float64, device=dev)
+        center_t = torch.as_tensor(np.asarray(boundary_center, dtype=float).reshape(2), dtype=torch.float64, device=dev)
+        dirs = torch.stack([torch.cos(theta), torch.sin(theta)], dim=-1)
+        points = center_t[None, None, None, :] + radii[..., None] * dirs[None, None, :, :]
+        params_t = torch.zeros((B, int(steps) + 1, 5), dtype=torch.float64, device=dev)
+        params_t[..., 0:2] = center_t[None, None, :]
     else:
         points = boundary_points_from_parameters(params_t, theta)
         centers = params_t[..., 0:2]
@@ -121,7 +304,14 @@ def _segmented_ip(cfg: IpReferenceConfig, start: float, steps: int, rng: np.rand
     return values
 
 
-def _segmented_profile_ip(cfg: IpReferenceConfig, start: float, steps: int, rng: np.random.Generator, *, dt: float) -> np.ndarray:
+def _segmented_profile_ip(
+    cfg: IpReferenceConfig,
+    start: float,
+    steps: int,
+    rng: np.random.Generator,
+    *,
+    dt: float,
+) -> np.ndarray:
     if cfg.limits_path is None:
         raise ValueError("segmented_profile requires limits_path")
     limits = load_reference_limits(cfg.limits_path)

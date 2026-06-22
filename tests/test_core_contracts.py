@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from tokamak_rl_v2.config import load_experiment_config
-from tokamak_rl_v2.config.schema import DeltaDerivativeLimits, IpReferenceConfig, LearnerConfig, RewardConfig
+from tokamak_rl_v2.config.schema import BoundaryReferenceConfig, DeltaDerivativeLimits, IpReferenceConfig, LearnerConfig, ReferenceConfig, RewardConfig
 from tokamak_rl_v2.env import BatchStep, TokamakMagneticControlEnv
 from tokamak_rl_v2.networks import FeedForwardGaussianActor, RecurrentQCritic
 from tokamak_rl_v2.rewards import T15PhysicalReward, T15TCVDerivativeReward, T15TCVQualityReward
@@ -20,7 +20,7 @@ from tokamak_rl_v2.training.mpo import MaximumAPosterioriPolicyOptimiser
 from tokamak_rl_v2.training.policy_pipeline import _ArrayReferenceScenario, _write_baseline_report, evaluate_policy_gates, run_reset_sanity
 from tokamak_rl_v2.training.replay import FIFOSequenceReplay, SequenceBatch
 from tokamak_rl_v2.training.trainer import Trainer, _append_csv_row
-from tokamak_rl_v2.env.references import _segmented_ip, _segment_lengths, generate_reference_batch
+from tokamak_rl_v2.env.references import T15ReplayBoundaryLibrary, _segmented_ip, _segment_lengths, generate_reference_batch
 from tokamak_rl_v2.training.cli import _device_list
 
 
@@ -273,8 +273,10 @@ def test_tcv_derivative_reward_uses_terminal_reward_replacement() -> None:
         terminated=torch.tensor([False, True]),
     )
     assert float(rb.reward[0]) > 0.0
-    assert float(rb.reward[1]) == pytest.approx(-5.0)
-    assert float(rb.components["terminal_total_penalty"][1]) == pytest.approx(-5.0)
+    assert float(rb.reward[1]) == pytest.approx(-0.05)
+    assert float(rb.components["terminal_reward_raw"][1]) == pytest.approx(-5.0)
+    assert float(rb.components["terminal_reward_scaled"][1]) == pytest.approx(-0.05)
+    assert float(rb.components["terminal_total_penalty"][1]) == pytest.approx(-0.05)
 
 
 def test_tcv_derivative_current_and_saturation_rewards_are_not_inverted() -> None:
@@ -680,12 +682,13 @@ def test_environment_reset_step_contract() -> None:
     cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=4))
     env = TokamakMagneticControlEnv(cfg, batch_size=2, device="cpu", seed=1)
     schema = env.export_schema()
-    assert schema["observation_kind"] == "controller_state_v2"
+    assert schema["observation_kind"] == "controller_state_v3"
     assert schema["critic_observation_kind"] == "privileged_training_state_v1"
     assert "diagnostics" not in schema
     assert "psi_flat" not in schema["feature_order"]
     assert "psi_flat_normalized" in schema["critic_feature_order"]
     assert "previous_action" in schema["feature_order"]
+    assert "previous_derivative_command" in schema["feature_order"]
     assert "measured_boundary_radii" in schema["feature_order"]
     assert "boundary_radii_error" in schema["feature_order"]
     assert env.obs_dim == schema["feature_slices"]["target_preview"][1]
@@ -694,10 +697,13 @@ def test_environment_reset_step_contract() -> None:
     assert "field_scale" not in env.normalization()
     assert "bdot_scale" not in env.normalization()
     assert env.normalization()["critic_psi_normalization"] == "per_reset_standardization"
-    assert env.normalization()["action_contract"] == "requested_with_current_aware_saturation_v2"
+    assert env.normalization()["action_contract"] == "delta_jdot_derivative_command_v3"
     assert env.normalization()["delta_derivative_scale_aps"] == pytest.approx(500000.0)
     assert len(env.normalization()["delta_derivative_limits_aps"]) == env.action_dim
-    assert env.normalization()["current_saturation_fraction"] == pytest.approx(float(cfg.sim.current_saturation_fraction))
+    if cfg.reward.kind == "tcv_derivative":
+        assert "current_saturation_fraction" not in env.normalization()
+    else:
+        assert env.normalization()["current_saturation_fraction"] == pytest.approx(float(cfg.sim.current_saturation_fraction))
     obs = env.reset()
     assert obs.shape == (2, env.obs_dim)
     assert env.critic_obs().shape == (2, env.critic_obs_dim)
@@ -773,7 +779,10 @@ def test_delta_jdot_command_clipping_penalizes_unrealized_delta() -> None:
             compute_backend="cpu",
             max_episode_steps=4,
             action_contract="delta_jdot",
-            delta_derivative_scale_aps=1.0e9,
+            delta_derivative_limits_aps=DeltaDerivativeLimits(
+                pfc=(1.0e9, 1.0e9, 1.0e9, 1.0e9, 1.0e9, 1.0e9),
+                sol=(1.0e9, 1.0e9, 1.0e9),
+            ),
             terminate_on_current_limit=False,
             current_saturation_fraction=1.0e6,
         ),
@@ -783,13 +792,13 @@ def test_delta_jdot_command_clipping_penalizes_unrealized_delta() -> None:
     env.reset()
     result = env.step(torch.ones((1, env.action_dim), dtype=torch.float32))
     comps = result.info["reward_components"]
-    assert env.normalization()["action_contract"] == "delta_jdot_derivative_command_v1"
+    assert env.normalization()["action_contract"] == "delta_jdot_derivative_command_v3"
     assert torch.allclose(result.applied_action, torch.ones_like(result.applied_action), atol=1.0e-6)
     assert float(np.nanmax(comps["action_saturation_delta_rms"])) > 0.0
     assert float(np.nanmax(comps["actuator_saturation_loss"])) > 0.0
 
 
-def test_current_aware_saturation_clips_command_before_current_runaway() -> None:
+def test_delta_jdot_contract_does_not_project_current_runaway_command() -> None:
     cfg = load_experiment_config(CONFIG)
     cfg = replace(
         cfg,
@@ -797,6 +806,7 @@ def test_current_aware_saturation_clips_command_before_current_runaway() -> None
             cfg.sim,
             compute_backend="cpu",
             max_episode_steps=4,
+            action_contract="delta_jdot",
             terminate_on_current_limit=False,
             current_saturation_fraction=1.05,
         ),
@@ -812,13 +822,14 @@ def test_current_aware_saturation_clips_command_before_current_runaway() -> None
     result = env.step(action)
     comps = result.info["reward_components"]
     next_current = float(env._cpu_models[0].state.pfc_currents[0])
-    assert next_current <= upper + 1.0e-3
-    assert result.applied_action[0, 0].item() < 1.0
+    assert next_current > upper
+    assert torch.allclose(result.requested_action, action)
+    assert result.applied_action[0, 0].item() == pytest.approx(env.delta_action_to_command_norm[0].item())
     assert env.previous_action[0, 0].item() == pytest.approx(action[0, 0].item())
     assert env.previous_derivative_command[0, 0].item() == pytest.approx(result.applied_action[0, 0].item())
-    assert float(np.nanmax(comps["action_saturation_delta_rms"])) > 0.0
-    assert float(np.nanmax(comps["action_saturation_fraction"])) > 0.0
-    assert float(np.nanmax(comps["actuator_saturation_loss"])) > 0.0
+    assert float(np.nanmax(comps["action_saturation_delta_rms"])) == pytest.approx(0.0)
+    assert float(np.nanmax(comps["action_saturation_fraction"])) == pytest.approx(0.0)
+    assert float(np.nanmax(comps["actuator_saturation_loss"])) == pytest.approx(0.0)
     assert float(np.nanmax(comps["current_usage_fraction"])) > 1.0
     assert bool(result.terminated[0].item()) is False
 
@@ -1265,6 +1276,93 @@ def test_production_config_loads_real_t15_delta_jdot_limits() -> None:
     assert cfg.sim.delta_derivative_limits_aps.sol == pytest.approx(
         (1437338.8, 5889842.0, 1946208.8)
     )
+
+
+def test_production_reference_generates_t15_replay_conditioned_boundary() -> None:
+    cfg = load_experiment_config(PRODUCTION_CONFIG)
+    assert cfg.reference.boundary.kind == "t15_replay_segment_conditioned"
+    assert cfg.reference.boundary.replay_reference_dir is not None
+    library = T15ReplayBoundaryLibrary(cfg.reference.boundary.replay_reference_dir, theta_count=int(cfg.reference.theta_count))
+    with np.load(cfg.sim.csv_initial_state_library) as data:
+        split = np.asarray(data["split"]).astype(str)
+        keep = np.flatnonzero(split == "train")[:2]
+        initial_ip = np.asarray(data["ip0"], dtype=float)[keep]
+        shot_ids = np.asarray(data["shot_id"]).astype(str)[keep]
+        source_indices = np.asarray(data["source_index"], dtype=np.int64)[keep]
+        source_times_s = np.asarray(data["time_s"], dtype=float)[keep]
+    reset_boundary_radii = np.ones((2, int(cfg.reference.theta_count)), dtype=float)
+    reset_boundary_points = np.zeros((2, int(cfg.reference.theta_count), 2), dtype=float)
+    batch = generate_reference_batch(
+        config=cfg.reference,
+        initial_ip=initial_ip,
+        initial_parameters=np.zeros((2, 5), dtype=float),
+        initial_boundary_points=reset_boundary_points,
+        initial_boundary_radii=reset_boundary_radii,
+        shot_ids=shot_ids,
+        source_indices=source_indices,
+        source_times_s=source_times_s,
+        boundary_replay_library=library,
+        boundary_center=(1.5, 0.0),
+        steps=int(cfg.sim.max_episode_steps),
+        device="cpu",
+        seed=77,
+    )
+    assert batch.ip.shape == (2, 2001)
+    assert batch.radii.shape == (2, 2001, int(cfg.reference.theta_count))
+    assert batch.points.shape == (2, 2001, int(cfg.reference.theta_count), 2)
+    assert torch.all(torch.isfinite(batch.radii))
+
+
+def test_t15_replay_boundary_reference_uses_time_segment_not_ip_sort(tmp_path: Path) -> None:
+    replay_dir = tmp_path / "replay"
+    replay_dir.mkdir()
+    np.savez(
+        replay_dir / "lqr_boundary_reference_1_smoothed.npz",
+        shot=np.asarray([1]),
+        step=np.asarray([1, 2, 3, 4, 5], dtype=np.int64),
+        t=np.asarray([0.0, 0.001, 0.002, 0.003, 0.004], dtype=float),
+        angles_rad=np.asarray([0.0, np.pi], dtype=float),
+        Ip=np.asarray([100.0, 200.0, 100.0, 200.0, 100.0], dtype=float),
+        radii_true=np.asarray(
+            [
+                [1.0, 2.0],
+                [1.1, 2.1],
+                [1.2, 2.2],
+                [1.3, 2.3],
+                [1.4, 2.4],
+            ],
+            dtype=float,
+        ),
+        boundary_found=np.ones((5,), dtype=bool),
+    )
+    cfg = ReferenceConfig(
+        duration_s=0.003,
+        t_step=0.001,
+        theta_count=2,
+        seed=1,
+        ip=IpReferenceConfig(kind="hold_reset", min=0.0, max=1.0, rate_limit=0.0),
+        boundary=BoundaryReferenceConfig(kind="t15_replay_segment_conditioned", replay_reference_dir=replay_dir),
+    )
+    library = T15ReplayBoundaryLibrary(replay_dir, theta_count=2)
+    batch = generate_reference_batch(
+        config=cfg,
+        initial_ip=np.asarray([123.0], dtype=float),
+        initial_parameters=np.zeros((1, 5), dtype=float),
+        initial_boundary_points=np.zeros((1, 2, 2), dtype=float),
+        initial_boundary_radii=np.asarray([[10.0, 20.0]], dtype=float),
+        shot_ids=np.asarray(["1"]),
+        source_indices=np.asarray([0]),
+        boundary_replay_library=library,
+        boundary_center=(1.5, 0.0),
+        steps=3,
+        device="cpu",
+        seed=2,
+    )
+    expected = torch.tensor(
+        [[[10.0, 20.0], [10.1, 20.1], [10.2, 20.2], [10.3, 20.3]]],
+        dtype=torch.float64,
+    )
+    assert torch.allclose(batch.radii, expected)
 
 
 def test_actuator_legality_analysis_reports_delta_jdot_plus_twenty_percent(tmp_path: Path) -> None:
@@ -1886,6 +1984,21 @@ def test_training_checkpoint_resume_rejects_old_critic_action_input_kind(tmp_pat
         resumed._load_checkpoint(checkpoint)
 
 
+def test_training_checkpoint_resume_rejects_missing_reference_fragment(tmp_path: Path) -> None:
+    first_dir = tmp_path / "first"
+    cfg = _small_config(first_dir)
+    trainer = Trainer(cfg, device="cpu", output_dir=first_dir)
+    trainer.env.reset()
+    checkpoint = trainer._save_checkpoint("missing_reference.pt", step=0, updates=0)
+    state = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    state.pop("reference", None)
+    torch.save(state, checkpoint)
+
+    resumed = Trainer(cfg, device="cpu", output_dir=tmp_path / "resume", resume_checkpoint=checkpoint)
+    with pytest.raises(ValueError, match="reference config mismatch"):
+        resumed._load_checkpoint(checkpoint)
+
+
 def test_checkpoint_save_does_not_hide_single_env_state_errors(tmp_path: Path) -> None:
     cfg = _small_config(tmp_path)
     trainer = Trainer(cfg, device="cpu", output_dir=tmp_path)
@@ -1980,7 +2093,7 @@ def test_export_cli_writes_policy_bundle_from_valid_checkpoint(tmp_path: Path) -
     assert (export_dir / "actor.pt").exists()
     assert (export_dir / "policy_weights.npz").exists()
     schema = json.loads((export_dir / "controller_schema.json").read_text())
-    assert schema["observation_kind"] == "controller_state_v2"
+    assert schema["observation_kind"] == "controller_state_v3"
 
 
 def test_distributed_resume_fails_clearly_because_worker_envs_are_not_checkpointed(tmp_path: Path) -> None:

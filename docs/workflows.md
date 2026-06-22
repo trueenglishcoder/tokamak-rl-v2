@@ -116,17 +116,16 @@ git pull origin main
 
 ```bash
 cd /scratch/$USER/tokamak/tokamak-rl-v2
-sbatch jobs/train_t15_csv_initial_segmented_profile_boundary_mpo_1gpu.sbatch
+sbatch jobs/train_t15_csv_segmented_profile_tcvdelta_t15boundary_12gpu_20m.sbatch
 ```
 
 That job:
 
-1. builds processed CSV artifacts if needed,
-2. runs cheap artifact/config preflight,
+1. checks that processed reset, Ip-limit, and replay-boundary artifacts exist,
+2. writes a per-job generated config under the output folder,
 3. launches production training through `scripts/train_policy_pipeline.py`,
-4. exports the deterministic actor,
-5. runs full-episode actor eval,
-6. runs full-episode exported-controller validation.
+4. uses a fresh W&B project name containing the Slurm job id,
+5. logs focused W&B metrics while keeping full disk CSV/JSON outputs.
 
 ## Monitor A Slurm Run
 

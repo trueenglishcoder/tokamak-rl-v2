@@ -87,8 +87,14 @@ class IpReferenceConfig:
 
 @dataclass(frozen=True, slots=True)
 class BoundaryReferenceConfig:
-    kind: Literal["static_initial_parameters", "rate_limited_parameters", "hold_reset_boundary"] = "static_initial_parameters"
+    kind: Literal[
+        "static_initial_parameters",
+        "rate_limited_parameters",
+        "hold_reset_boundary",
+        "t15_replay_segment_conditioned",
+    ] = "static_initial_parameters"
     rate_limits: dict[str, float] = field(default_factory=dict)
+    replay_reference_dir: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,7 +109,7 @@ class ReferenceConfig:
 
 @dataclass(frozen=True, slots=True)
 class ObservationConfig:
-    actor_kind: Literal["controller_state_v2"] = "controller_state_v2"
+    actor_kind: Literal["controller_state_v3"] = "controller_state_v3"
     critic_kind: Literal["privileged_training_state_v1"] = "privileged_training_state_v1"
     target_preview_steps: int = 8
     target_preview_stride: int = 10
@@ -162,7 +168,7 @@ class SimConfig:
     current_limit_scale: float = 1.0
     derivative_limit_scale: float = 1.0
     action_scale: float = 1.0
-    action_contract: Literal["absolute_derivative", "delta_jdot"] = "absolute_derivative"
+    action_contract: Literal["delta_jdot"] = "delta_jdot"
     delta_derivative_scale_aps: float = 500000.0
     delta_derivative_limits_aps: DeltaDerivativeLimits | None = None
     terminate_on_boundary_loss: bool = True

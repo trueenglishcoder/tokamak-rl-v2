@@ -19,7 +19,7 @@ This document describes the maintained runtime architecture of
 - batched RL environment
 - reset-state libraries and runtime wrappers
 - Ip and boundary reference generation
-- dense physical reward
+- TCV-derivative quality reward
 - actor and critic networks
 - replay
 - MPO learner
@@ -37,9 +37,11 @@ CSV reset row
 -> reset tokamak-sim plant
 -> read simulator-found boundary
 -> generate segmented_profile Ip target
--> actor samples normalized derivative action
+-> use matching-shot smoothed replay boundary segment anchored to reset boundary
+-> actor samples requested normalized delta-Jdot
+-> environment accumulates derivative command and sends absolute next currents
 -> simulator advances plant
--> dense negative physical-cost reward
+-> TCV-derivative reward
 -> sequence replay
 -> recurrent critic + MPO update
 -> deterministic actor export
@@ -85,7 +87,8 @@ For production:
 - sample one coherent row from `t15_csv_initial_states.npz`
 - reset the plant with that row’s `Ip0 + PFC0 + SOL0`
 - compute the physical boundary after reset
-- store that boundary as the episode target through `hold_reset_boundary`
+- generate a shot-matched replay-boundary target through
+  `t15_replay_segment_conditioned`
 
 Runtime training does not read raw T15 CSVs directly.
 
@@ -104,7 +107,7 @@ That keeps the generated target horizon aligned with the simulator horizon.
 
 Boundary target:
 
-- `hold_reset_boundary`
+- `t15_replay_segment_conditioned`
 
 Ip target:
 
@@ -133,7 +136,7 @@ limits through a safety factor.
 Actor observation kind:
 
 ```text
-controller_state_v2
+controller_state_v3
 ```
 
 Critic observation kind:
@@ -164,20 +167,20 @@ Critic observations include the actor observation plus training-only privilege:
 
 ## Reward
 
-The maintained reward is a single dense negative physical-cost reward.
+The maintained reward is `tcv_derivative`.
 
 It combines:
 
-- boundary mean error
-- boundary max error
-- Ip error
-- current soft-limit loss
-- derivative soft-limit loss
-- action magnitude loss
-- delta-action loss
-- optional terminal penalty
+- TCV-style boundary quality
+- TCV-style Ip quality
+- current operational-limit quality
+- derivative/actuator quality
+- requested-vs-applied delta rejection quality
+- boundary-present quality
+- terminal reward replacement for operational failures
 
-There is no active reward-search branch in the production path.
+Normal reward is `reward_scale * quality`. Terminal reward is the scaled
+source-style value `reward_scale * terminal_reward`.
 
 ## Learning Stack
 

@@ -50,9 +50,12 @@ sim:
 
 reference:
   boundary:
-    kind: hold_reset_boundary
+    kind: t15_replay_segment_conditioned
   ip:
     kind: segmented_profile
+
+reward:
+  kind: tcv_derivative
 
 training:
   production_mode: true
@@ -83,7 +86,7 @@ sim:
   compute_backend: gpu
   gpu_device: cuda:0
   angles: 32
-  max_episode_steps: 500
+  max_episode_steps: 2000
   reset_source: csv_initial_states
   csv_initial_state_library: "../../data/processed/t15_csv_initial_states.npz"
   csv_initial_state_split: train
@@ -91,10 +94,11 @@ sim:
   derivative_limit_scale: 1.0
   action_scale: 1.0
   terminate_on_boundary_loss: true
-  terminate_on_current_limit: false
+  terminate_on_current_limit: true
   current_termination_over_limit_a: 5000.0
-  current_termination_grace_steps: 8
-  current_hard_termination_fraction: 1.05
+  current_termination_grace_steps: 1
+  current_hard_termination_fraction: 1.20
+  action_contract: delta_jdot
 ```
 
 `reset_source` supports:
@@ -120,7 +124,7 @@ The production reference path is:
 
 ```yaml
 reference:
-  duration_s: 0.5
+  duration_s: 2.0
   t_step: 0.001
   theta_count: 32
   seed: 11
@@ -128,24 +132,26 @@ reference:
     kind: segmented_profile
     limits_path: "../../data/processed/t15_reference_limits.json"
     start_mode: reset_ip
-    segment_min_steps: 50
-    segment_max_steps: 300
+    segment_min_steps: 300
+    segment_max_steps: 800
     segment_count_min: 3
-    segment_count_max: 8
-    hold_probability: 0.35
+    segment_count_max: 5
     plateau_min_fraction: 0.25
     plateau_max_fraction: 1.0
     end_min_fraction: 0.25
     end_max_fraction: 1.0
-    ramp_up_rate_fraction: 0.25
-    ramp_down_rate_fraction: 0.25
-    hold_min_steps: 50
-    hold_max_steps: 250
-    final_hold_min_steps: 50
+    ramp_up_rate_min_fraction: 0.3
+    ramp_up_rate_fraction: 0.55
+    ramp_down_rate_min_fraction: 0.3
+    ramp_down_rate_fraction: 0.55
+    hold_min_steps: 300
+    hold_max_steps: 800
+    final_hold_min_steps: 0
     smooth_ramps: true
     max_delta_fraction: 0.60
   boundary:
-    kind: hold_reset_boundary
+    kind: t15_replay_segment_conditioned
+    replay_reference_dir: "../../../tokamak-sim/runs/t15md_limited_replay_dataset"
 ```
 
 ### `reference.ip.kind`
@@ -180,7 +186,7 @@ The maintained observation kinds are:
 
 ```yaml
 observation:
-  actor_kind: controller_state_v2
+  actor_kind: controller_state_v3
   critic_kind: privileged_training_state_v1
   target_preview_steps: 8
   target_preview_stride: 10
@@ -191,27 +197,33 @@ observations include normalized `psi_flat` plus current/derivative privilege.
 
 ## `reward`
 
-Production uses one dense negative physical-cost reward only.
+Production uses the TCV-derivative quality reward.
 
 Important fields:
 
 ```yaml
 reward:
+  kind: tcv_derivative
   shape_mean_scale_m: 0.03
   shape_max_scale_m: 0.08
   ip_scale_a: 25000.0
-  boundary_missing_error_m: 0.10
-  shape_mean_weight: 4.0
-  shape_max_weight: 1.0
-  ip_weight: 3.0
-  current_weight: 2.0
-  derivative_weight: 0.5
-  action_weight: 0.02
-  delta_action_weight: 0.05
+  boundary_missing_error_m: 1.0
+  boundary_missing_weight: 20.0
+  shape_mean_weight: 3.2
+  shape_max_weight: 0.8
+  ip_weight: 1.8
+  current_weight: 0.75
+  derivative_weight: 0.1875
+  actuator_saturation_weight: 0.1875
+  action_weight: 0.0
+  delta_action_weight: 0.0
   current_soft_fraction: 0.90
+  current_bad_fraction: 1.00
   derivative_soft_fraction: 0.90
-  terminal_reward: -20.0
-  reward_scale: 1.0
+  derivative_bad_fraction: 1.10
+  terminal_reward: -5.0
+  reward_scale: 0.01
+  smoothmax_alpha: -5.0
 ```
 
 Removed legacy reward keys are rejected.

@@ -198,7 +198,7 @@ metadata.json
 The production actor schema is:
 
 ```text
-controller_state_v2
+controller_state_v3
 ```
 
 ## Checkpoints
@@ -212,4 +212,4 @@ checkpoints/final.pt
 ```
 
 Manual export from a checkpoint is supported, but only for
-`controller_state_v2` checkpoints.
+`controller_state_v3` checkpoints.

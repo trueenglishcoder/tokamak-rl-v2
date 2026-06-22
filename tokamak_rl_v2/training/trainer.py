@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import queue
@@ -1251,7 +1252,9 @@ class Trainer:
         else:
             decision_step = raw_step
             env_step = raw_step * self.num_envs
-        out: dict[str, object] = {"experiment": self.config.name, "step": raw_step, "decision_step": decision_step, "env_step": env_step, "updates": int(updates), "eval_score": eval_score, "device": str(self.device), "learner_device": str(self.device), "algorithm": "Maximum a Posteriori Policy Optimisation", "plant": "tokamak-sim", "sim_compute_backend": self.config.sim.compute_backend, "exact_resume_supported": exact_resume_supported}
+        reference_fragment = self._config_fragment(self.config.reference)
+        reference_hash = hashlib.sha256(json.dumps(reference_fragment, sort_keys=True).encode("utf-8")).hexdigest()
+        out: dict[str, object] = {"experiment": self.config.name, "step": raw_step, "decision_step": decision_step, "env_step": env_step, "updates": int(updates), "eval_score": eval_score, "device": str(self.device), "learner_device": str(self.device), "algorithm": "Maximum a Posteriori Policy Optimisation", "plant": "tokamak-sim", "sim_compute_backend": self.config.sim.compute_backend, "reference_hash": reference_hash, "exact_resume_supported": exact_resume_supported}
         if self._last_actor_devices:
             out["actor_devices"] = list(self._last_actor_devices)
             out["actor_workers"] = len(self._last_actor_devices)
@@ -1458,6 +1461,7 @@ class Trainer:
             "network": asdict(self.config.network),
             "learner": asdict(self.config.learner),
             "reward": asdict(self.config.reward),
+            "reference": self._config_fragment(self.config.reference),
             "sim": self._sim_resume_fragment(),
             "training_state": {"step": int(step), "updates": int(updates)},
         }, path)
@@ -1521,6 +1525,7 @@ class Trainer:
             "network": asdict(self.config.network),
             "learner": asdict(self.config.learner),
             "reward": asdict(self.config.reward),
+            "reference": self._config_fragment(self.config.reference),
             "sim": self._sim_resume_fragment(),
         }
         for name, value in expected.items():

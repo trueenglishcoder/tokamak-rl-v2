@@ -470,13 +470,14 @@ class T15TCVDerivativeReward:
         normal_reward = float(c.reward_scale) * quality
 
         terminal_mask = terminated.to(dtype=torch.bool, device=quality.device).reshape_as(quality)
-        terminal_reward = torch.full_like(normal_reward, float(c.terminal_reward))
-        reward = torch.where(terminal_mask, terminal_reward, normal_reward)
+        terminal_reward_raw = torch.full_like(normal_reward, float(c.terminal_reward))
+        terminal_reward_scaled = torch.full_like(normal_reward, float(c.terminal_reward) * float(c.reward_scale))
+        reward = torch.where(terminal_mask, terminal_reward_scaled, normal_reward)
         if episode_progress is None:
             progress = torch.zeros_like(quality)
         else:
             progress = torch.clamp(episode_progress.to(dtype=quality.dtype, device=quality.device).reshape_as(quality), 0.0, 1.0)
-        terminal_total_penalty = torch.where(terminal_mask, terminal_reward, torch.zeros_like(terminal_reward))
+        terminal_total_penalty = torch.where(terminal_mask, terminal_reward_scaled, torch.zeros_like(terminal_reward_scaled))
 
         shape_mean_loss = 1.0 - shape_reward
         shape_max_loss = 1.0 - shape_max_reward
@@ -532,6 +533,8 @@ class T15TCVDerivativeReward:
                 "actuator_saturation_loss": actuator_saturation_loss,
                 "tcv_saturation_component_loss": saturation_component_loss,
                 "terminal_remaining_loss": torch.zeros_like(quality),
+                "terminal_reward_raw": terminal_reward_raw,
+                "terminal_reward_scaled": terminal_reward_scaled,
                 "terminal_total_penalty": terminal_total_penalty,
                 "boundary_found": boundary_found.to(dtype=reward.dtype),
                 "boundary_missing_loss": boundary_missing_loss,

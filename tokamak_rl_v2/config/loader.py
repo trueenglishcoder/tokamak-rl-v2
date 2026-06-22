@@ -198,6 +198,7 @@ def _reference(raw: Mapping[str, Any], base: Path) -> ReferenceConfig:
         min_value = float(ip_raw["min"])
         max_value = float(ip_raw["max"])
         rate_limit = float(ip_raw["rate_limit"])
+    replay_reference_raw = b_raw.get("replay_reference_dir")
     return ReferenceConfig(
         duration_s=float(raw.get("duration_s", 1.0)),
         t_step=float(raw.get("t_step", 0.001)),
@@ -228,14 +229,18 @@ def _reference(raw: Mapping[str, Any], base: Path) -> ReferenceConfig:
             smooth_ramps=bool(ip_raw.get("smooth_ramps", True)),
             max_delta_fraction=float(ip_raw.get("max_delta_fraction", 1.0)),
         ),
-        boundary=BoundaryReferenceConfig(kind=str(b_raw.get("kind", "static_initial_parameters")), rate_limits={str(k): float(v) for k, v in _mapping(b_raw.get("rate_limits", {}), "rate_limits").items()}),
+        boundary=BoundaryReferenceConfig(
+            kind=str(b_raw.get("kind", "static_initial_parameters")),
+            rate_limits={str(k): float(v) for k, v in _mapping(b_raw.get("rate_limits", {}), "rate_limits").items()},
+            replay_reference_dir=None if replay_reference_raw is None else _resolve(base, replay_reference_raw),
+        ),
     )
 
 
 def _observation(raw: Mapping[str, Any]) -> ObservationConfig:
     _reject_unknown_keys(raw, set(ObservationConfig.__dataclass_fields__), prefix="observation")
     return ObservationConfig(
-        actor_kind=str(raw.get("actor_kind", "controller_state_v2")),
+        actor_kind=str(raw.get("actor_kind", "controller_state_v3")),
         critic_kind=str(raw.get("critic_kind", "privileged_training_state_v1")),
         target_preview_steps=int(raw.get("target_preview_steps", 8)),
         target_preview_stride=int(raw.get("target_preview_stride", 10)),
@@ -323,8 +328,12 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
         raise ValueError("sim.reset_source=csv_initial_states requires sim.csv_initial_state_library")
     if cfg.sim.csv_initial_state_split not in {"train", "holdout", "all"}:
         raise ValueError("sim.csv_initial_state_split must be train, holdout, or all")
-    if cfg.sim.reset_source == "csv_initial_states" and cfg.reference.boundary.kind != "hold_reset_boundary":
-        raise ValueError("sim.reset_source=csv_initial_states requires reference.boundary.kind=hold_reset_boundary")
+    csv_boundary_kinds = {"hold_reset_boundary", "t15_replay_segment_conditioned"}
+    if cfg.sim.reset_source == "csv_initial_states" and cfg.reference.boundary.kind not in csv_boundary_kinds:
+        raise ValueError(
+            "sim.reset_source=csv_initial_states requires reference.boundary.kind="
+            "hold_reset_boundary or t15_replay_segment_conditioned"
+        )
     if cfg.sim.initial_ranges is not None:
         expected = {"R0", "Z0", "A0", "kappa", "delta"}
         missing = sorted(expected - set(cfg.sim.initial_ranges.boundary_parameters))
@@ -397,12 +406,25 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
             raise ValueError("reference.ip segment count bounds are invalid")
         if not 0.0 <= float(ip.hold_probability) <= 1.0:
             raise ValueError("reference.ip.hold_probability must be in [0, 1]")
-    if cfg.reference.boundary.kind not in {"static_initial_parameters", "rate_limited_parameters", "hold_reset_boundary"}:
+    if cfg.reference.boundary.kind not in {
+        "static_initial_parameters",
+        "rate_limited_parameters",
+        "hold_reset_boundary",
+        "t15_replay_segment_conditioned",
+    }:
         raise ValueError("reference.boundary.kind is unsupported")
-    if cfg.reference.boundary.kind == "hold_reset_boundary" and int(cfg.reference.theta_count) != int(cfg.sim.angles):
-        raise ValueError("reference.theta_count must equal sim.angles for hold_reset_boundary")
-    if cfg.observation.actor_kind != "controller_state_v2":
-        raise ValueError("observation.actor_kind must be controller_state_v2")
+    if cfg.reference.boundary.kind in {"hold_reset_boundary", "t15_replay_segment_conditioned"} and int(cfg.reference.theta_count) != int(cfg.sim.angles):
+        raise ValueError("reference.theta_count must equal sim.angles for sampled boundary references")
+    if cfg.reference.boundary.kind == "t15_replay_segment_conditioned":
+        replay_dir = cfg.reference.boundary.replay_reference_dir
+        if replay_dir is None:
+            raise ValueError("reference.boundary.kind=t15_replay_segment_conditioned requires replay_reference_dir")
+        if not replay_dir.exists():
+            raise ValueError(f"reference.boundary.replay_reference_dir does not exist: {replay_dir}")
+        if cfg.sim.reset_source != "csv_initial_states":
+            raise ValueError("reference.boundary.kind=t15_replay_segment_conditioned requires csv initial states")
+    if cfg.observation.actor_kind != "controller_state_v3":
+        raise ValueError("observation.actor_kind must be controller_state_v3")
     if cfg.observation.critic_kind != "privileged_training_state_v1":
         raise ValueError("observation.critic_kind must be privileged_training_state_v1")
     for key, value in cfg.reference.boundary.rate_limits.items():
@@ -412,12 +434,13 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
         raise ValueError("observation preview settings are invalid")
     if not math.isfinite(float(cfg.sim.action_scale)) or float(cfg.sim.action_scale) <= 0.0 or float(cfg.sim.action_scale) > 1.0:
         raise ValueError("sim.action_scale must be finite and in (0, 1]")
-    if cfg.sim.action_contract not in {"absolute_derivative", "delta_jdot"}:
-        raise ValueError("sim.action_contract must be absolute_derivative or delta_jdot")
+    if cfg.sim.action_contract != "delta_jdot":
+        raise ValueError("sim.action_contract must be delta_jdot")
     if not math.isfinite(float(cfg.sim.delta_derivative_scale_aps)) or float(cfg.sim.delta_derivative_scale_aps) <= 0.0:
         raise ValueError("sim.delta_derivative_scale_aps must be finite and positive")
-    if cfg.sim.delta_derivative_limits_aps is not None:
-        cfg.sim.delta_derivative_limits_aps.validate()
+    if cfg.sim.delta_derivative_limits_aps is None:
+        raise ValueError("sim.delta_derivative_limits_aps must be provided for delta_jdot")
+    cfg.sim.delta_derivative_limits_aps.validate()
     for name in ("current_limit_scale", "derivative_limit_scale"):
         value = float(getattr(cfg.sim, name))
         if not math.isfinite(value) or value <= 0.0:
@@ -485,10 +508,18 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
             raise ValueError("training.production_mode requires sim.reset_source=csv_initial_states")
         if cfg.sim.csv_initial_state_split != "train":
             raise ValueError("training.production_mode requires sim.csv_initial_state_split=train")
+        if cfg.sim.config_path.name != "T15MD_new_data.toml":
+            raise ValueError("training.production_mode requires the current T15 tokamak-sim config")
+        if cfg.sim.action_contract != "delta_jdot" or cfg.sim.delta_derivative_limits_aps is None:
+            raise ValueError("training.production_mode requires delta-Jdot action contract with per-coil limits")
+        if not cfg.sim.terminate_on_boundary_loss or not cfg.sim.terminate_on_current_limit:
+            raise ValueError("training.production_mode requires boundary and current terminations")
         if cfg.reference.ip.kind != "segmented_profile":
             raise ValueError("training.production_mode requires reference.ip.kind=segmented_profile")
-        if cfg.reference.boundary.kind != "hold_reset_boundary":
-            raise ValueError("training.production_mode requires reference.boundary.kind=hold_reset_boundary")
+        if cfg.reference.boundary.kind != "t15_replay_segment_conditioned":
+            raise ValueError("training.production_mode requires reference.boundary.kind=t15_replay_segment_conditioned")
+        if cfg.reward.kind != "tcv_derivative":
+            raise ValueError("training.production_mode requires reward.kind=tcv_derivative")
         expected_duration = float(cfg.sim.max_episode_steps) * float(cfg.reference.t_step)
         if not math.isclose(float(cfg.reference.duration_s), expected_duration, rel_tol=0.0, abs_tol=1.0e-12):
             raise ValueError("training.production_mode requires reference.duration_s == sim.max_episode_steps * reference.t_step")

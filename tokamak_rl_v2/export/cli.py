@@ -33,12 +33,15 @@ def _validate_export_checkpoint(ckpt: object, *, checkpoint: Path) -> None:
     if not isinstance(schema, dict):
         raise ValueError(f"checkpoint does not contain an export schema: {checkpoint}")
     observation_kind = str(schema.get("observation_kind"))
-    if observation_kind == "compact_joint_state_v2":
+    if observation_kind != "controller_state_v3":
         raise ValueError(
-            f"checkpoint observation schema compact_joint_state_v2 is incompatible with manual export; expected controller_state_v2: {checkpoint}"
+            f"checkpoint observation schema {observation_kind!r} is incompatible with learned_magnetic_controller: {checkpoint}"
         )
-    if observation_kind != "controller_state_v2":
-        raise ValueError(f"checkpoint observation schema is incompatible with learned_magnetic_controller: {checkpoint}")
+    action_contract = str(schema.get("action_contract"))
+    if action_contract != "delta_jdot_derivative_command_v3":
+        raise ValueError(
+            f"checkpoint action contract {action_contract!r} is incompatible with learned_magnetic_controller: {checkpoint}"
+        )
     for key in ("obs_dim", "action_dim"):
         if key not in schema or int(schema[key]) <= 0:
             raise ValueError(f"checkpoint export schema has invalid {key}: {checkpoint}")

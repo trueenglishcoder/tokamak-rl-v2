@@ -600,7 +600,7 @@ def validate_exported_controller(export_dir: Path | None, config: ExperimentConf
     try:
         from tokamak_control.control.learned_magnetic_controller import LearnedMagneticController
         from tokamak_control.geometry.boundary import BoundaryNotFoundError, find_plasma_boundary_with_status
-        from tokamak_control.geometry.coordinates import radii_from_polyline_ray_intersections
+        from tokamak_control.geometry.legacy_metrics import legacy_radii_at_angles
 
         rollout_config = replace(config, sim=replace(config.sim, compute_backend="cpu", gpu_device="cuda:0", csv_initial_state_split="holdout"))
         env = TokamakMagneticControlEnv(rollout_config, batch_size=1, device="cpu", seed=int(config.training.seed) + 910000)
@@ -638,18 +638,41 @@ def validate_exported_controller(export_dir: Path | None, config: ExperimentConf
             ep_ip: list[float] = []
             ep_current: list[float] = []
             ep_current_usage: list[float] = []
+            prev_boundary_poly: np.ndarray | None = None
+            prev_boundary_level: float | None = None
             for step_index in range(step_count):
                 ref_index = min(step_index, ref_ip.shape[0] - 1)
                 ref_radii = np.nan_to_num(ref_radii_series[ref_index], nan=0.0, posinf=0.0, neginf=0.0)
                 ip_target = float(ref_ip[ref_index])
                 psi = model.compute_psi()
                 try:
-                    poly, _level, _status = find_plasma_boundary_with_status(psi, model.grid, center, n_levels=80, limiter_shape=env.cfg.limiter_shape, boundary_mode=env.cfg.boundary_mode)
+                    poly, level, _status = find_plasma_boundary_with_status(
+                        psi,
+                        model.grid,
+                        center,
+                        n_levels=80,
+                        prev_level=prev_boundary_level,
+                        prev_poly=prev_boundary_poly,
+                        limiter_shape=env.cfg.limiter_shape,
+                        boundary_mode=env.cfg.boundary_mode,
+                        boundary_base_mode=env.cfg.boundary_base_mode,
+                        level_smoothing_alpha=env.cfg.boundary_level_smoothing_alpha,
+                        level_search_span_fraction=env.cfg.boundary_level_search_span_fraction,
+                        continuity_weight_radii=env.cfg.boundary_continuity_weight_radii,
+                        continuity_weight_mean_radius=env.cfg.boundary_continuity_weight_mean_radius,
+                        continuity_weight_center=env.cfg.boundary_continuity_weight_center,
+                        continuity_weight_area=env.cfg.boundary_continuity_weight_area,
+                        continuity_weight_level=env.cfg.boundary_continuity_weight_level,
+                    )
+                    prev_boundary_poly = np.asarray(poly, dtype=float)
+                    prev_boundary_level = float(level)
                     found = 1.0
-                    radii = radii_from_polyline_ray_intersections(poly, center, angles)
+                    radii = legacy_radii_at_angles(poly, center, angles)
                     shape = float(np.nanmean(np.abs(np.nan_to_num(radii) - ref_radii)))
                 except BoundaryNotFoundError:
                     poly = None
+                    prev_boundary_poly = None
+                    prev_boundary_level = None
                     found = 0.0
                     shape = float(config.reward.boundary_missing_error_m)
                 ip_err = abs(float(model.state.Ip) - ip_target)
@@ -664,13 +687,18 @@ def validate_exported_controller(export_dir: Path | None, config: ExperimentConf
                     scenario=scenario,
                     max_episode_steps=int(config.sim.max_episode_steps),
                 )
-                pfc_derivs = np.asarray(action.pfc_derivs, dtype=float)
-                sol_derivs = np.asarray(action.sol_derivs, dtype=float)
-                if not np.all(np.isfinite(pfc_derivs)) or not np.all(np.isfinite(sol_derivs)):
-                    raise ValueError("controller emitted non-finite derivatives")
-                deriv = np.concatenate([pfc_derivs, sol_derivs])
+                pfc_next = np.asarray(action.pfc_currents_next, dtype=float)
+                sol_next = np.asarray(action.sol_currents_next, dtype=float)
+                if not np.all(np.isfinite(pfc_next)) or not np.all(np.isfinite(sol_next)):
+                    raise ValueError("controller emitted non-finite next-current commands")
+                prev_currents = np.concatenate([
+                    np.asarray(model.state.pfc_currents, dtype=float),
+                    np.asarray(model.state.sol_currents, dtype=float),
+                ])
+                next_currents = np.concatenate([pfc_next, sol_next])
+                deriv = (next_currents - prev_currents) / max(float(model.t_step), 1.0e-12)
                 action_rms_all.append(float(np.sqrt(np.mean(np.square(deriv)))) if deriv.size else 0.0)
-                model.step(pfc_derivs, sol_derivs)
+                model.step_currents(pfc_currents_next=pfc_next, sol_currents_next=sol_next)
                 currents = np.concatenate([np.asarray(model.state.pfc_currents, dtype=float), np.asarray(model.state.sol_currents, dtype=float)])
                 current_over = float(np.nanmax(np.maximum(np.abs(currents) - current_limits, 0.0)))
                 current_usage = float(np.nanmax(np.abs(currents) / np.maximum(current_limits, 1.0e-12)))

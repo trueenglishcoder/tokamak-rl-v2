@@ -17,6 +17,15 @@ from tokamak_rl_v2.env import TokamakMagneticControlEnv
 
 ROOT = Path(__file__).resolve().parents[1]
 PRODUCTION_CONFIG = ROOT / "configs/experiments/t15_csv_initial_segmented_profile_boundary_mpo.yaml"
+REPLAY_BOUNDARY_DIR = (ROOT.parent / "tokamak-sim/runs/t15md_limited_replay_dataset").resolve()
+
+
+def _pin_replay_boundary_dir(raw: dict[str, object]) -> None:
+    reference = raw.setdefault("reference", {})
+    assert isinstance(reference, dict)
+    boundary = reference.setdefault("boundary", {})
+    assert isinstance(boundary, dict)
+    boundary["replay_reference_dir"] = str(REPLAY_BOUNDARY_DIR)
 
 
 def test_production_config_uses_single_clean_path() -> None:
@@ -24,8 +33,13 @@ def test_production_config_uses_single_clean_path() -> None:
     assert cfg.training.production_mode is True
     assert cfg.sim.reset_source == "csv_initial_states"
     assert cfg.reference.ip.kind == "segmented_profile"
-    assert cfg.reference.boundary.kind == "hold_reset_boundary"
-    assert cfg.observation.actor_kind == "controller_state_v2"
+    assert cfg.reference.boundary.kind == "t15_replay_segment_conditioned"
+    assert cfg.reference.boundary.replay_reference_dir is not None
+    assert cfg.reference.boundary.replay_reference_dir.exists()
+    assert cfg.reward.kind == "tcv_derivative"
+    assert cfg.sim.terminate_on_boundary_loss is True
+    assert cfg.sim.terminate_on_current_limit is True
+    assert cfg.observation.actor_kind == "controller_state_v3"
     assert cfg.observation.critic_kind == "privileged_training_state_v1"
 
 
@@ -49,6 +63,15 @@ def test_production_config_rejects_curriculum(tmp_path: Path) -> None:
     path = tmp_path / "bad_curriculum.json"
     path.write_text(json.dumps(raw), encoding="utf-8")
     with pytest.raises(ValueError, match="curriculum"):
+        load_experiment_config(path)
+
+
+def test_production_config_rejects_old_hold_reset_boundary(tmp_path: Path) -> None:
+    raw = json.loads(PRODUCTION_CONFIG.read_text(encoding="utf-8"))
+    raw["reference"]["boundary"] = {"kind": "hold_reset_boundary"}
+    path = tmp_path / "bad_hold_reset_boundary.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="t15_replay_segment_conditioned"):
         load_experiment_config(path)
 
 
@@ -115,6 +138,7 @@ def test_plain_training_cli_rejects_production_mode() -> None:
 def test_plain_training_cli_accepts_non_production_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     raw = json.loads(PRODUCTION_CONFIG.read_text(encoding="utf-8"))
     raw["training"]["production_mode"] = False
+    _pin_replay_boundary_dir(raw)
     path = tmp_path / "non_production.json"
     path.write_text(json.dumps(raw), encoding="utf-8")
     calls: list[dict[str, object]] = []
@@ -159,6 +183,7 @@ def test_loader_rejects_unknown_keys_in_strict_sections(tmp_path: Path, mutate, 
 def test_production_config_rejects_duration_mismatch(tmp_path: Path) -> None:
     raw = json.loads(PRODUCTION_CONFIG.read_text(encoding="utf-8"))
     raw["reference"]["duration_s"] = 0.499
+    _pin_replay_boundary_dir(raw)
     path = tmp_path / "bad_duration.json"
     path.write_text(json.dumps(raw), encoding="utf-8")
     with pytest.raises(ValueError, match="reference.duration_s == sim.max_episode_steps"):
@@ -249,12 +274,9 @@ def test_production_policy_gates_do_not_include_mpo_diagnostics() -> None:
     assert "mpo_sampled_q_spread" not in names
 
 
-def test_production_preflight_rejects_split_overlap(tmp_path: Path) -> None:
+def test_production_preflight_allows_same_shot_close_train_holdout_rows(tmp_path: Path) -> None:
     cfg = _temp_production_config_with_artifacts(tmp_path, times=[0.00, 0.20], splits=["train", "holdout"])
-    failure = _preflight_artifact_failure(cfg)
-    assert failure is not None
-    assert failure["status"] == "failed_initial_state_library"
-    assert "overlap" in str(failure.get("reason", ""))
+    assert _preflight_artifact_failure(cfg) is None
 
 
 def test_production_preflight_accepts_non_overlapping_split(tmp_path: Path) -> None:
@@ -301,6 +323,8 @@ def _temp_production_config_with_artifacts(tmp_path: Path, *, times: list[float]
                 "positive_dipdt_p99_a_per_s": 2.5e6,
                 "negative_dipdt_abs_p95_a_per_s": 2.0e6,
                 "negative_dipdt_abs_p99_a_per_s": 2.5e6,
+                "positive_ramp_mean_a_per_s": 1.0e6,
+                "negative_ramp_abs_mean_a_per_s": 1.0e6,
                 "sample_count": 1000,
                 "shot_count": 1,
                 "shot_ids": ["3856"],
@@ -310,6 +334,7 @@ def _temp_production_config_with_artifacts(tmp_path: Path, *, times: list[float]
     )
     raw["sim"]["csv_initial_state_library"] = str(npz_path)
     raw["reference"]["ip"]["limits_path"] = str(limits_path)
+    _pin_replay_boundary_dir(raw)
     cfg_path = tmp_path / "production.json"
     cfg_path.write_text(json.dumps(raw), encoding="utf-8")
     return load_experiment_config(cfg_path)
