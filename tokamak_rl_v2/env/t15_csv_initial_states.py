@@ -14,6 +14,7 @@ class CsvInitialStateSample:
     shot_ids: tuple[str, ...]
     source_indices: tuple[int, ...]
     source_times_s: tuple[float, ...]
+    difficulty_bins: tuple[str, ...] = ()
 
 
 class CsvInitialStateLibrary:
@@ -38,6 +39,7 @@ class CsvInitialStateLibrary:
             self.pfc0 = np.asarray(data["pfc0"], dtype=float)
             self.sol0 = np.asarray(data["sol0"], dtype=float)
             raw_split = np.asarray(data["split"]).astype(str) if "split" in data.files else None
+            raw_difficulty = np.asarray(data["difficulty_bin"]).astype(str) if "difficulty_bin" in data.files else None
         if raw_split is None and split != "all":
             raise ValueError(f"CSV initial-state library missing split array required for split={split!r}: {self.path}")
         if raw_split is not None:
@@ -55,10 +57,21 @@ class CsvInitialStateLibrary:
                 self.ip0 = self.ip0[keep]
                 self.pfc0 = self.pfc0[keep]
                 self.sol0 = self.sol0[keep]
+                if raw_difficulty is not None:
+                    raw_difficulty = raw_difficulty.reshape(-1)[keep]
                 raw_split = raw_split[keep]
             self.split = raw_split.astype(str)
         else:
             self.split = np.full(self.ip0.shape, "all", dtype="<U7")
+        if raw_difficulty is not None:
+            raw_difficulty = raw_difficulty.reshape(-1)
+            if raw_difficulty.shape != self.ip0.shape:
+                raise ValueError("CSV initial-state difficulty_bin array must have one value per row")
+            if np.any(raw_difficulty == ""):
+                raise ValueError("CSV initial-state difficulty_bin contains empty labels")
+            self.difficulty_bin = raw_difficulty.astype(str)
+        else:
+            self.difficulty_bin = None
         count = int(self.ip0.shape[0])
         if count <= 0:
             raise ValueError(f"CSV initial-state library split={split!r} is empty: {self.path}")
@@ -71,11 +84,35 @@ class CsvInitialStateLibrary:
         for name, arr in (("time_s", self.time_s), ("ip0", self.ip0), ("pfc0", self.pfc0), ("sol0", self.sol0)):
             if not np.all(np.isfinite(arr)):
                 raise ValueError(f"CSV initial-state library contains non-finite {name}")
+        self._bin_shot_indices: dict[str, dict[str, np.ndarray]] = {}
+        if self.difficulty_bin is not None:
+            for bin_name in sorted(set(self.difficulty_bin.tolist())):
+                mask_bin = self.difficulty_bin == bin_name
+                shots: dict[str, np.ndarray] = {}
+                for shot in sorted(set(self.shot_id[mask_bin].tolist()), key=lambda value: int(value)):
+                    idx = np.nonzero(mask_bin & (self.shot_id == shot))[0].astype(np.int64)
+                    if idx.size:
+                        shots[str(shot)] = idx
+                if shots:
+                    self._bin_shot_indices[str(bin_name)] = shots
 
     def __len__(self) -> int:
         return int(self.ip0.shape[0])
 
     def sample(self, rng: np.random.Generator, count: int) -> CsvInitialStateSample:
+        if self.difficulty_bin is not None and self._bin_shot_indices:
+            bins = np.asarray(sorted(self._bin_shot_indices), dtype=object)
+            reps = int(np.ceil(int(count) / max(int(bins.size), 1)))
+            chosen_bins = np.tile(bins, reps)[: int(count)]
+            rng.shuffle(chosen_bins)
+            idx = np.empty((int(count),), dtype=np.int64)
+            for row, bin_name in enumerate(chosen_bins.tolist()):
+                by_shot = self._bin_shot_indices[str(bin_name)]
+                shots = sorted(by_shot)
+                shot = str(shots[int(rng.integers(0, len(shots)))])
+                candidates = by_shot[shot]
+                idx[row] = int(candidates[int(rng.integers(0, int(candidates.size)))])
+            return self.take(idx)
         idx = rng.integers(0, len(self), size=int(count))
         return self.take(idx)
 
@@ -92,6 +129,7 @@ class CsvInitialStateLibrary:
             shot_ids=tuple(str(v) for v in self.shot_id[idx].tolist()),
             source_indices=tuple(int(v) for v in self.source_index[idx].tolist()),
             source_times_s=tuple(float(v) for v in self.time_s[idx].tolist()),
+            difficulty_bins=tuple(str(v) for v in self.difficulty_bin[idx].tolist()) if self.difficulty_bin is not None else (),
         )
 
 

@@ -61,6 +61,19 @@ class T15ReplayBoundaryLibrary:
             raise ValueError("theta_count must be positive")
         if not self.root.exists():
             raise FileNotFoundError(f"T15 replay boundary directory does not exist: {self.root}")
+        self._oracle = False
+        self._oracle_shot_id: np.ndarray | None = None
+        self._oracle_source_index: np.ndarray | None = None
+        self._oracle_time_s: np.ndarray | None = None
+        self._oracle_ip: np.ndarray | None = None
+        self._oracle_radii: np.ndarray | None = None
+        self._oracle_real_action: np.ndarray | None = None
+        self._oracle_key_to_row: dict[tuple[str, int], int] = {}
+        oracle_path = self.root / "t15_replay_window_oracle_targets.npz"
+        if oracle_path.exists():
+            self._load_oracle(oracle_path)
+            self._entries = {}
+            return
         entries: dict[str, T15ReplayBoundaryEntry] = {}
         files = sorted(self.root.glob("lqr_boundary_reference_*_smoothed.npz"))
         if not files:
@@ -72,11 +85,14 @@ class T15ReplayBoundaryLibrary:
 
     @property
     def shot_ids(self) -> tuple[str, ...]:
+        if self._oracle:
+            assert self._oracle_shot_id is not None
+            return tuple(sorted(set(self._oracle_shot_id.tolist()), key=int))
         return tuple(sorted(self._entries))
 
     def assert_shots_available(self, shot_ids: np.ndarray | list[int] | tuple[int, ...]) -> None:
         wanted = {str(int(v)) for v in np.asarray(shot_ids).reshape(-1).tolist()}
-        missing = sorted(wanted - set(self._entries))
+        missing = sorted(wanted - set(self.shot_ids))
         if missing:
             raise ValueError(
                 "T15 replay boundary references are missing shots: "
@@ -93,6 +109,10 @@ class T15ReplayBoundaryLibrary:
         source_index: int | None = None,
         source_time_s: float | None = None,
     ) -> np.ndarray:
+        if self._oracle:
+            row = self._oracle_row(shot_id, source_index=source_index, source_time_s=source_time_s)
+            assert self._oracle_radii is not None
+            return self._fit_segment_length(np.asarray(self._oracle_radii[row], dtype=float), wanted=int(steps) + 1)
         entry = self._entry(shot_id)
         reset = np.asarray(reset_radii, dtype=float).reshape(self.theta_count)
         start_idx = self._segment_start_index(entry, source_index=source_index, source_time_s=source_time_s)
@@ -116,6 +136,10 @@ class T15ReplayBoundaryLibrary:
         source_index: int | None = None,
         source_time_s: float | None = None,
     ) -> np.ndarray:
+        if self._oracle:
+            row = self._oracle_row(shot_id, source_index=source_index, source_time_s=source_time_s)
+            assert self._oracle_ip is not None
+            return self._fit_segment_length(np.asarray(self._oracle_ip[row], dtype=float), wanted=int(steps) + 1)
         entry = self._entry(shot_id)
         start_idx = self._segment_start_index(entry, source_index=source_index, source_time_s=source_time_s)
         wanted = int(steps) + 1
@@ -129,12 +153,101 @@ class T15ReplayBoundaryLibrary:
             segment = np.concatenate([segment, pad], axis=0)
         return np.asarray(segment, dtype=float)
 
+    def real_action_for_segment(
+        self,
+        shot_id: int | str,
+        *,
+        steps: int,
+        source_index: int | None = None,
+        source_time_s: float | None = None,
+    ) -> np.ndarray:
+        if not self._oracle:
+            raise ValueError("real action oracle is only available from t15_replay_window_oracle_targets.npz")
+        row = self._oracle_row(shot_id, source_index=source_index, source_time_s=source_time_s)
+        assert self._oracle_real_action is not None
+        return self._fit_segment_length(np.asarray(self._oracle_real_action[row], dtype=float), wanted=int(steps))
+
     def _entry(self, shot_id: int | str) -> T15ReplayBoundaryEntry:
         key = str(int(shot_id))
         try:
             return self._entries[key]
         except KeyError as exc:
             raise ValueError(f"no T15 replay boundary reference for shot {key}") from exc
+
+    def _load_oracle(self, path: Path) -> None:
+        with np.load(path, allow_pickle=False) as data:
+            required = {"shot_id", "source_index", "time_s", "ip_target", "boundary_radii", "real_jdot_action", "difficulty_bin"}
+            missing = sorted(required - set(data.files))
+            if missing:
+                raise ValueError(f"{path} missing oracle arrays: {', '.join(missing)}")
+            shot_id = np.asarray(data["shot_id"]).astype(str).reshape(-1)
+            source_index = np.asarray(data["source_index"], dtype=np.int64).reshape(-1)
+            time_s = np.asarray(data["time_s"], dtype=float).reshape(-1)
+            ip = np.asarray(data["ip_target"], dtype=float)
+            radii = np.asarray(data["boundary_radii"], dtype=float)
+            real_action = np.asarray(data["real_jdot_action"], dtype=float)
+            difficulty_bin = np.asarray(data["difficulty_bin"]).astype(str).reshape(-1)
+        count = int(shot_id.shape[0])
+        if count <= 0:
+            raise ValueError(f"{path} contains no oracle windows")
+        if source_index.shape != (count,) or time_s.shape != (count,) or difficulty_bin.shape != (count,):
+            raise ValueError(f"{path} oracle metadata arrays must have one value per row")
+        if ip.ndim != 2 or ip.shape[0] != count:
+            raise ValueError(f"{path} ip_target must have shape [N, T+1]")
+        if radii.ndim != 3 or radii.shape[0] != count or radii.shape[2] < self.theta_count:
+            raise ValueError(f"{path} boundary_radii must have shape [N, T+1, >=theta_count]")
+        if real_action.ndim != 3 or real_action.shape[0] != count:
+            raise ValueError(f"{path} real_jdot_action must have shape [N, T, action_dim]")
+        for name, arr in (("time_s", time_s), ("ip_target", ip), ("boundary_radii", radii), ("real_jdot_action", real_action)):
+            if not np.all(np.isfinite(arr)):
+                raise ValueError(f"{path} contains non-finite {name}")
+        if not np.all(radii[:, :, : self.theta_count] > 0.0):
+            raise ValueError(f"{path} contains non-positive oracle boundary radii")
+        key_to_row: dict[tuple[str, int], int] = {}
+        for row, (shot, source) in enumerate(zip(shot_id.tolist(), source_index.tolist(), strict=True)):
+            key = (str(int(shot)), int(source))
+            if key in key_to_row:
+                raise ValueError(f"{path} contains duplicate oracle key {key}")
+            key_to_row[key] = int(row)
+        self._oracle = True
+        self._oracle_shot_id = shot_id
+        self._oracle_source_index = source_index
+        self._oracle_time_s = time_s
+        self._oracle_ip = ip.astype(float, copy=False)
+        self._oracle_radii = radii[:, :, : self.theta_count].astype(float, copy=False)
+        self._oracle_real_action = real_action.astype(float, copy=False)
+        self._oracle_key_to_row = key_to_row
+
+    def _oracle_row(
+        self,
+        shot_id: int | str,
+        *,
+        source_index: int | None,
+        source_time_s: float | None,
+    ) -> int:
+        key_shot = str(int(shot_id))
+        if source_index is not None:
+            key = (key_shot, int(source_index))
+            if key in self._oracle_key_to_row:
+                return self._oracle_key_to_row[key]
+        if source_time_s is None or not np.isfinite(float(source_time_s)):
+            raise ValueError(f"oracle replay window requires source_index or finite source_time_s for shot {key_shot}")
+        assert self._oracle_shot_id is not None and self._oracle_time_s is not None
+        rows = np.nonzero(self._oracle_shot_id == key_shot)[0]
+        if rows.size == 0:
+            raise ValueError(f"no oracle windows for shot {key_shot}")
+        nearest = rows[int(np.argmin(np.abs(self._oracle_time_s[rows] - float(source_time_s))))]
+        return int(nearest)
+
+    @staticmethod
+    def _fit_segment_length(segment: np.ndarray, *, wanted: int) -> np.ndarray:
+        arr = np.asarray(segment, dtype=float)
+        if int(wanted) <= 0:
+            return np.zeros((0, *arr.shape[1:]), dtype=float)
+        if arr.shape[0] >= int(wanted):
+            return arr[: int(wanted)].astype(float, copy=False)
+        pad = np.repeat(arr[-1:, ...], int(wanted) - int(arr.shape[0]), axis=0)
+        return np.concatenate([arr, pad], axis=0).astype(float, copy=False)
 
     @staticmethod
     def _segment_start_index(

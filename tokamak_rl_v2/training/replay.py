@@ -216,8 +216,11 @@ class FIFOSequenceReplay:
         slots = eligible[choice]
         lengths = self.episode_lengths[slots]
         max_starts = torch.clamp(lengths - T, min=0)
-        rand = torch.rand((int(batch_size),), dtype=torch.float32, device=self.device, generator=generator)
-        starts = torch.floor(rand * (max_starts.to(torch.float32) + 1.0)).to(torch.long)
+        if T == self.max_episode_steps and min_len == self.max_episode_steps:
+            starts = torch.zeros((int(batch_size),), dtype=torch.long, device=self.device)
+        else:
+            rand = torch.rand((int(batch_size),), dtype=torch.float32, device=self.device, generator=generator)
+            starts = torch.floor(rand * (max_starts.to(torch.float32) + 1.0)).to(torch.long)
         offsets = torch.arange(T, device=self.device)[None, :]
         idx = starts[:, None] + offsets
         mask = self.valid[slots[:, None], idx].to(torch.float32)

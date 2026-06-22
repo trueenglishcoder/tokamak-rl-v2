@@ -240,10 +240,12 @@ def _reference(raw: Mapping[str, Any], base: Path) -> ReferenceConfig:
 def _observation(raw: Mapping[str, Any]) -> ObservationConfig:
     _reject_unknown_keys(raw, set(ObservationConfig.__dataclass_fields__), prefix="observation")
     return ObservationConfig(
-        actor_kind=str(raw.get("actor_kind", "controller_state_v4")),
+        actor_kind=str(raw.get("actor_kind", "controller_state_v5")),
         critic_kind=str(raw.get("critic_kind", "privileged_training_state_v1")),
         target_preview_steps=int(raw.get("target_preview_steps", 8)),
         target_preview_stride=int(raw.get("target_preview_stride", 10)),
+        ip_rate_scale_aps=float(raw.get("ip_rate_scale_aps", 500000.0)),
+        boundary_rate_scale_mps=float(raw.get("boundary_rate_scale_mps", 1.0)),
     )
 
 
@@ -424,10 +426,14 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
             raise ValueError(f"reference.boundary.replay_reference_dir does not exist: {replay_dir}")
         if cfg.sim.reset_source != "csv_initial_states":
             raise ValueError("reference.boundary.kind=t15_replay_segment_conditioned requires csv initial states")
-    if cfg.observation.actor_kind != "controller_state_v4":
-        raise ValueError("observation.actor_kind must be controller_state_v4")
+    if cfg.observation.actor_kind not in {"controller_state_v4", "controller_state_v5"}:
+        raise ValueError("observation.actor_kind must be controller_state_v4 or controller_state_v5")
     if cfg.observation.critic_kind != "privileged_training_state_v1":
         raise ValueError("observation.critic_kind must be privileged_training_state_v1")
+    for name in ("ip_rate_scale_aps", "boundary_rate_scale_mps"):
+        value = float(getattr(cfg.observation, name))
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"observation.{name} must be finite and positive")
     for key, value in cfg.reference.boundary.rate_limits.items():
         if not math.isfinite(float(value)) or float(value) < 0.0:
             raise ValueError(f"reference.boundary.rate_limits.{key} must be finite and non-negative")
@@ -521,6 +527,8 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
                 raise ValueError("training.production_mode single_segment_profile requires reference.boundary.kind=hold_reset_boundary")
         elif cfg.reference.boundary.kind != "t15_replay_segment_conditioned":
             raise ValueError("training.production_mode requires reference.boundary.kind=t15_replay_segment_conditioned")
+        if cfg.reference.ip.kind == "replay_window" and cfg.observation.actor_kind != "controller_state_v5":
+            raise ValueError("training.production_mode replay_window requires observation.actor_kind=controller_state_v5")
         if cfg.reward.kind != "tcv_derivative":
             raise ValueError("training.production_mode requires reward.kind=tcv_derivative")
         expected_duration = float(cfg.sim.max_episode_steps) * float(cfg.reference.t_step)

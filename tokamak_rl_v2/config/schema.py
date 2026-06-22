@@ -109,10 +109,12 @@ class ReferenceConfig:
 
 @dataclass(frozen=True, slots=True)
 class ObservationConfig:
-    actor_kind: Literal["controller_state_v4"] = "controller_state_v4"
+    actor_kind: Literal["controller_state_v4", "controller_state_v5"] = "controller_state_v5"
     critic_kind: Literal["privileged_training_state_v1"] = "privileged_training_state_v1"
     target_preview_steps: int = 8
     target_preview_stride: int = 10
+    ip_rate_scale_aps: float = 500000.0
+    boundary_rate_scale_mps: float = 1.0
 
 
 @dataclass(frozen=True, slots=True)
