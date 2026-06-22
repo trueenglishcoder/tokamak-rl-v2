@@ -946,18 +946,28 @@ def _preflight_artifact_failure(cfg: ExperimentConfig) -> dict[str, object] | No
         path = cfg.sim.csv_initial_state_library
         if path is None or not Path(path).exists():
             return {"status": "failed_initial_state_library", "name": "initial_state_library", "path": "" if path is None else str(path)}
-        summary_path = Path(path).with_suffix(".json")
         try:
-            _validate_initial_state_summary(summary_path)
             from tokamak_rl_v2.env.t15_csv_initial_states import CsvInitialStateLibrary
 
             with np.load(path, allow_pickle=False) as data:
                 expected_arrays = {"shot_id", "source_index", "time_s", "ip0", "pfc0", "sol0", "split"}
-                if set(data.files) != expected_arrays:
-                    raise ValueError(f"initial-state library arrays must be exactly {sorted(expected_arrays)}, got {sorted(data.files)}")
+                allowed_arrays = expected_arrays | {"difficulty_bin"}
+                actual_arrays = set(data.files)
+                missing = sorted(expected_arrays - actual_arrays)
+                unexpected = sorted(actual_arrays - allowed_arrays)
+                if missing or unexpected:
+                    details = []
+                    if missing:
+                        details.append(f"missing {missing}")
+                    if unexpected:
+                        details.append(f"unexpected {unexpected}")
+                    raise ValueError(f"initial-state library arrays invalid: {', '.join(details)}")
                 n_pfc = int(np.asarray(data["pfc0"]).shape[1])
                 n_sol = int(np.asarray(data["sol0"]).shape[1])
                 ip0 = np.asarray(data["ip0"], dtype=float).reshape(-1)
+            summary_path = Path(path).with_suffix(".json")
+            if summary_path.exists():
+                _validate_initial_state_summary(summary_path)
             CsvInitialStateLibrary(path, n_pfc=n_pfc, n_sol=n_sol, split="train")
             CsvInitialStateLibrary(path, n_pfc=n_pfc, n_sol=n_sol, split="holdout")
         except Exception as exc:

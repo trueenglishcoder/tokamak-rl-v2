@@ -76,7 +76,9 @@ srun \
     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     export PYTHONPATH=/workspace/tokamak-sim:/workspace/tokamak-rl-v2:${PYTHONPATH:-}
     export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
+    export PYTHONFAULTHANDLER=1
     export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+    export TORCH_DISTRIBUTED_DEBUG=${TORCH_DISTRIBUTED_DEBUG:-DETAIL}
     export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
     cd /workspace/tokamak-rl-v2
 
