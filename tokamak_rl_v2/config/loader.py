@@ -558,6 +558,8 @@ def _validate_reward_config(reward: RewardConfig, *, prefix: str) -> None:
         "ip_weight",
         "current_weight",
         "derivative_weight",
+        "current_drift_weight",
+        "mean_jdot_bias_weight",
         "current_usage_weight",
         "derivative_usage_weight",
         "action_weight",
@@ -579,6 +581,10 @@ def _validate_reward_config(reward: RewardConfig, *, prefix: str) -> None:
         bad = float(getattr(reward, bad_name))
         if not math.isfinite(bad) or bad <= soft:
             raise ValueError(f"{prefix}.{bad_name} must be finite and greater than {prefix}.{soft_name}")
+    for name in ("current_drift_bad_fraction", "mean_jdot_bias_bad_fraction"):
+        value = float(getattr(reward, name))
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{prefix}.{name} must be finite and positive")
     if not math.isfinite(float(reward.terminal_reward)):
         raise ValueError(f"{prefix}.terminal_reward must be finite")
     if not math.isfinite(float(reward.terminal_remaining_cost)) or float(reward.terminal_remaining_cost) < 0.0:

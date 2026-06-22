@@ -128,6 +128,10 @@ class RewardConfig:
     ip_weight: float = 3.0
     current_weight: float = 2.0
     derivative_weight: float = 0.5
+    current_drift_weight: float = 0.0
+    current_drift_bad_fraction: float = 0.10
+    mean_jdot_bias_weight: float = 0.0
+    mean_jdot_bias_bad_fraction: float = 0.10
     current_usage_weight: float = 0.0
     derivative_usage_weight: float = 0.0
     action_weight: float = 0.02

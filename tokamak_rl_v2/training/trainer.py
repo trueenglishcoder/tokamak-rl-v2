@@ -60,10 +60,14 @@ _FOCUSED_WANDB_METRICS = {
     "reward/current_usage_fraction",
     "reward/current_usage_mean_fraction",
     "reward/current_usage_loss",
+    "reward/current_drift_fraction",
+    "reward/current_drift_loss",
     "reward/current_over_limit_a",
     "reward/boundary_missing_loss",
     "reward/derivative_usage_mean_fraction",
     "reward/derivative_usage_loss",
+    "reward/mean_jdot_bias_fraction",
+    "reward/mean_jdot_bias_loss",
     "reward/action_saturation_delta_rms",
     "reward/action_saturation_fraction",
     "reward/actuator_saturation_loss",
@@ -225,6 +229,7 @@ class Trainer:
         output_dir: str | Path | None = None,
         wandb_run=None,
         resume_checkpoint: str | Path | None = None,
+        warm_start_checkpoint: str | Path | None = None,
         export_policy: bool = True,
         wandb_metric_preset: str = "full",
     ) -> None:
@@ -248,6 +253,9 @@ class Trainer:
         self.wandb_run = wandb_run
         self.wandb_metric_preset = str(wandb_metric_preset)
         self.resume_checkpoint = Path(resume_checkpoint) if resume_checkpoint is not None else None
+        self.warm_start_checkpoint = Path(warm_start_checkpoint) if warm_start_checkpoint is not None else None
+        if self.resume_checkpoint is not None and self.warm_start_checkpoint is not None:
+            raise ValueError("resume_checkpoint and warm_start_checkpoint are mutually exclusive")
         self.export_policy = bool(export_policy)
         self.start_step = 0
         self.start_updates = 0
@@ -470,6 +478,8 @@ class Trainer:
             if self.resume_checkpoint is not None:
                 obs = self._load_checkpoint(self.resume_checkpoint)
                 critic_obs = self.env.critic_obs()
+            elif self.warm_start_checkpoint is not None:
+                self._load_warm_start_checkpoint(self.warm_start_checkpoint)
             start = time.time()
             updates = int(self.start_updates)
             last_update_step = int(self.start_step)
@@ -543,6 +553,7 @@ class Trainer:
             "output_dir": str(self.output_dir),
             "total_training_envs": self.num_envs,
             "save_checkpoints": self._save_checkpoints_enabled(),
+            "warm_start_checkpoint": None if self.warm_start_checkpoint is None else str(self.warm_start_checkpoint),
         }
         if self._save_final_checkpoint_enabled():
             self._save_checkpoint("final.pt", step=self.steps, updates=updates)
@@ -603,6 +614,15 @@ class Trainer:
             # The saved checkpoint is rank-0 state, so warm resume keeps the learned
             # weights/optimiser state and reseeds each rank independently while replay refills.
             rank_seed = int(self.config.training.seed) + int(self.distributed_rank) * 1000003 + int(self.start_step) + 17
+            torch.manual_seed(rank_seed)
+            if self.device.type == "cuda":
+                torch.cuda.manual_seed_all(rank_seed)
+            np.random.seed(rank_seed % (2**32 - 1))
+            random.seed(rank_seed)
+            self._broadcast_trainable_state()
+        elif self.warm_start_checkpoint is not None:
+            self._load_warm_start_checkpoint(self.warm_start_checkpoint)
+            rank_seed = int(self.config.training.seed) + int(self.distributed_rank) * 1000003 + 17
             torch.manual_seed(rank_seed)
             if self.device.type == "cuda":
                 torch.cuda.manual_seed_all(rank_seed)
@@ -760,6 +780,7 @@ class Trainer:
                 "local_envs_per_rank": int(self.num_envs),
                 "total_training_envs": int(self.global_num_envs),
                 "save_checkpoints": self._save_checkpoints_enabled(),
+                "warm_start_checkpoint": None if self.warm_start_checkpoint is None else str(self.warm_start_checkpoint),
                 "status": "completed",
             }
             metrics_path.write_text(json.dumps(final, indent=2), encoding="utf-8")
@@ -1515,6 +1536,24 @@ class Trainer:
             return self.env.load_state_dict(data["env_state"])
         return self.env.reset()
 
+    def _load_warm_start_checkpoint(self, path: str | Path) -> None:
+        checkpoint_path = Path(path)
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"warm-start checkpoint does not exist: {checkpoint_path}")
+        data = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        if int(data.get("checkpoint_version", 0)) < 2:
+            raise ValueError(f"checkpoint is not warm-startable by this trainer: {checkpoint_path}")
+        self._validate_warm_start_checkpoint(data, checkpoint_path)
+        self.actor.load_state_dict(data["actor_state_dict"])
+        self.critic.load_state_dict(data["critic_state_dict"])
+        self.target_actor.load_state_dict(data["target_actor_state_dict"])
+        self.target_critic.load_state_dict(data["target_critic_state_dict"])
+        self.learner.load_state_dict(data["learner_state"])
+        self.best_eval = -float("inf")
+        self.best_eval_details = {}
+        self.start_step = 0
+        self.start_updates = 0
+
     def _validate_checkpoint(self, data: dict[str, object], path: Path) -> None:
         if data.get("critic_action_input_kind") != CRITIC_ACTION_INPUT_KIND:
             raise ValueError(f"checkpoint critic action input convention mismatch: {path}")
@@ -1536,6 +1575,27 @@ class Trainer:
         for name, value in expected.items():
             if data.get(name) != value:
                 raise ValueError(f"checkpoint {name} config mismatch: {path}")
+
+    def _validate_warm_start_checkpoint(self, data: dict[str, object], path: Path) -> None:
+        if data.get("critic_action_input_kind") != CRITIC_ACTION_INPUT_KIND:
+            raise ValueError(f"warm-start checkpoint critic action input convention mismatch: {path}")
+        schema = data.get("schema", {})
+        if not isinstance(schema, dict):
+            raise ValueError(f"warm-start checkpoint is missing schema: {path}")
+        if schema.get("observation_kind") != self.schema.get("observation_kind"):
+            raise ValueError(f"warm-start checkpoint observation schema mismatch: {path}")
+        if schema.get("action_contract") != self.schema.get("action_contract"):
+            raise ValueError(f"warm-start checkpoint action contract mismatch: {path}")
+        if int(schema.get("obs_dim", -1)) != int(self.schema.get("obs_dim", -2)):
+            raise ValueError(f"warm-start checkpoint observation dimension mismatch: {path}")
+        if int(schema.get("action_dim", -1)) != int(self.schema.get("action_dim", -2)):
+            raise ValueError(f"warm-start checkpoint action dimension mismatch: {path}")
+        for name, value in {
+            "network": asdict(self.config.network),
+            "learner": asdict(self.config.learner),
+        }.items():
+            if data.get(name) != value:
+                raise ValueError(f"warm-start checkpoint {name} config mismatch: {path}")
 
     def _sim_resume_fragment(self) -> object:
         fragment = self._config_fragment(self.config.sim)

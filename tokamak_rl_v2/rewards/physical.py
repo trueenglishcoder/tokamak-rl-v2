@@ -43,6 +43,8 @@ class T15PhysicalReward:
         derivative_usage_loss: Tensor | None = None,
         current_usage_mean_fraction: Tensor | None = None,
         derivative_usage_mean_fraction: Tensor | None = None,
+        current_drift_fraction: Tensor | None = None,
+        mean_jdot_bias_fraction: Tensor | None = None,
         episode_progress: Tensor | None = None,
     ) -> RewardBatch:
         c = self.config
@@ -103,6 +105,16 @@ class T15PhysicalReward:
             if derivative_usage_mean_fraction is None
             else torch.clamp(derivative_usage_mean_fraction.to(dtype=action.dtype, device=action.device).reshape_as(derivative_usage), min=0.0)
         )
+        current_drift = (
+            torch.zeros_like(current_usage_fraction)
+            if current_drift_fraction is None
+            else torch.clamp(current_drift_fraction.to(dtype=action.dtype, device=action.device).reshape_as(current_usage_fraction), min=0.0)
+        )
+        mean_jdot_bias = (
+            torch.zeros_like(derivative_usage)
+            if mean_jdot_bias_fraction is None
+            else torch.clamp(mean_jdot_bias_fraction.to(dtype=action.dtype, device=action.device).reshape_as(derivative_usage), min=0.0)
+        )
         action_loss = torch.mean(action.pow(2), dim=-1)
         delta_action_loss = torch.mean(delta_action.pow(2), dim=-1)
         actuator_saturation_loss = torch.mean(saturation_delta.pow(2), dim=-1)
@@ -151,9 +163,11 @@ class T15PhysicalReward:
                 "current_over_limit_a": torch.clamp(current_over_limit_a, min=0.0),
                 "current_usage_fraction": torch.clamp(current_usage_fraction, min=0.0),
                 "current_usage_mean_fraction": current_usage_mean,
+                "current_drift_fraction": current_drift,
                 "current_margin_fraction": current_margin_fraction,
                 "derivative_usage": torch.clamp(derivative_usage, min=0.0),
                 "derivative_usage_mean_fraction": derivative_usage_mean,
+                "mean_jdot_bias_fraction": mean_jdot_bias,
                 "max_abs_action": max_abs_action,
                 "action_rms": action_rms,
                 "requested_action_rms": requested_action_rms,
@@ -170,7 +184,9 @@ class T15PhysicalReward:
                 "current_loss": current_loss,
                 "derivative_loss": derivative_loss,
                 "current_usage_loss": current_usage_cost,
+                "current_drift_loss": torch.zeros_like(current_drift),
                 "derivative_usage_loss": derivative_usage_cost,
+                "mean_jdot_bias_loss": torch.zeros_like(mean_jdot_bias),
                 "action_loss": action_loss,
                 "delta_action_loss": delta_action_loss,
                 "actuator_saturation_loss": actuator_saturation_loss,
@@ -210,6 +226,8 @@ class T15TCVQualityReward:
         derivative_usage_loss: Tensor | None = None,
         current_usage_mean_fraction: Tensor | None = None,
         derivative_usage_mean_fraction: Tensor | None = None,
+        current_drift_fraction: Tensor | None = None,
+        mean_jdot_bias_fraction: Tensor | None = None,
         episode_progress: Tensor | None = None,
     ) -> RewardBatch:
         c = self.config
@@ -272,6 +290,16 @@ class T15TCVQualityReward:
             if derivative_usage_mean_fraction is None
             else torch.clamp(derivative_usage_mean_fraction.to(dtype=action.dtype, device=action.device).reshape_as(derivative_usage), min=0.0)
         )
+        current_drift = (
+            torch.zeros_like(current_usage_fraction)
+            if current_drift_fraction is None
+            else torch.clamp(current_drift_fraction.to(dtype=action.dtype, device=action.device).reshape_as(current_usage_fraction), min=0.0)
+        )
+        mean_jdot_bias = (
+            torch.zeros_like(derivative_usage)
+            if mean_jdot_bias_fraction is None
+            else torch.clamp(mean_jdot_bias_fraction.to(dtype=action.dtype, device=action.device).reshape_as(derivative_usage), min=0.0)
+        )
         action_loss = torch.mean(action.pow(2), dim=-1)
         delta_action_loss = torch.mean(delta_action.pow(2), dim=-1)
         actuator_saturation_loss = torch.mean(saturation_delta.pow(2), dim=-1)
@@ -283,6 +311,8 @@ class T15TCVQualityReward:
                 float(c.ip_weight) * ip_loss,
                 float(c.current_weight) * current_loss,
                 float(c.derivative_weight) * derivative_loss,
+                float(c.current_drift_weight) * current_drift,
+                float(c.mean_jdot_bias_weight) * mean_jdot_bias,
                 float(c.current_usage_weight) * current_usage_cost,
                 float(c.derivative_usage_weight) * derivative_usage_cost,
                 float(c.action_weight) * action_loss,
@@ -324,9 +354,11 @@ class T15TCVQualityReward:
                 "current_over_limit_a": torch.clamp(current_over_limit_a, min=0.0),
                 "current_usage_fraction": torch.clamp(current_usage_fraction, min=0.0),
                 "current_usage_mean_fraction": current_usage_mean,
+                "current_drift_fraction": current_drift,
                 "current_margin_fraction": current_margin_fraction,
                 "derivative_usage": torch.clamp(derivative_usage, min=0.0),
                 "derivative_usage_mean_fraction": derivative_usage_mean,
+                "mean_jdot_bias_fraction": mean_jdot_bias,
                 "max_abs_action": max_abs_action,
                 "action_rms": action_rms,
                 "requested_action_rms": requested_action_rms,
@@ -345,7 +377,9 @@ class T15TCVQualityReward:
                 "current_loss": current_loss,
                 "derivative_loss": derivative_loss,
                 "current_usage_loss": current_usage_cost,
+                "current_drift_loss": current_drift,
                 "derivative_usage_loss": derivative_usage_cost,
+                "mean_jdot_bias_loss": mean_jdot_bias,
                 "action_loss": action_loss,
                 "delta_action_loss": delta_action_loss,
                 "actuator_saturation_loss": actuator_saturation_loss,
@@ -385,6 +419,8 @@ class T15TCVDerivativeReward:
         derivative_usage_loss: Tensor | None = None,
         current_usage_mean_fraction: Tensor | None = None,
         derivative_usage_mean_fraction: Tensor | None = None,
+        current_drift_fraction: Tensor | None = None,
+        mean_jdot_bias_fraction: Tensor | None = None,
         episode_progress: Tensor | None = None,
     ) -> RewardBatch:
         c = self.config
@@ -430,6 +466,26 @@ class T15TCVDerivativeReward:
             bad=float(c.derivative_bad_fraction),
             good=float(c.derivative_soft_fraction),
         )
+        current_drift = (
+            torch.zeros_like(current_usage_fraction)
+            if current_drift_fraction is None
+            else torch.clamp(current_drift_fraction.to(dtype=action.dtype, device=action.device).reshape_as(current_usage_fraction), min=0.0)
+        )
+        mean_jdot_bias = (
+            torch.zeros_like(derivative_usage)
+            if mean_jdot_bias_fraction is None
+            else torch.clamp(mean_jdot_bias_fraction.to(dtype=action.dtype, device=action.device).reshape_as(derivative_usage), min=0.0)
+        )
+        current_drift_reward = _tcv_clipped_linear(
+            current_drift,
+            bad=float(c.current_drift_bad_fraction),
+            good=0.0,
+        )
+        mean_jdot_bias_reward = _tcv_clipped_linear(
+            mean_jdot_bias,
+            bad=float(c.mean_jdot_bias_bad_fraction),
+            good=0.0,
+        )
         actuator_saturation_loss = torch.mean(saturation_delta.pow(2), dim=-1)
         saturation_reward = _tcv_clipped_linear(
             torch.sqrt(torch.clamp(actuator_saturation_loss, min=0.0)),
@@ -449,6 +505,8 @@ class T15TCVDerivativeReward:
                 ip_reward,
                 current_reward,
                 derivative_reward,
+                current_drift_reward,
+                mean_jdot_bias_reward,
                 saturation_reward,
                 boundary_reward,
             ],
@@ -461,6 +519,8 @@ class T15TCVDerivativeReward:
                 float(c.ip_weight),
                 float(c.current_weight),
                 float(c.derivative_weight),
+                float(c.current_drift_weight),
+                float(c.mean_jdot_bias_weight),
                 float(c.actuator_saturation_weight),
                 float(c.boundary_missing_weight),
             ],
@@ -494,6 +554,8 @@ class T15TCVDerivativeReward:
         ip_loss = 1.0 - ip_reward
         current_loss = 1.0 - current_reward
         derivative_loss = 1.0 - derivative_reward
+        current_drift_loss = 1.0 - current_drift_reward
+        mean_jdot_bias_loss = 1.0 - mean_jdot_bias_reward
         saturation_component_loss = 1.0 - saturation_reward
         current_usage_mean = (
             torch.clamp(current_usage_fraction, min=0.0)
@@ -515,9 +577,11 @@ class T15TCVDerivativeReward:
                 "current_over_limit_a": torch.clamp(current_over_limit_a, min=0.0),
                 "current_usage_fraction": torch.clamp(current_usage_fraction, min=0.0),
                 "current_usage_mean_fraction": current_usage_mean,
+                "current_drift_fraction": current_drift,
                 "current_margin_fraction": current_margin_fraction,
                 "derivative_usage": torch.clamp(derivative_usage, min=0.0),
                 "derivative_usage_mean_fraction": derivative_usage_mean,
+                "mean_jdot_bias_fraction": mean_jdot_bias,
                 "max_abs_action": max_abs_action,
                 "max_abs_delta_action": max_abs_delta_action,
                 "action_rms": action_rms,
@@ -536,6 +600,8 @@ class T15TCVDerivativeReward:
                 "ip_loss": ip_loss,
                 "current_loss": current_loss,
                 "derivative_loss": derivative_loss,
+                "current_drift_loss": current_drift_loss,
+                "mean_jdot_bias_loss": mean_jdot_bias_loss,
                 "current_usage_loss": current_loss,
                 "derivative_usage_loss": derivative_loss,
                 "action_loss": torch.zeros_like(quality),

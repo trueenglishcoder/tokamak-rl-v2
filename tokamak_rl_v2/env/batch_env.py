@@ -83,6 +83,8 @@ class TokamakMagneticControlEnv:
         self.raw_derivative_limits = torch.as_tensor(np.concatenate([_limit_vec(self.cfg.physics.pfc_deriv_limit, self.cfg.pfc.n_coils), _limit_vec(self.cfg.physics.sol_deriv_limit, self.cfg.sol.n_coils)]), dtype=torch.float32, device=self.device)
         self.derivative_limits = self.raw_derivative_limits * float(config.sim.action_scale)
         self.previous_action = torch.zeros((self.batch_size, self.action_dim), dtype=torch.float32, device=self.device)
+        self.reset_currents = torch.zeros((self.batch_size, self.action_dim), dtype=torch.float32, device=self.device)
+        self.applied_action_sum = torch.zeros((self.batch_size, self.action_dim), dtype=torch.float32, device=self.device)
         self.action_offset = torch.zeros((self.batch_size, self.action_dim), dtype=torch.float32, device=self.device)
         self.current_over_limit_steps = torch.zeros((self.batch_size,), dtype=torch.long, device=self.device)
         self.psi_reset_mean = torch.zeros((self.batch_size,), dtype=torch.float32, device=self.device)
@@ -133,6 +135,8 @@ class TokamakMagneticControlEnv:
         ip0, pfc0, sol0, params0 = payload.ip0, payload.pfc0, payload.sol0, payload.params0
         self._record_reset_metadata(payload)
         self.previous_action.zero_()
+        self._set_reset_currents(pfc0=pfc0, sol0=sol0)
+        self.applied_action_sum.zero_()
         self.action_offset = self._sample_action_offset(self.batch_size)
         self.current_over_limit_steps.zero_()
         self.step_index.zero_()
@@ -180,6 +184,8 @@ class TokamakMagneticControlEnv:
         ip0, pfc0, sol0 = payload.ip0, payload.pfc0, payload.sol0
         assert self.reference is not None
         self.previous_action[indices_t] = 0.0
+        self._set_reset_currents(pfc0=pfc0, sol0=sol0, indices=indices_t)
+        self.applied_action_sum[indices_t] = 0.0
         self.action_offset[indices_t] = self._sample_action_offset(count)
         self.current_over_limit_steps[indices_t] = 0
         self.step_index[indices_t] = 0
@@ -219,6 +225,15 @@ class TokamakMagneticControlEnv:
             raise ValueError("training config must provide replay-bounded initial_ranges")
         ip0, pfc0, sol0, params0 = sample_initial_conditions(self.rng, self.config.sim.initial_ranges, int(count))
         return ResetPayload(ip0=ip0, pfc0=pfc0, sol0=sol0, params0=params0, reference_seed=int(self.rng.integers(0, 2**31 - 1)))
+
+    def _set_reset_currents(self, *, pfc0: np.ndarray, sol0: np.ndarray, indices: Tensor | None = None) -> None:
+        current0 = torch.as_tensor(np.concatenate([pfc0, sol0], axis=1), dtype=torch.float32, device=self.device)
+        if indices is None:
+            if current0.shape != self.reset_currents.shape:
+                raise ValueError(f"reset current shape mismatch: expected {tuple(self.reset_currents.shape)}, got {tuple(current0.shape)}")
+            self.reset_currents = current0.detach().clone()
+            return
+        self.reset_currents[indices] = current0.detach()
 
     def _reference_for_reset_payload(
         self,
@@ -329,6 +344,7 @@ class TokamakMagneticControlEnv:
         applied_action = self._apply_action_contract(requested_action)
         applied_delta_action = applied_action - previous_action
         physical = applied_action * self.derivative_limits[None, :]
+        self.applied_action_sum = self.applied_action_sum + applied_action.detach()
         if self.config.sim.compute_backend == "gpu":
             assert self._gpu_sim is not None
             current_now = torch.cat([self._gpu_sim.pfc_currents, self._gpu_sim.sol_currents], dim=1).to(dtype=torch.float64, device=self._gpu_sim.device)
@@ -394,6 +410,14 @@ class TokamakMagneticControlEnv:
         raw_deriv_scale = torch.where(torch.isfinite(self.raw_derivative_limits) & (self.raw_derivative_limits > 0.0), self.raw_derivative_limits, torch.ones_like(self.raw_derivative_limits))
         derivative_usage = torch.max(torch.abs(derivs) / raw_deriv_scale[None, :], dim=1).values
         return current_usage_fraction, current_margin_fraction, derivative_usage
+
+    def _drift_metrics(self, *, current: Tensor) -> tuple[Tensor, Tensor]:
+        current_scale = torch.where(torch.isfinite(self.current_limits) & (self.current_limits > 0.0), self.current_limits, torch.ones_like(self.current_limits))
+        current_drift_fraction = torch.max(torch.abs(current - self.reset_currents) / current_scale[None, :], dim=1).values
+        step_count = torch.clamp(self.step_index.to(torch.float32), min=1.0).reshape(self.batch_size, 1)
+        mean_applied_action = self.applied_action_sum / step_count
+        mean_jdot_bias_fraction = torch.sqrt(torch.mean(mean_applied_action.pow(2), dim=1))
+        return current_drift_fraction, mean_jdot_bias_fraction
 
     def _actor_obs_dim(self) -> int:
         return self._actor_feature_slices()["target_preview"][1]
@@ -671,6 +695,7 @@ class TokamakMagneticControlEnv:
         derivative_usage = torch.max(derivative_usage_by_coil, dim=1).values
         derivative_usage_mean_fraction = torch.mean(derivative_usage_by_coil, dim=1)
         derivative_usage_loss = torch.mean(derivative_usage_by_coil.pow(2), dim=1)
+        current_drift_fraction, mean_jdot_bias_fraction = self._drift_metrics(current=current)
         boundary_points = result.boundary.points[:, : int(self.config.sim.angles)].to(torch.float32)
         ref = ref_points[:, : int(self.config.sim.angles)].to(torch.float32)
         found = result.boundary.found.to(torch.bool)
@@ -678,7 +703,7 @@ class TokamakMagneticControlEnv:
         current_terminated, current_hard_terminated, current_grace_terminated = self._current_termination(current_over_limit=current_over_limit, current_usage_fraction=current_usage_fraction)
         terminated = boundary_terminated | current_terminated
         episode_progress = self.step_index.to(torch.float32) / max(float(self.config.sim.max_episode_steps), 1.0)
-        rb = self.reward_fn(ip=result.state.Ip.to(torch.float32), ip_ref=ip_ref, boundary_points=boundary_points, reference_points=ref, action=action, previous_action=previous_action, requested_action=requested_action, applied_delta_action=applied_delta_action, current_over_limit_a=current_over_limit, current_usage_fraction=current_usage_fraction, current_margin_fraction=current_margin_fraction, derivative_usage=derivative_usage, current_usage_loss=current_usage_loss, derivative_usage_loss=derivative_usage_loss, current_usage_mean_fraction=current_usage_mean_fraction, derivative_usage_mean_fraction=derivative_usage_mean_fraction, boundary_found=found, terminated=terminated, episode_progress=episode_progress)
+        rb = self.reward_fn(ip=result.state.Ip.to(torch.float32), ip_ref=ip_ref, boundary_points=boundary_points, reference_points=ref, action=action, previous_action=previous_action, requested_action=requested_action, applied_delta_action=applied_delta_action, current_over_limit_a=current_over_limit, current_usage_fraction=current_usage_fraction, current_margin_fraction=current_margin_fraction, derivative_usage=derivative_usage, current_usage_loss=current_usage_loss, derivative_usage_loss=derivative_usage_loss, current_usage_mean_fraction=current_usage_mean_fraction, derivative_usage_mean_fraction=derivative_usage_mean_fraction, current_drift_fraction=current_drift_fraction, mean_jdot_bias_fraction=mean_jdot_bias_fraction, boundary_found=found, terminated=terminated, episode_progress=episode_progress)
         components = dict(rb.components)
         components["terminated_boundary"] = boundary_terminated.to(dtype=rb.reward.dtype)
         components["terminated_current"] = current_terminated.to(dtype=rb.reward.dtype)
@@ -743,12 +768,13 @@ class TokamakMagneticControlEnv:
         derivative_usage = torch.max(derivative_usage_by_coil, dim=1).values
         derivative_usage_mean_fraction = torch.mean(derivative_usage_by_coil, dim=1)
         derivative_usage_loss = torch.mean(derivative_usage_by_coil.pow(2), dim=1)
+        current_drift_fraction, mean_jdot_bias_fraction = self._drift_metrics(current=current_t)
         found_t = torch.as_tensor(found, dtype=torch.bool, device=self.device)
         boundary_terminated = ~found_t if self.config.sim.terminate_on_boundary_loss else torch.zeros_like(found_t, dtype=torch.bool)
         current_terminated, current_hard_terminated, current_grace_terminated = self._current_termination(current_over_limit=current_over_limit, current_usage_fraction=current_usage_fraction)
         terminated = boundary_terminated | current_terminated
         episode_progress = self.step_index.to(torch.float32) / max(float(self.config.sim.max_episode_steps), 1.0)
-        rb = self.reward_fn(ip=torch.as_tensor(ips, dtype=torch.float32, device=self.device), ip_ref=ip_ref, boundary_points=torch.nan_to_num(torch.as_tensor(np.stack(boundary_points), dtype=torch.float32, device=self.device)), reference_points=ref_points[:, : int(self.config.sim.angles)].to(torch.float32), action=action, previous_action=previous_action, requested_action=requested_action, applied_delta_action=applied_delta_action, current_over_limit_a=current_over_limit, current_usage_fraction=current_usage_fraction, current_margin_fraction=current_margin_fraction, derivative_usage=derivative_usage, current_usage_loss=current_usage_loss, derivative_usage_loss=derivative_usage_loss, current_usage_mean_fraction=current_usage_mean_fraction, derivative_usage_mean_fraction=derivative_usage_mean_fraction, boundary_found=found_t, terminated=terminated, episode_progress=episode_progress)
+        rb = self.reward_fn(ip=torch.as_tensor(ips, dtype=torch.float32, device=self.device), ip_ref=ip_ref, boundary_points=torch.nan_to_num(torch.as_tensor(np.stack(boundary_points), dtype=torch.float32, device=self.device)), reference_points=ref_points[:, : int(self.config.sim.angles)].to(torch.float32), action=action, previous_action=previous_action, requested_action=requested_action, applied_delta_action=applied_delta_action, current_over_limit_a=current_over_limit, current_usage_fraction=current_usage_fraction, current_margin_fraction=current_margin_fraction, derivative_usage=derivative_usage, current_usage_loss=current_usage_loss, derivative_usage_loss=derivative_usage_loss, current_usage_mean_fraction=current_usage_mean_fraction, derivative_usage_mean_fraction=derivative_usage_mean_fraction, current_drift_fraction=current_drift_fraction, mean_jdot_bias_fraction=mean_jdot_bias_fraction, boundary_found=found_t, terminated=terminated, episode_progress=episode_progress)
         components = dict(rb.components)
         components["terminated_boundary"] = boundary_terminated.to(dtype=rb.reward.dtype)
         components["terminated_current"] = current_terminated.to(dtype=rb.reward.dtype)
@@ -817,6 +843,8 @@ class TokamakMagneticControlEnv:
             "step_index": self.step_index.detach().cpu(),
             "done": self.done.detach().cpu(),
             "previous_action": self.previous_action.detach().cpu(),
+            "reset_currents": self.reset_currents.detach().cpu(),
+            "applied_action_sum": self.applied_action_sum.detach().cpu(),
             "action_offset": self.action_offset.detach().cpu(),
             "current_over_limit_steps": self.current_over_limit_steps.detach().cpu(),
             "psi_reset_mean": self.psi_reset_mean.detach().cpu(),
@@ -856,6 +884,10 @@ class TokamakMagneticControlEnv:
         self.step_index = torch.as_tensor(state["step_index"], dtype=torch.long, device=self.device).clone()
         self.done = torch.as_tensor(state["done"], dtype=torch.bool, device=self.device).clone()
         self.previous_action = torch.as_tensor(state["previous_action"], dtype=torch.float32, device=self.device).clone()
+        if "reset_currents" not in state or "applied_action_sum" not in state:
+            raise ValueError("environment checkpoint is missing jdot drift state")
+        self.reset_currents = torch.as_tensor(state["reset_currents"], dtype=torch.float32, device=self.device).clone()
+        self.applied_action_sum = torch.as_tensor(state["applied_action_sum"], dtype=torch.float32, device=self.device).clone()
         self.action_offset = torch.as_tensor(state["action_offset"], dtype=torch.float32, device=self.device).clone()
         self.current_over_limit_steps = torch.as_tensor(state.get("current_over_limit_steps", torch.zeros((self.batch_size,), dtype=torch.long)), dtype=torch.long, device=self.device).clone()
         self.psi_reset_mean = torch.as_tensor(state.get("psi_reset_mean", torch.zeros((self.batch_size,), dtype=torch.float32)), dtype=torch.float32, device=self.device).clone()

@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "configs/experiments/t15_static_boundary.yaml"
 PRODUCTION_CONFIG = ROOT / "configs/experiments/t15_csv_initial_segmented_profile_boundary_mpo.yaml"
 SHORT_SINGLE_SEGMENT_CONFIG = ROOT / "configs/experiments/t15_csv_initial_single_segment_0p1s_static_boundary_mpo.yaml"
+REPLAY_WINDOW_0P2_CONFIG = ROOT / "configs/experiments/t15_new_replay_window_0p2s_tcvjdot_mpo.yaml"
 FIXED_HORIZON_HOLD_CONFIG = ROOT / "configs/experiments/t15_csv_hold_ip_fixed_horizon.yaml"
 FIXED_HORIZON_EASY_SEGMENTED_CONFIG = ROOT / "configs/experiments/t15_csv_easy_segmented_fixed_horizon.yaml"
 
@@ -368,6 +369,52 @@ def test_tcv_derivative_current_and_saturation_rewards_are_not_inverted() -> Non
     assert float(rb.components["current_loss"][1]) == pytest.approx(1.0)
     assert float(rb.components["tcv_saturation_component_loss"][0]) == pytest.approx(0.0)
     assert float(rb.components["tcv_saturation_component_loss"][1]) == pytest.approx(1.0)
+    assert float(rb.components["tcv_quality"][0]) > float(rb.components["tcv_quality"][1])
+
+
+def test_tcv_derivative_can_penalize_current_drift_and_mean_jdot_bias() -> None:
+    reward_fn = T15TCVDerivativeReward(
+        RewardConfig(
+            kind="tcv_derivative",
+            reward_scale=1.0,
+            smoothmax_alpha=-5.0,
+            shape_mean_weight=0.0,
+            shape_max_weight=0.0,
+            ip_weight=0.0,
+            current_weight=0.0,
+            derivative_weight=0.0,
+            actuator_saturation_weight=0.0,
+            boundary_missing_weight=0.0,
+            current_drift_weight=1.0,
+            current_drift_bad_fraction=0.10,
+            mean_jdot_bias_weight=1.0,
+            mean_jdot_bias_bad_fraction=0.08,
+        ),
+        control_rate_hz=1000.0,
+    )
+    ref = torch.zeros((2, 32, 2), dtype=torch.float32)
+    action = torch.zeros((2, 9), dtype=torch.float32)
+    rb = reward_fn(
+        ip=torch.full((2,), 200000.0),
+        ip_ref=torch.full((2,), 200000.0),
+        boundary_points=ref,
+        reference_points=ref,
+        action=action,
+        previous_action=action,
+        requested_action=action,
+        current_over_limit_a=torch.zeros((2,), dtype=torch.float32),
+        current_usage_fraction=torch.full((2,), 0.5, dtype=torch.float32),
+        current_margin_fraction=torch.full((2,), 0.5, dtype=torch.float32),
+        derivative_usage=torch.zeros((2,), dtype=torch.float32),
+        current_drift_fraction=torch.tensor([0.0, 0.2], dtype=torch.float32),
+        mean_jdot_bias_fraction=torch.tensor([0.0, 0.2], dtype=torch.float32),
+        boundary_found=torch.ones((2,), dtype=torch.bool),
+        terminated=torch.zeros((2,), dtype=torch.bool),
+    )
+    assert float(rb.components["current_drift_loss"][0]) == pytest.approx(0.0)
+    assert float(rb.components["current_drift_loss"][1]) == pytest.approx(1.0)
+    assert float(rb.components["mean_jdot_bias_loss"][0]) == pytest.approx(0.0)
+    assert float(rb.components["mean_jdot_bias_loss"][1]) == pytest.approx(1.0)
     assert float(rb.components["tcv_quality"][0]) > float(rb.components["tcv_quality"][1])
 
 
@@ -852,6 +899,45 @@ def test_jdot_command_action_does_not_accumulate_derivative_command() -> None:
     schema = env.export_schema()
     assert "previous_derivative_command" not in schema["feature_order"]
     assert env.normalization()["previous_action_semantics"] == "previous_applied_jdot_command"
+
+
+def test_jdot_command_tracks_current_drift_from_reset() -> None:
+    cfg = load_experiment_config(CONFIG)
+    cfg = replace(
+        cfg,
+        reward=replace(
+            cfg.reward,
+            kind="tcv_derivative",
+            smoothmax_alpha=-5.0,
+            reward_scale=1.0,
+            current_drift_weight=1.0,
+            current_drift_bad_fraction=0.01,
+            mean_jdot_bias_weight=1.0,
+            mean_jdot_bias_bad_fraction=0.01,
+            current_usage_weight=0.0,
+            derivative_usage_weight=0.0,
+            action_weight=0.0,
+            delta_action_weight=0.0,
+        ),
+        sim=replace(
+            cfg.sim,
+            compute_backend="cpu",
+            max_episode_steps=4,
+            action_contract="jdot_command",
+            delta_derivative_limits_aps=None,
+            terminate_on_current_limit=False,
+            terminate_on_boundary_loss=False,
+            current_saturation_fraction=1.0,
+        ),
+    )
+    env = TokamakMagneticControlEnv(cfg, batch_size=1, device="cpu", seed=4)
+    env.reset()
+    result = env.step(torch.full((1, env.action_dim), 0.25, dtype=torch.float32))
+    comps = result.info["reward_components"]
+    assert float(comps["current_drift_fraction"][0]) > 0.0
+    assert float(comps["mean_jdot_bias_fraction"][0]) == pytest.approx(0.25, rel=1.0e-5)
+    assert float(comps["current_drift_loss"][0]) > 0.0
+    assert float(comps["mean_jdot_bias_loss"][0]) > 0.0
 
 
 def test_jdot_command_clipping_penalizes_unrealized_command() -> None:
@@ -1361,6 +1447,21 @@ def test_short_single_segment_config_uses_100_step_static_boundary() -> None:
     assert int(cfg.observation.target_preview_stride) == 10
     assert int(cfg.observation.target_preview_steps) * int(cfg.observation.target_preview_stride) <= int(cfg.sim.max_episode_steps)
     assert cfg.training.production_mode is True
+
+
+def test_replay_window_0p2s_config_keeps_warm_start_observation_shape_and_antidrift() -> None:
+    old = load_experiment_config(ROOT / "configs/experiments/t15_new_replay_window_0p1s_tcvjdot_mpo.yaml")
+    cfg = load_experiment_config(REPLAY_WINDOW_0P2_CONFIG)
+    assert int(cfg.sim.max_episode_steps) == 200
+    assert cfg.reference.duration_s == pytest.approx(0.2)
+    assert cfg.reference.ip.kind == "replay_window"
+    assert cfg.reference.boundary.kind == "t15_replay_segment_conditioned"
+    assert cfg.sim.action_contract == "jdot_command"
+    assert int(cfg.observation.target_preview_steps) == int(old.observation.target_preview_steps)
+    assert int(cfg.observation.target_preview_stride) == int(old.observation.target_preview_stride)
+    assert cfg.reward.current_drift_weight == pytest.approx(1.5)
+    assert cfg.reward.mean_jdot_bias_weight == pytest.approx(1.0)
+    assert cfg.reward.terminal_remaining_cost == pytest.approx(2.0)
 
 
 def test_production_config_uses_absolute_jdot_contract() -> None:
@@ -2249,6 +2350,27 @@ def test_distributed_resume_fails_clearly_because_worker_envs_are_not_checkpoint
     trainer = Trainer(dist_cfg, device="cpu", output_dir=dist_dir, resume_checkpoint=checkpoint)
     with pytest.raises(ValueError, match="not exactly resumable"):
         trainer.train()
+
+
+def test_warm_start_checkpoint_allows_reward_and_horizon_change(tmp_path: Path) -> None:
+    first_dir = tmp_path / "first"
+    cfg = _small_config(first_dir)
+    cfg = replace(cfg, training=replace(cfg.training, steps=4, output_dir=first_dir, save_checkpoints=True, checkpoint_interval_steps=4, eval_interval_steps=1000))
+    Trainer(cfg, device="cpu", output_dir=first_dir).train()
+    checkpoint = first_dir / "checkpoints" / "final.pt"
+
+    warm_dir = tmp_path / "warm"
+    warm_cfg = replace(
+        cfg,
+        reward=replace(cfg.reward, shape_mean_weight=float(cfg.reward.shape_mean_weight) + 1.0),
+        sim=replace(cfg.sim, max_episode_steps=int(cfg.sim.max_episode_steps) + 4),
+        reference=replace(cfg.reference, duration_s=float(cfg.reference.duration_s) + 4.0 * float(cfg.reference.t_step)),
+        training=replace(cfg.training, steps=4, output_dir=warm_dir, save_checkpoints=False, eval_interval_steps=1000),
+    )
+    trainer = Trainer(warm_cfg, device="cpu", output_dir=warm_dir, warm_start_checkpoint=checkpoint)
+    result = trainer.train()
+    assert int(result["start_step"]) == 0
+    assert result["warm_start_checkpoint"] == str(checkpoint)
 
 
 def test_evaluate_detailed_reports_physical_metrics(tmp_path: Path) -> None:

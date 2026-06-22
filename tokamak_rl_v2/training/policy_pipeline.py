@@ -88,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=output_dir,
             wandb_run=None,
             resume_checkpoint=args.resume_checkpoint,
+            warm_start_checkpoint=args.warm_start_checkpoint,
             export_policy=not bool(args.no_export),
             wandb_metric_preset=args.wandb_metric_preset,
         )
@@ -827,6 +828,7 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--num-envs", type=int, default=None)
     ap.add_argument("--device", default=None)
     ap.add_argument("--resume-checkpoint", default=None)
+    ap.add_argument("--warm-start-checkpoint", default=None)
     ap.add_argument("--sim-compute-backend", choices=("cpu", "gpu"), default=None)
     ap.add_argument("--sim-gpu-device", default=None)
     ap.add_argument("--batch-size", type=int, default=None)
