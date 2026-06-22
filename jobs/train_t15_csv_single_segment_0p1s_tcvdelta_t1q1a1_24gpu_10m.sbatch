@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=tokamak-rl-v2-tcvd-0p1s-t1q1a1
 #SBATCH --partition=batch
-#SBATCH --nodes=2
+#SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:6
 #SBATCH --cpus-per-task=16
 #SBATCH --requeue
-#SBATCH --output=slurm_logs/tokamak-rl-v2-tcvd-0p1s-t1q1a1-12gpu-10m-%j.out
-#SBATCH --error=slurm_logs/tokamak-rl-v2-tcvd-0p1s-t1q1a1-12gpu-10m-%j.err
+#SBATCH --output=slurm_logs/tokamak-rl-v2-tcvd-0p1s-t1q1a1-24gpu-10m-%j.out
+#SBATCH --error=slurm_logs/tokamak-rl-v2-tcvd-0p1s-t1q1a1-24gpu-10m-%j.err
 
 set -euo pipefail
 
@@ -16,7 +16,7 @@ mkdir -p slurm_logs outputs
 
 export RUN_PRESET=${RUN_PRESET:-full}
 export POLICY_CONFIG=${POLICY_CONFIG:-configs/experiments/t15_csv_initial_single_segment_0p1s_static_boundary_mpo.yaml}
-export NUM_ENVS=${NUM_ENVS:-3072}
+export NUM_ENVS=${NUM_ENVS:-6144}
 export REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-288}
 export BATCH_SIZE=${BATCH_SIZE:-256}
 export ROLLOUT_CHUNK_LENGTH=${ROLLOUT_CHUNK_LENGTH:-64}
@@ -49,13 +49,13 @@ case "${RUN_PRESET}" in
 esac
 
 export GPUS_PER_NODE=${GPUS_PER_NODE:-6}
-export NNODES=${SLURM_JOB_NUM_NODES:-2}
+export NNODES=${SLURM_JOB_NUM_NODES:-4}
 export WORLD_SIZE=$(( NNODES * GPUS_PER_NODE ))
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=${MASTER_PORT:-29585}
-export TRAIN_OUTPUT=${TRAIN_OUTPUT:-outputs/t15_csv_single_segment_0p1s_tcvdelta_t1q1a1_12gpu_10m_${SLURM_JOB_ID:-manual}}
-export RUN_NAME=${RUN_NAME:-t15_csv_single_segment_0p1s_tcvdelta_t1q1a1_12gpu_10m_${SLURM_JOB_ID:-manual}}
-export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-tokamak-rl-v2-tcvdelta-0p1s-t1q1a1-12gpu-10m-${SLURM_JOB_ID:-manual}}
+export TRAIN_OUTPUT=${TRAIN_OUTPUT:-outputs/t15_csv_single_segment_0p1s_tcvdelta_t1q1a1_24gpu_10m_${SLURM_JOB_ID:-manual}}
+export RUN_NAME=${RUN_NAME:-t15_csv_single_segment_0p1s_tcvdelta_t1q1a1_24gpu_10m_${SLURM_JOB_ID:-manual}}
+export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-tokamak-rl-v2-tcvdelta-0p1s-t1q1a1-24gpu-10m-${SLURM_JOB_ID:-manual}}
 export WANDB_MODE=${WANDB_MODE:-online}
 export WANDB__SERVICE_WAIT=${WANDB__SERVICE_WAIT:-60}
 
@@ -72,7 +72,7 @@ if [[ ! -f data/processed/t15_reference_limits.json ]]; then
   exit 2
 fi
 
-export GENERATED_CONFIG="${TRAIN_OUTPUT}/generated_configs/t15_csv_single_segment_0p1s_tcvdelta_t1q1a1_12gpu_10m.json"
+export GENERATED_CONFIG="${TRAIN_OUTPUT}/generated_configs/t15_csv_single_segment_0p1s_tcvdelta_t1q1a1_24gpu_10m.json"
 mkdir -p "$(dirname "${GENERATED_CONFIG}")"
 
 python3 - "${POLICY_CONFIG}" "${GENERATED_CONFIG}" "${TRAIN_OUTPUT}" <<'PYCFG'
@@ -86,7 +86,7 @@ generated_path = pathlib.Path(sys.argv[2])
 train_output = sys.argv[3]
 
 cfg = json.loads(base_path.read_text(encoding="utf-8"))
-cfg["name"] = "t15_csv_single_segment_0p1s_tcvdelta_t1q1a1_12gpu_10m"
+cfg["name"] = "t15_csv_single_segment_0p1s_tcvdelta_t1q1a1_24gpu_10m"
 cfg["sim"]["config_path"] = "/workspace/tokamak-sim/configs/T15MD_new_data.toml"
 cfg["sim"]["csv_initial_state_library"] = "/workspace/tokamak-rl-v2/data/processed/t15_csv_initial_states.npz"
 cfg["reference"]["ip"]["limits_path"] = "/workspace/tokamak-rl-v2/data/processed/t15_reference_limits.json"
@@ -342,4 +342,4 @@ PYSTATUS
   exit "${run_rc}"
 fi
 
-echo "12-GPU 0.1s t1_q1_a1 TCV-delta training job completed at $(date -Is)"
+echo "24-GPU 0.1s t1_q1_a1 TCV-delta training job completed at $(date -Is)"
