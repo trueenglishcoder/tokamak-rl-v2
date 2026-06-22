@@ -999,6 +999,25 @@ def _validate_initial_state_summary(path: Path) -> None:
     accepted_by_shot = raw.get("accepted_by_shot", {})
     if not isinstance(split_by_shot, dict) or not isinstance(accepted_by_shot, dict) or not split_by_shot:
         raise ValueError("initial-state summary must contain accepted_by_shot and split_by_shot")
+    split_policy = str(raw.get("split_policy", ""))
+    if split_policy in {"explicit_whole_shot", "whole_shot"}:
+        train_shots = []
+        holdout_shots = []
+        for shot, accepted in accepted_by_shot.items():
+            counts = split_by_shot.get(str(shot), {})
+            train = int(counts.get("train", 0))
+            holdout = int(counts.get("holdout", 0))
+            if int(accepted) < 100:
+                raise ValueError(f"shot {shot} has too few accepted rows: {accepted}")
+            if train > 0 and holdout > 0:
+                raise ValueError(f"whole-shot split requires shot {shot} to be in exactly one split, got train={train} holdout={holdout}")
+            if train > 0:
+                train_shots.append(str(shot))
+            if holdout > 0:
+                holdout_shots.append(str(shot))
+        if not train_shots or not holdout_shots:
+            raise ValueError("whole-shot split requires at least one train shot and one holdout shot")
+        return
     for shot, accepted in accepted_by_shot.items():
         counts = split_by_shot.get(str(shot), {})
         if int(accepted) < 100 or int(counts.get("train", 0)) < 80 or int(counts.get("holdout", 0)) < 10:
