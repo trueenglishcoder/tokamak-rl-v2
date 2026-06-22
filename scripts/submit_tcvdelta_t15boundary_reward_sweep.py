@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
+
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -28,6 +30,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"missing sweep job: {job}")
     if not aggregate_job.exists():
         raise SystemExit(f"missing aggregate job: {aggregate_job}")
+    _preflight_inputs()
     (ROOT / "slurm_logs").mkdir(exist_ok=True)
     if args.dry_run:
         fake_jobid = "DRYRUN"
@@ -69,6 +72,49 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _preflight_inputs() -> None:
+    reset_library = ROOT / "data/processed/t15_csv_initial_states.npz"
+    replay_dir = ROOT.parent / "tokamak-sim/runs/t15md_limited_replay_dataset"
+    required_files = [
+        reset_library,
+        ROOT / "data/processed/t15_reference_limits.json",
+    ]
+    missing = [str(path.relative_to(ROOT.parent)) for path in required_files if not path.exists()]
+    if not replay_dir.is_dir():
+        missing.append(str(replay_dir.relative_to(ROOT.parent)))
+    if missing:
+        raise SystemExit(
+            "missing required sweep inputs:\n  "
+            + "\n  ".join(missing)
+            + "\nGenerate/copy the T15 limited replay boundary dataset before submitting."
+        )
+    _preflight_replay_boundary_coverage(reset_library, replay_dir)
+
+
+def _preflight_replay_boundary_coverage(reset_library: Path, replay_dir: Path) -> None:
+    smoothed = sorted(replay_dir.glob("lqr_boundary_reference_*_smoothed.npz"))
+    if not smoothed:
+        raise SystemExit(
+            f"missing smoothed replay boundary references in {replay_dir.relative_to(ROOT.parent)}\n"
+            "Run tokamak-sim/scripts/smooth_lqr_boundary_references.py after generating the replay dataset."
+        )
+    available = {
+        path.name.removeprefix("lqr_boundary_reference_").removesuffix("_smoothed.npz")
+        for path in smoothed
+    }
+    with np.load(reset_library, allow_pickle=False) as data:
+        if "shot_id" not in data.files:
+            raise SystemExit(f"{reset_library.relative_to(ROOT.parent)} is missing shot_id")
+        wanted = {str(int(v)) for v in np.asarray(data["shot_id"]).reshape(-1).tolist()}
+    missing = sorted(wanted - available)
+    if missing:
+        raise SystemExit(
+            "smoothed replay boundary references do not cover reset shots:\n  "
+            + "\n  ".join(missing)
+            + f"\nDirectory: {replay_dir.relative_to(ROOT.parent)}"
+        )
+
+
 def _check_output(cmd: list[str]) -> str:
     proc = subprocess.run(cmd, cwd=ROOT, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return proc.stdout.strip().splitlines()[-1].strip()
@@ -76,4 +122,3 @@ def _check_output(cmd: list[str]) -> str:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

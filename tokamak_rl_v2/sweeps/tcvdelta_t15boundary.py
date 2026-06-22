@@ -227,7 +227,13 @@ def summarize_root(root: Path, *, out_dir: Path | None = None) -> dict[str, obje
 
     rows_sorted = sorted(rows, key=lambda row: float(row["physical_priority_score"]), reverse=True)
     _write_summary_csv(out_dir / "reward_search_summary.csv", rows_sorted)
-    best = next((row for row in rows_sorted if int(row.get("has_actor_eval", 0)) == 1), rows_sorted[0] if rows_sorted else {})
+    best = next((row for row in rows_sorted if int(row.get("has_actor_eval", 0)) == 1), {})
+    if not best and rows_sorted:
+        best = {
+            "status": "no_actor_eval",
+            "message": "No candidate produced actor evaluation data; inspect candidate logs before ranking.",
+            "total_candidates": len(rows_sorted),
+        }
     (out_dir / "best_available_candidate.json").write_text(json.dumps(best, indent=2), encoding="utf-8")
     _write_report(out_dir / "reward_search_report.md", rows_sorted)
     return {"root": str(root), "out_dir": str(out_dir), "best": best, "rows": len(rows)}
@@ -345,7 +351,8 @@ def _write_report(path: Path, rows: list[Mapping[str, object]]) -> None:
     completed = sum(1 for row in rows if int(row.get("has_actor_eval", 0)) == 1)
     lines.append(f"- total candidates: {len(rows)}")
     lines.append(f"- candidates with actor eval: {completed}")
-    if rows:
+    eval_rows = [row for row in rows if int(row.get("has_actor_eval", 0)) == 1]
+    if eval_rows:
         best = rows[0]
         lines.extend(
             [
@@ -359,6 +366,15 @@ def _write_report(path: Path, rows: list[Mapping[str, object]]) -> None:
                 f"- boundary late min: `{best.get('eval_boundary_found_late_min', best.get('eval_padded_boundary_found_late_min', ''))}`",
                 f"- Ip late error A: `{best.get('eval_ip_error_a_late', best.get('eval_padded_ip_error_a_late', ''))}`",
                 f"- current >5kA late fraction: `{best.get('eval_current_over_limit_5ka_fraction_late', best.get('eval_padded_current_over_limit_5ka_fraction_late', ''))}`",
+            ]
+        )
+    elif rows:
+        lines.extend(
+            [
+                "",
+                "## Best Available",
+                "",
+                "No candidate produced actor evaluation data. This sweep is not rankable; inspect Slurm logs and candidate validation files.",
             ]
         )
     lines.extend(["", "## Top 10", ""])
@@ -428,4 +444,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

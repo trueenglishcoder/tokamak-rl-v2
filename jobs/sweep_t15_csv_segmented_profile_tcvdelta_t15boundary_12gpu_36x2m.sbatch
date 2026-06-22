@@ -45,6 +45,34 @@ if [[ ! -d ../tokamak-sim/runs/t15md_limited_replay_dataset ]]; then
   echo "missing ../tokamak-sim/runs/t15md_limited_replay_dataset" >&2
   exit 2
 fi
+python3 - <<'PYPREFLIGHT'
+from pathlib import Path
+import numpy as np
+
+reset_library = Path("data/processed/t15_csv_initial_states.npz")
+replay_dir = Path("../tokamak-sim/runs/t15md_limited_replay_dataset")
+smoothed = sorted(replay_dir.glob("lqr_boundary_reference_*_smoothed.npz"))
+if not smoothed:
+    raise SystemExit(
+        "missing smoothed replay boundary references in "
+        f"{replay_dir}; run tokamak-sim/scripts/smooth_lqr_boundary_references.py"
+    )
+available = {
+    path.name.removeprefix("lqr_boundary_reference_").removesuffix("_smoothed.npz")
+    for path in smoothed
+}
+with np.load(reset_library, allow_pickle=False) as data:
+    if "shot_id" not in data.files:
+        raise SystemExit(f"{reset_library} is missing shot_id")
+    wanted = {str(int(v)) for v in np.asarray(data["shot_id"]).reshape(-1).tolist()}
+missing = sorted(wanted - available)
+if missing:
+    raise SystemExit(
+        "smoothed replay boundary references do not cover reset shots: "
+        + ", ".join(missing)
+    )
+print(f"smoothed_replay_boundary_references={len(smoothed)}")
+PYPREFLIGHT
 
 echo "root=${ROOT}"
 echo "manifest=${MANIFEST}"
