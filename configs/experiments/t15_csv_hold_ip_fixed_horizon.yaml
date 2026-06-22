@@ -28,23 +28,7 @@
     "current_limit_scale": 1.0,
     "derivative_limit_scale": 1.0,
     "action_scale": 1.0,
-    "action_contract": "delta_jdot",
-    "delta_derivative_scale_aps": 500000.0,
-    "delta_derivative_limits_aps": {
-      "pfc": {
-        "pfc0": 163347.0,
-        "pfc1": 310755.0,
-        "pfc2": 87838.08,
-        "pfc3": 153214.2,
-        "pfc4": 404364.0,
-        "pfc5": 1191036.96
-      },
-      "sol": {
-        "sol0": 1437338.8,
-        "sol1": 5889842.0,
-        "sol2": 1946208.8
-      }
-    },
+    "action_contract": "jdot_command",
     "terminate_on_boundary_loss": false,
     "terminate_on_current_limit": false,
     "current_termination_over_limit_a": 50000.0,
@@ -72,7 +56,7 @@
     }
   },
   "observation": {
-    "actor_kind": "controller_state_v3",
+    "actor_kind": "controller_state_v4",
     "critic_kind": "privileged_training_state_v1",
     "target_preview_steps": 8,
     "target_preview_stride": 10

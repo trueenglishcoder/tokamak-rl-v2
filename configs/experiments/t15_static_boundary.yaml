@@ -7,22 +7,7 @@
     "gpu_device": "cuda:0",
     "angles": 32,
     "max_episode_steps": 1000,
-    "action_contract": "delta_jdot",
-    "delta_derivative_limits_aps": {
-      "pfc": [
-        163347.0,
-        310755.0,
-        87838.08,
-        153214.2,
-        404364.0,
-        1191036.96
-      ],
-      "sol": [
-        1437338.8,
-        5889842.0,
-        1946208.8
-      ]
-    },
+    "action_contract": "jdot_command",
     "initial_ranges": {
       "ip": {
         "min": 124750.45168962443,

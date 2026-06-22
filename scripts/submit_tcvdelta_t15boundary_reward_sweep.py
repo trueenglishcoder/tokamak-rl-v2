@@ -19,7 +19,7 @@ REQUIRED_T15_BOUNDARY_SHOTS = ("3854", "3855", "3856", "3857", "3858", "3859", "
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Submit the 36x2M TCV-delta T15-boundary reward sweep")
+    parser = argparse.ArgumentParser(description="Submit the 36x2M TCV-Jdot T15-boundary reward sweep")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--job", default="jobs/sweep_t15_csv_segmented_profile_tcvdelta_t15boundary_12gpu_36x2m.sbatch")
     parser.add_argument("--aggregate-job", default="jobs/aggregate_tcvdelta_t15boundary_reward_sweep.sbatch")
@@ -35,14 +35,14 @@ def main(argv: list[str] | None = None) -> int:
     (ROOT / "slurm_logs").mkdir(exist_ok=True)
     if args.dry_run:
         fake_jobid = "DRYRUN"
-        root = ROOT / f"outputs/t15_reward_sweep36_tcvdelta_t15boundary_2m_{fake_jobid}"
+        root = ROOT / f"outputs/t15_reward_sweep36_tcvjdot_t15boundary_2m_{fake_jobid}"
         manifest = root / "variants.json"
         write_manifest(manifest)
         print(json.dumps({"dry_run": True, "root": str(root.relative_to(ROOT)), "manifest": str(manifest.relative_to(ROOT))}, indent=2))
         return 0
 
     sweep_jobid = _check_output(["sbatch", "--hold", "--parsable", str(job.relative_to(ROOT))])
-    root = ROOT / f"outputs/t15_reward_sweep36_tcvdelta_t15boundary_2m_{sweep_jobid}"
+    root = ROOT / f"outputs/t15_reward_sweep36_tcvjdot_t15boundary_2m_{sweep_jobid}"
     manifest = root / "variants.json"
     write_manifest(manifest)
     aggregate_jobid = _check_output(

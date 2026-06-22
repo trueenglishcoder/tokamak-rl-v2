@@ -72,8 +72,7 @@ class T15PhysicalReward:
         delta_action_rms = torch.sqrt(torch.mean(delta_action.pow(2), dim=-1))
         max_abs_action = torch.max(torch.abs(action), dim=-1).values
         max_abs_delta_action = torch.max(torch.abs(delta_action), dim=-1).values
-        saturation_reference = action if applied_delta_action is None else delta_action
-        saturation_delta = requested - saturation_reference
+        saturation_delta = requested - action
         requested_action_rms = torch.sqrt(torch.mean(requested.pow(2), dim=-1))
         action_saturation_delta_rms = torch.sqrt(torch.mean(saturation_delta.pow(2), dim=-1))
         action_saturation_delta_max = torch.max(torch.abs(saturation_delta), dim=-1).values
@@ -240,8 +239,7 @@ class T15TCVQualityReward:
         delta_action_rms = torch.sqrt(torch.mean(delta_action.pow(2), dim=-1))
         max_abs_action = torch.max(torch.abs(action), dim=-1).values
         max_abs_delta_action = torch.max(torch.abs(delta_action), dim=-1).values
-        saturation_reference = action if applied_delta_action is None else delta_action
-        saturation_delta = requested - saturation_reference
+        saturation_delta = requested - action
         requested_action_rms = torch.sqrt(torch.mean(requested.pow(2), dim=-1))
         action_saturation_delta_rms = torch.sqrt(torch.mean(saturation_delta.pow(2), dim=-1))
         action_saturation_delta_max = torch.max(torch.abs(saturation_delta), dim=-1).values
@@ -416,8 +414,7 @@ class T15TCVDerivativeReward:
         delta_action_rms = torch.sqrt(torch.mean(delta_action.pow(2), dim=-1))
         max_abs_action = torch.max(torch.abs(action), dim=-1).values
         max_abs_delta_action = torch.max(torch.abs(delta_action), dim=-1).values
-        saturation_reference = action if applied_delta_action is None else delta_action
-        saturation_delta = requested - saturation_reference
+        saturation_delta = requested - action
         requested_action_rms = torch.sqrt(torch.mean(requested.pow(2), dim=-1))
         action_saturation_delta_rms = torch.sqrt(torch.mean(saturation_delta.pow(2), dim=-1))
         action_saturation_delta_max = torch.max(torch.abs(saturation_delta), dim=-1).values
@@ -428,7 +425,11 @@ class T15TCVDerivativeReward:
         shape_max_reward = _tcv_softplus(shape_error_max, bad=max(float(c.shape_max_scale_m), 1.0e-12), good=0.0)
         ip_reward = _tcv_softplus(ip_error, bad=max(float(c.ip_scale_a), 1.0e-12), good=0.0)
         current_reward = _tcv_clipped_linear(current_usage_fraction, bad=float(c.current_bad_fraction), good=float(c.current_soft_fraction))
-        derivative_reward = _tcv_softplus(max_abs_delta_action, bad=float(c.derivative_bad_fraction), good=0.0)
+        derivative_reward = _tcv_clipped_linear(
+            derivative_usage,
+            bad=float(c.derivative_bad_fraction),
+            good=float(c.derivative_soft_fraction),
+        )
         actuator_saturation_loss = torch.mean(saturation_delta.pow(2), dim=-1)
         saturation_reward = _tcv_clipped_linear(
             torch.sqrt(torch.clamp(actuator_saturation_loss, min=0.0)),
@@ -469,15 +470,24 @@ class T15TCVDerivativeReward:
         quality = _tcv_smoothmax(component_rewards, dim=-1, alpha=float(c.smoothmax_alpha), weights=weights)
         normal_reward = float(c.reward_scale) * quality
 
-        terminal_mask = terminated.to(dtype=torch.bool, device=quality.device).reshape_as(quality)
-        terminal_reward_raw = torch.full_like(normal_reward, float(c.terminal_reward))
-        terminal_reward_scaled = torch.full_like(normal_reward, float(c.terminal_reward) * float(c.reward_scale))
-        reward = torch.where(terminal_mask, terminal_reward_scaled, normal_reward)
         if episode_progress is None:
             progress = torch.zeros_like(quality)
         else:
             progress = torch.clamp(episode_progress.to(dtype=quality.dtype, device=quality.device).reshape_as(quality), 0.0, 1.0)
-        terminal_total_penalty = torch.where(terminal_mask, terminal_reward_scaled, torch.zeros_like(terminal_reward_scaled))
+        terminal_mask = terminated.to(dtype=torch.bool, device=quality.device).reshape_as(quality)
+        terminal_reward_raw = torch.full_like(normal_reward, float(c.terminal_reward))
+        terminal_remaining_loss = torch.where(
+            terminal_mask,
+            torch.clamp(1.0 - progress, min=0.0) * float(c.terminal_remaining_cost),
+            torch.zeros_like(quality),
+        )
+        terminal_reward_scaled = terminal_reward_raw * float(c.reward_scale)
+        terminal_total_penalty = torch.where(
+            terminal_mask,
+            float(c.reward_scale) * (terminal_reward_raw - terminal_remaining_loss),
+            torch.zeros_like(normal_reward),
+        )
+        reward = torch.where(terminal_mask, terminal_total_penalty, normal_reward)
 
         shape_mean_loss = 1.0 - shape_reward
         shape_max_loss = 1.0 - shape_max_reward
@@ -532,7 +542,7 @@ class T15TCVDerivativeReward:
                 "delta_action_loss": torch.zeros_like(quality),
                 "actuator_saturation_loss": actuator_saturation_loss,
                 "tcv_saturation_component_loss": saturation_component_loss,
-                "terminal_remaining_loss": torch.zeros_like(quality),
+                "terminal_remaining_loss": terminal_remaining_loss,
                 "terminal_reward_raw": terminal_reward_raw,
                 "terminal_reward_scaled": terminal_reward_scaled,
                 "terminal_total_penalty": terminal_total_penalty,

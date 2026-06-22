@@ -82,18 +82,7 @@ class TokamakMagneticControlEnv:
         self.current_limits = torch.as_tensor(_current_limit_vector(config, self.cfg), dtype=torch.float32, device=self.device)
         self.raw_derivative_limits = torch.as_tensor(np.concatenate([_limit_vec(self.cfg.physics.pfc_deriv_limit, self.cfg.pfc.n_coils), _limit_vec(self.cfg.physics.sol_deriv_limit, self.cfg.sol.n_coils)]), dtype=torch.float32, device=self.device)
         self.derivative_limits = self.raw_derivative_limits * float(config.sim.action_scale)
-        self.delta_derivative_scale = torch.as_tensor(
-            _delta_derivative_limit_vector(config, self.cfg),
-            dtype=torch.float32,
-            device=self.device,
-        )
-        self.delta_action_to_command_norm = self.delta_derivative_scale / torch.where(
-            torch.isfinite(self.derivative_limits) & (self.derivative_limits > 0.0),
-            self.derivative_limits,
-            torch.ones_like(self.derivative_limits),
-        )
         self.previous_action = torch.zeros((self.batch_size, self.action_dim), dtype=torch.float32, device=self.device)
-        self.previous_derivative_command = torch.zeros((self.batch_size, self.action_dim), dtype=torch.float32, device=self.device)
         self.action_offset = torch.zeros((self.batch_size, self.action_dim), dtype=torch.float32, device=self.device)
         self.current_over_limit_steps = torch.zeros((self.batch_size,), dtype=torch.long, device=self.device)
         self.psi_reset_mean = torch.zeros((self.batch_size,), dtype=torch.float32, device=self.device)
@@ -115,15 +104,16 @@ class TokamakMagneticControlEnv:
             else None
         )
         self._boundary_replay_library = None
-        if config.reference.boundary.kind == "t15_replay_segment_conditioned":
+        needs_replay_library = config.reference.boundary.kind == "t15_replay_segment_conditioned" or config.reference.ip.kind == "replay_window"
+        if needs_replay_library:
             if config.reference.boundary.replay_reference_dir is None:
-                raise ValueError("t15_replay_segment_conditioned requires replay_reference_dir")
+                raise ValueError("replay-window references require replay_reference_dir")
             self._boundary_replay_library = T15ReplayBoundaryLibrary(
                 config.reference.boundary.replay_reference_dir,
                 theta_count=int(config.reference.theta_count),
             )
             if self._csv_initial_states is None:
-                raise ValueError("t15_replay_segment_conditioned requires CSV initial states")
+                raise ValueError("replay-window references require CSV initial states")
             self._boundary_replay_library.assert_shots_available(self._csv_initial_states.shot_id)
         self.reset_metadata: list[dict[str, object]] = []
 
@@ -143,7 +133,6 @@ class TokamakMagneticControlEnv:
         ip0, pfc0, sol0, params0 = payload.ip0, payload.pfc0, payload.sol0, payload.params0
         self._record_reset_metadata(payload)
         self.previous_action.zero_()
-        self.previous_derivative_command.zero_()
         self.action_offset = self._sample_action_offset(self.batch_size)
         self.current_over_limit_steps.zero_()
         self.step_index.zero_()
@@ -191,7 +180,6 @@ class TokamakMagneticControlEnv:
         ip0, pfc0, sol0 = payload.ip0, payload.pfc0, payload.sol0
         assert self.reference is not None
         self.previous_action[indices_t] = 0.0
-        self.previous_derivative_command[indices_t] = 0.0
         self.action_offset[indices_t] = self._sample_action_offset(count)
         self.current_over_limit_steps[indices_t] = 0
         self.step_index[indices_t] = 0
@@ -243,11 +231,12 @@ class TokamakMagneticControlEnv:
         if self.config.reference.boundary.kind in {"hold_reset_boundary", "t15_replay_segment_conditioned"}:
             kwargs["initial_boundary_points"] = boundary_points
             kwargs["initial_boundary_radii"] = boundary_radii
-        if self.config.reference.boundary.kind == "t15_replay_segment_conditioned":
+        if self.config.reference.boundary.kind == "t15_replay_segment_conditioned" or self.config.reference.ip.kind == "replay_window":
             kwargs["shot_ids"] = np.asarray(payload.shot_ids)
             kwargs["source_indices"] = np.asarray(payload.source_indices)
             kwargs["source_times_s"] = np.asarray(payload.source_times_s, dtype=float)
             kwargs["boundary_replay_library"] = self._boundary_replay_library
+        if self.config.reference.boundary.kind == "t15_replay_segment_conditioned":
             kwargs["boundary_center"] = (float(self.cfg.physics.R0), float(self.cfg.physics.Z0))
         return generate_reference_batch(
             config=self.config.reference,
@@ -334,24 +323,11 @@ class TokamakMagneticControlEnv:
 
     def step(self, action: Tensor) -> BatchStep:
         action = torch.as_tensor(action, dtype=torch.float32, device=self.device).reshape(self.batch_size, self.action_dim)
-        commanded = torch.clamp(action, -1.0, 1.0)
+        commanded = action
         previous_action = self.previous_action.detach().clone()
-        previous_derivative_command = self.previous_derivative_command.detach().clone()
-        if self._uses_delta_jdot_contract():
-            requested_action = torch.clamp(commanded + self.action_offset, -1.0, 1.0)
-            requested_command = previous_derivative_command + requested_action * self.delta_action_to_command_norm[None, :]
-            requested_command = torch.clamp(requested_command, -1.0, 1.0)
-            applied_action = self._apply_action_contract(requested_command)
-            applied_delta_action = torch.clamp(
-                (applied_action - previous_derivative_command)
-                / torch.clamp(self.delta_action_to_command_norm[None, :], min=1.0e-12),
-                -1.0,
-                1.0,
-            )
-        else:
-            requested_action = torch.clamp(commanded + self.action_offset, -1.0, 1.0)
-            applied_action = self._apply_action_contract(requested_action)
-            applied_delta_action = applied_action - previous_derivative_command
+        requested_action = commanded + self.action_offset
+        applied_action = self._apply_action_contract(requested_action)
+        applied_delta_action = applied_action - previous_action
         physical = applied_action * self.derivative_limits[None, :]
         if self.config.sim.compute_backend == "gpu":
             assert self._gpu_sim is not None
@@ -359,17 +335,15 @@ class TokamakMagneticControlEnv:
             current_next = current_now + float(self.cfg.physics.t_step) * physical.to(dtype=torch.float64, device=self._gpu_sim.device)
             result = self._gpu_sim.step_currents(current_next)
             self.step_index += 1
-            self.previous_action = requested_action.detach().clone()
-            self.previous_derivative_command = applied_action.detach().clone()
+            self.previous_action = applied_action.detach().clone()
             obs = self._obs_gpu(result=result)
-            reward, terminated, info = self._reward_gpu(result, applied_action, previous_derivative_command, requested_action, applied_delta_action)
+            reward, terminated, info = self._reward_gpu(result, applied_action, previous_action, requested_action, applied_delta_action)
         else:
             self._step_cpu(physical)
             self.step_index += 1
-            self.previous_action = requested_action.detach().clone()
-            self.previous_derivative_command = applied_action.detach().clone()
+            self.previous_action = applied_action.detach().clone()
             obs = self._obs_cpu()
-            reward, terminated, info = self._reward_cpu(applied_action, previous_derivative_command, requested_action, applied_delta_action)
+            reward, terminated, info = self._reward_cpu(applied_action, previous_action, requested_action, applied_delta_action)
         truncated = self.step_index >= int(self.config.sim.max_episode_steps)
         self.done = terminated | truncated
         return BatchStep(
@@ -385,9 +359,6 @@ class TokamakMagneticControlEnv:
 
     def _apply_action_contract(self, requested_action: Tensor) -> Tensor:
         return torch.clamp(requested_action, -1.0, 1.0)
-
-    def _uses_delta_jdot_contract(self) -> bool:
-        return self.config.sim.action_contract == "delta_jdot"
 
     def _current_termination(
         self,
@@ -445,7 +416,6 @@ class TokamakMagneticControlEnv:
             ("boundary_radii_error", n_angles),
             ("boundary_found", 1),
             ("previous_action", self.action_dim),
-            ("previous_derivative_command", self.action_dim),
             ("target_preview", preview * (2 + n_angles)),
         )
         out: dict[str, tuple[int, int]] = {}
@@ -532,7 +502,6 @@ class TokamakMagneticControlEnv:
             target_radii - measured_radii,
             boundary_found,
             self.previous_action,
-            self.previous_derivative_command,
             self._preview(),
         ], dim=1)
         actor_obs = torch.nan_to_num(actor_obs, nan=0.0, posinf=0.0, neginf=0.0)
@@ -603,7 +572,6 @@ class TokamakMagneticControlEnv:
                 target_radii - np.nan_to_num(measured_radii, nan=0.0, posinf=0.0, neginf=0.0),
                 np.array([boundary_found], dtype=float),
                 self.previous_action[b].detach().cpu().numpy().astype(float, copy=False),
-                self.previous_derivative_command[b].detach().cpu().numpy().astype(float, copy=False),
                 preview[b],
             ]
             actor = np.concatenate(parts)
@@ -809,8 +777,6 @@ class TokamakMagneticControlEnv:
             "target_preview_steps": int(self.config.observation.target_preview_steps),
             "target_preview_stride": int(self.config.observation.target_preview_stride),
             "action_scale": float(self.config.sim.action_scale),
-            "delta_derivative_scale_aps": float(self.config.sim.delta_derivative_scale_aps),
-            "delta_derivative_limits_aps": self.delta_derivative_scale.detach().cpu().numpy().astype(float).tolist(),
             "action_contract": self._action_contract_name(),
         }
 
@@ -824,17 +790,14 @@ class TokamakMagneticControlEnv:
             "t_step": float(self.cfg.physics.t_step),
             "actuator_tau": float(self.cfg.physics.actuator_tau),
             "action_contract": self._action_contract_name(),
-            "delta_derivative_scale_aps": float(self.config.sim.delta_derivative_scale_aps),
-            "delta_derivative_limits_aps": self.delta_derivative_scale.detach().cpu().numpy().astype(float).tolist(),
-            "previous_action_semantics": "previous_requested_delta_action",
-            "previous_derivative_command_semantics": "applied_accumulated_derivative_command",
+            "previous_action_semantics": "previous_applied_jdot_command",
         }
         if self.config.reward.kind != "tcv_derivative":
             out["current_saturation_fraction"] = float(self.config.sim.current_saturation_fraction)
         return out
 
     def _action_contract_name(self) -> str:
-        return "delta_jdot_derivative_command_v3"
+        return "absolute_jdot_command_v1"
 
 
     def state_dict(self) -> dict[str, object]:
@@ -854,7 +817,6 @@ class TokamakMagneticControlEnv:
             "step_index": self.step_index.detach().cpu(),
             "done": self.done.detach().cpu(),
             "previous_action": self.previous_action.detach().cpu(),
-            "previous_derivative_command": self.previous_derivative_command.detach().cpu(),
             "action_offset": self.action_offset.detach().cpu(),
             "current_over_limit_steps": self.current_over_limit_steps.detach().cpu(),
             "psi_reset_mean": self.psi_reset_mean.detach().cpu(),
@@ -894,9 +856,6 @@ class TokamakMagneticControlEnv:
         self.step_index = torch.as_tensor(state["step_index"], dtype=torch.long, device=self.device).clone()
         self.done = torch.as_tensor(state["done"], dtype=torch.bool, device=self.device).clone()
         self.previous_action = torch.as_tensor(state["previous_action"], dtype=torch.float32, device=self.device).clone()
-        if "previous_derivative_command" not in state:
-            raise ValueError("checkpoint is missing previous_derivative_command for delta-Jdot contract v3")
-        self.previous_derivative_command = torch.as_tensor(state["previous_derivative_command"], dtype=torch.float32, device=self.device).clone()
         self.action_offset = torch.as_tensor(state["action_offset"], dtype=torch.float32, device=self.device).clone()
         self.current_over_limit_steps = torch.as_tensor(state.get("current_over_limit_steps", torch.zeros((self.batch_size,), dtype=torch.long)), dtype=torch.long, device=self.device).clone()
         self.psi_reset_mean = torch.as_tensor(state.get("psi_reset_mean", torch.zeros((self.batch_size,), dtype=torch.float32)), dtype=torch.float32, device=self.device).clone()
@@ -956,18 +915,6 @@ def _current_limit_vector(config: ExperimentConfig, loaded_cfg) -> np.ndarray:
     if not np.all(np.isfinite(out)):
         raise ValueError("Training reward requires explicit finite current_safety_limits when simulator current limits are absent")
     return out
-
-
-def _delta_derivative_limit_vector(config: ExperimentConfig, loaded_cfg) -> np.ndarray:
-    n_pfc = int(loaded_cfg.pfc.n_coils)
-    n_sol = int(loaded_cfg.sol.n_coils)
-    if config.sim.delta_derivative_limits_aps is not None:
-        config.sim.delta_derivative_limits_aps.validate(n_pfc=n_pfc, n_sol=n_sol)
-        return np.concatenate([
-            np.asarray(config.sim.delta_derivative_limits_aps.pfc, dtype=float),
-            np.asarray(config.sim.delta_derivative_limits_aps.sol, dtype=float),
-        ])
-    return np.full((n_pfc + n_sol,), float(config.sim.delta_derivative_scale_aps), dtype=float)
 
 
 def _limit_vec(limit: float | None, n: int) -> np.ndarray:

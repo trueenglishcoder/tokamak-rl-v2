@@ -34,7 +34,7 @@ def test_tcvdelta_t15boundary_manifest_has_36_mapped_variants() -> None:
         assert int(variant["local_index"]) == index % CANDIDATES_PER_TASK
 
 
-def test_tcvdelta_t15boundary_candidate_config_loads_with_repaired_invariants(tmp_path: Path) -> None:
+def test_tcvjdot_t15boundary_candidate_config_loads_with_repaired_invariants(tmp_path: Path) -> None:
     manifest = build_manifest()
     cfg_dict = generate_candidate_config(
         base_config=BASE_CONFIG,
@@ -60,8 +60,9 @@ def test_tcvdelta_t15boundary_candidate_config_loads_with_repaired_invariants(tm
     assert cfg.reward.derivative_weight == 0.75
     assert cfg.reward.actuator_saturation_weight == 0.75
     assert cfg.reference.boundary.kind == "t15_replay_segment_conditioned"
-    assert cfg.sim.action_contract == "delta_jdot"
-    assert cfg.sim.delta_derivative_limits_aps is not None
+    assert cfg.sim.action_contract == "jdot_command"
+    assert cfg.observation.actor_kind == "controller_state_v4"
+    assert cfg.sim.delta_derivative_limits_aps is None
     assert cfg.sim.terminate_on_boundary_loss is True
     assert cfg.sim.terminate_on_current_limit is True
     assert cfg.sim.current_hard_termination_fraction == 1.2

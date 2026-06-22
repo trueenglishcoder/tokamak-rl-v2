@@ -16,7 +16,7 @@ from tokamak_rl_v2.sweeps.tcvdelta_single_segment_0p1s import write_manifest
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Submit the 36x1M TCV-delta 0.1 s single-segment reward sweep")
+    parser = argparse.ArgumentParser(description="Submit the 36x1M TCV-Jdot 0.1 s single-segment reward sweep")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--job", default="jobs/sweep_t15_csv_single_segment_0p1s_static_boundary_tcvdelta_12gpu_36x1m.sbatch")
     parser.add_argument("--aggregate-job", default="jobs/aggregate_tcvdelta_single_segment_0p1s_reward_sweep.sbatch")
@@ -32,14 +32,14 @@ def main(argv: list[str] | None = None) -> int:
     (ROOT / "slurm_logs").mkdir(exist_ok=True)
     if args.dry_run:
         fake_jobid = "DRYRUN"
-        root = ROOT / f"outputs/t15_reward_sweep36_tcvdelta_single_segment_0p1s_static_boundary_1m_{fake_jobid}"
+        root = ROOT / f"outputs/t15_reward_sweep36_tcvjdot_single_segment_0p1s_static_boundary_1m_{fake_jobid}"
         manifest = root / "variants.json"
         write_manifest(manifest)
         print(json.dumps({"dry_run": True, "root": str(root.relative_to(ROOT)), "manifest": str(manifest.relative_to(ROOT))}, indent=2))
         return 0
 
     sweep_jobid = _check_output(["sbatch", "--hold", "--parsable", str(job.relative_to(ROOT))])
-    root = ROOT / f"outputs/t15_reward_sweep36_tcvdelta_single_segment_0p1s_static_boundary_1m_{sweep_jobid}"
+    root = ROOT / f"outputs/t15_reward_sweep36_tcvjdot_single_segment_0p1s_static_boundary_1m_{sweep_jobid}"
     manifest = root / "variants.json"
     write_manifest(manifest)
     aggregate_jobid = _check_output(

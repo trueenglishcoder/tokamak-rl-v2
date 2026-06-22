@@ -109,7 +109,7 @@ class ReferenceConfig:
 
 @dataclass(frozen=True, slots=True)
 class ObservationConfig:
-    actor_kind: Literal["controller_state_v3"] = "controller_state_v3"
+    actor_kind: Literal["controller_state_v4"] = "controller_state_v4"
     critic_kind: Literal["privileged_training_state_v1"] = "privileged_training_state_v1"
     target_preview_steps: int = 8
     target_preview_stride: int = 10
@@ -168,7 +168,7 @@ class SimConfig:
     current_limit_scale: float = 1.0
     derivative_limit_scale: float = 1.0
     action_scale: float = 1.0
-    action_contract: Literal["delta_jdot"] = "delta_jdot"
+    action_contract: Literal["jdot_command"] = "jdot_command"
     delta_derivative_scale_aps: float = 500000.0
     delta_derivative_limits_aps: DeltaDerivativeLimits | None = None
     terminate_on_boundary_loss: bool = True

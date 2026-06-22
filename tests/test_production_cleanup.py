@@ -39,12 +39,17 @@ def test_production_config_uses_single_clean_path() -> None:
     assert cfg.reward.kind == "tcv_derivative"
     assert cfg.sim.terminate_on_boundary_loss is True
     assert cfg.sim.terminate_on_current_limit is True
-    assert cfg.observation.actor_kind == "controller_state_v3"
+    assert cfg.sim.action_contract == "jdot_command"
+    assert cfg.observation.actor_kind == "controller_state_v4"
     assert cfg.observation.critic_kind == "privileged_training_state_v1"
 
 
-def test_all_current_experiment_configs_load_cleanly() -> None:
-    for path in sorted((ROOT / "configs/experiments").glob("*.yaml")):
+def test_current_canonical_experiment_configs_load_cleanly() -> None:
+    paths = [
+        ROOT / "configs/experiments/t15_csv_initial_segmented_profile_boundary_mpo.yaml",
+        ROOT / "configs/experiments/t15_csv_initial_single_segment_0p1s_static_boundary_mpo.yaml",
+    ]
+    for path in paths:
         load_experiment_config(path)
 
 

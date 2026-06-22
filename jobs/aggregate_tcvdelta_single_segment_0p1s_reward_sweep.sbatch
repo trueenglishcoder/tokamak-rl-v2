@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=tokamak-rl-v2-tcvd-0p1s-agg
+#SBATCH --job-name=tokamak-rl-v2-tcvj-0p1s-agg
 #SBATCH --partition=batch
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8G
-#SBATCH --output=slurm_logs/tokamak-rl-v2-tcvd-0p1s-agg-%j.out
-#SBATCH --error=slurm_logs/tokamak-rl-v2-tcvd-0p1s-agg-%j.err
+#SBATCH --output=slurm_logs/tokamak-rl-v2-tcvj-0p1s-agg-%j.out
+#SBATCH --error=slurm_logs/tokamak-rl-v2-tcvj-0p1s-agg-%j.err
 
 set -euo pipefail
 

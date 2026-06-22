@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-PROFILE = "tcvdelta_t15boundary_36x2m"
+PROFILE = "tcvjdot_t15boundary_36x2m"
 CANDIDATES_PER_TASK = 3
 ARRAY_TASKS = 12
 VARIANT_COUNT = 36
@@ -133,7 +133,7 @@ def generate_candidate_config(
         raise ValueError(f"variant {variant_index} has no reward mapping")
     cfg = json.loads(base_config.read_text(encoding="utf-8"))
     name = str(variant["name"])
-    cfg["name"] = f"t15_csv_segmented_profile_tcvdelta_t15boundary_sweep_{name}"
+    cfg["name"] = f"t15_csv_segmented_profile_tcvjdot_t15boundary_sweep_{name}"
     cfg["reward"].update(dict(reward))
     cfg["training"]["steps"] = int(train_steps)
     cfg["training"]["num_envs"] = int(num_envs)
@@ -165,8 +165,9 @@ def validate_candidate_config_dict(cfg: Mapping[str, Any]) -> None:
         "reference.ip.kind": cfg["reference"]["ip"]["kind"] == "segmented_profile",
         "sim.max_episode_steps": int(cfg["sim"]["max_episode_steps"]) == 2000,
         "reward.kind": cfg["reward"]["kind"] == "tcv_derivative",
-        "sim.action_contract": cfg["sim"]["action_contract"] == "delta_jdot",
-        "sim.delta_derivative_limits_aps": bool(cfg["sim"].get("delta_derivative_limits_aps")),
+        "observation.actor_kind": cfg["observation"]["actor_kind"] == "controller_state_v4",
+        "sim.action_contract": cfg["sim"]["action_contract"] == "jdot_command",
+        "sim.no_delta_derivative_limits": "delta_derivative_limits_aps" not in cfg["sim"],
         "sim.terminate_on_boundary_loss": cfg["sim"]["terminate_on_boundary_loss"] is True,
         "sim.terminate_on_current_limit": cfg["sim"]["terminate_on_current_limit"] is True,
         "sim.current_hard_termination_fraction": float(cfg["sim"]["current_hard_termination_fraction"]) == 1.20,

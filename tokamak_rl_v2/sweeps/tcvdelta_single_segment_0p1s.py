@@ -23,7 +23,7 @@ from tokamak_rl_v2.sweeps.tcvdelta_t15boundary import (
 )
 
 
-PROFILE = "tcvdelta_single_segment_0p1s_36x1m"
+PROFILE = "tcvjdot_single_segment_0p1s_36x1m"
 
 
 def build_manifest() -> dict[str, object]:
@@ -106,7 +106,7 @@ def generate_candidate_config(
         raise ValueError(f"variant {variant_index} has no reward mapping")
     cfg = json.loads(base_config.read_text(encoding="utf-8"))
     name = str(variant["name"])
-    cfg["name"] = f"t15_csv_single_segment_0p1s_static_boundary_tcvdelta_sweep_{name}"
+    cfg["name"] = f"t15_csv_single_segment_0p1s_static_boundary_tcvjdot_sweep_{name}"
     cfg["reward"].update(dict(reward))
     cfg["training"]["steps"] = int(train_steps)
     cfg["training"]["num_envs"] = int(num_envs)
@@ -144,8 +144,9 @@ def validate_candidate_config_dict(cfg: Mapping[str, Any]) -> None:
         "training.eval_max_steps": int(cfg["training"]["eval_max_steps"]) == 100,
         "observation.preview": preview_steps == 10 and preview_stride == 10 and preview_steps * preview_stride <= episode_steps,
         "reward.kind": cfg["reward"]["kind"] == "tcv_derivative",
-        "sim.action_contract": cfg["sim"]["action_contract"] == "delta_jdot",
-        "sim.delta_derivative_limits_aps": bool(cfg["sim"].get("delta_derivative_limits_aps")),
+        "observation.actor_kind": cfg["observation"]["actor_kind"] == "controller_state_v4",
+        "sim.action_contract": cfg["sim"]["action_contract"] == "jdot_command",
+        "sim.no_delta_derivative_limits": "delta_derivative_limits_aps" not in cfg["sim"],
         "sim.terminate_on_boundary_loss": cfg["sim"]["terminate_on_boundary_loss"] is True,
         "sim.terminate_on_current_limit": cfg["sim"]["terminate_on_current_limit"] is True,
         "sim.current_hard_termination_fraction": float(cfg["sim"]["current_hard_termination_fraction"]) == 1.20,
@@ -217,7 +218,7 @@ def summarize_root(root: Path, *, out_dir: Path | None = None) -> dict[str, obje
 
 
 def _write_report(path: Path, rows: list[Mapping[str, object]]) -> None:
-    lines = ["# TCV-Delta 0.1 s Single-Segment Reward Search", ""]
+    lines = ["# TCV-Jdot 0.1 s Single-Segment Reward Search", ""]
     completed = sum(1 for row in rows if int(row.get("has_actor_eval", 0)) == 1)
     lines.append(f"- total candidates: {len(rows)}")
     lines.append(f"- candidates with actor eval: {completed}")
@@ -259,7 +260,7 @@ def _write_report(path: Path, rows: list[Mapping[str, object]]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="TCV-delta 0.1 s single-segment sweep utilities")
+    parser = argparse.ArgumentParser(description="TCV-Jdot 0.1 s single-segment sweep utilities")
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_manifest = sub.add_parser("manifest")
     p_manifest.add_argument("--out", required=True)

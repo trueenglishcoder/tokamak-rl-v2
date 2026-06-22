@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=tokamak-rl-v2-tcvd-t15b-sweep
+#SBATCH --job-name=tokamak-rl-v2-tcvj-t15b-sweep
 #SBATCH --partition=batch
 #SBATCH --array=0-11%12
 #SBATCH --nodes=1
@@ -7,15 +7,15 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --output=slurm_logs/tokamak-rl-v2-tcvd-t15b-sweep-%A_%a.out
-#SBATCH --error=slurm_logs/tokamak-rl-v2-tcvd-t15b-sweep-%A_%a.err
+#SBATCH --output=slurm_logs/tokamak-rl-v2-tcvj-t15b-sweep-%A_%a.out
+#SBATCH --error=slurm_logs/tokamak-rl-v2-tcvj-t15b-sweep-%A_%a.err
 
 set -euo pipefail
 
 cd /scratch/$USER/tokamak/tokamak-rl-v2
 mkdir -p slurm_logs outputs
 
-export ROOT=${ROOT:-outputs/t15_reward_sweep36_tcvdelta_t15boundary_2m_${SLURM_ARRAY_JOB_ID}}
+export ROOT=${ROOT:-outputs/t15_reward_sweep36_tcvjdot_t15boundary_2m_${SLURM_ARRAY_JOB_ID}}
 export MANIFEST=${MANIFEST:-${ROOT}/variants.json}
 export BASE_CONFIG=${BASE_CONFIG:-configs/experiments/t15_csv_initial_segmented_profile_boundary_mpo.yaml}
 export TRAIN_ENV_STEPS=${TRAIN_ENV_STEPS:-2000000}
@@ -25,7 +25,7 @@ export REPLAY_CAPACITY_EPISODES=${REPLAY_CAPACITY_EPISODES:-288}
 export BATCH_SIZE=${BATCH_SIZE:-256}
 export ROLLOUT_CHUNK_LENGTH=${ROLLOUT_CHUNK_LENGTH:-64}
 export UPDATES_PER_ROLLOUT_CHUNK=${UPDATES_PER_ROLLOUT_CHUNK:-32}
-export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-tokamak-rl-v2-tcvdelta-t15boundary-36x2m-${SLURM_ARRAY_JOB_ID}}
+export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-tokamak-rl-v2-tcvjdot-t15boundary-36x2m-${SLURM_ARRAY_JOB_ID}}
 export WANDB_MODE=${WANDB_MODE:-online}
 export WANDB__SERVICE_WAIT=${WANDB__SERVICE_WAIT:-60}
 

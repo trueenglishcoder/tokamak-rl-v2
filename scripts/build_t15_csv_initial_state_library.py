@@ -32,8 +32,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out-json", default="data/processed/t15_csv_initial_states.json")
     ap.add_argument("--out-rejected", default="data/processed/t15_csv_initial_states_rejected.csv")
     ap.add_argument("--reference-limits", default="data/processed/t15_reference_limits.json")
+    ap.add_argument("--skip-reference-bounds", action="store_true")
     ap.add_argument("--zero-action-steps", type=int, default=10, help="Deprecated; accepted for old wrappers but ignored.")
     ap.add_argument("--max-rows-per-shot", type=int, default=600)
+    ap.add_argument("--window-steps", type=int, default=0, help="Require this many future rows after every sampled reset.")
+    ap.add_argument("--split-policy", choices=("block", "whole_shot"), default="block")
+    ap.add_argument("--holdout-fraction", type=float, default=0.15)
     ap.add_argument("--workers", type=int, default=min(8, max(1, os.cpu_count() or 1)), help="Deprecated; accepted for old wrappers but ignored.")
     ap.add_argument("--progress-every", type=int, default=100)
     args = ap.parse_args(argv)
@@ -42,8 +46,10 @@ def main(argv: list[str] | None = None) -> int:
     machine_config = Path(args.machine_config).resolve()
     exp_cfg = load_experiment_config(args.experiment_config)
     machine_cfg = load_config(machine_config)
+    n_pfc = int(machine_cfg.pfc.n_coils)
+    n_sol = int(machine_cfg.sol.n_coils)
     current_limits = _current_limit_vector(exp_cfg, machine_cfg)
-    reference_limits = load_reference_limits(args.reference_limits)
+    reference_limits = None if bool(args.skip_reference_bounds) else load_reference_limits(args.reference_limits)
 
     candidates: list[dict[str, object]] = []
     rejected: list[dict[str, object]] = []
@@ -58,8 +64,8 @@ def main(argv: list[str] | None = None) -> int:
             rejected.append(_reject(shot_id, -1, float("nan"), "missing_coil_csv", float("nan"), float("nan")))
             continue
         ip = _load_two_column(ip_path, delimiter=str(args.delimiter))
-        coils = _load_coils(coil_path, delimiter=str(args.delimiter))
-        rows = _candidate_rows(ip, coils, max_rows=int(args.max_rows_per_shot))
+        coils = _load_coils(coil_path, delimiter=str(args.delimiter), n_sol=n_sol, n_pfc=n_pfc)
+        rows = _candidate_rows(ip, coils, max_rows=int(args.max_rows_per_shot), n_sol=n_sol, n_pfc=n_pfc, window_steps=int(args.window_steps))
         raw_rows += len(rows)
         print(f"[csv-initial-states] shot={shot_id} candidates={len(rows)}", flush=True)
         for row in rows:
@@ -70,7 +76,9 @@ def main(argv: list[str] | None = None) -> int:
             sol0 = np.asarray(row["sol0"], dtype=float)
             dipdt = float(row["local_abs_dip_dt_a_per_s"])
             usage = float(np.max(np.abs(np.concatenate([pfc0, sol0])) / current_limits))
-            reason = _basic_rejection_reason(ip0, pfc0, sol0, usage, dipdt, ip_min=float(reference_limits.ip_p01_a), ip_max=float(reference_limits.ip_p99_a))
+            ip_min = 0.0 if reference_limits is None else float(reference_limits.ip_p01_a)
+            ip_max = float("inf") if reference_limits is None else float(reference_limits.ip_p99_a)
+            reason = _basic_rejection_reason(ip0, pfc0, sol0, usage, dipdt, ip_min=ip_min, ip_max=ip_max)
             if reason is not None:
                 rejected.append(_reject(shot_id, row_index, time_s, reason, usage, dipdt, ip0=ip0))
                 continue
@@ -96,8 +104,8 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
     split_block_s = 0.5
-    splits = _assign_splits(accepted, block_s=split_block_s)
-    _validate_split_gates(accepted, splits)
+    splits = _assign_splits(accepted, block_s=split_block_s, policy=str(args.split_policy), holdout_fraction=float(args.holdout_fraction))
+    _validate_split_gates(accepted, splits, split_policy=str(args.split_policy))
 
     out_npz = Path(args.out_npz)
     out_npz.parent.mkdir(parents=True, exist_ok=True)
@@ -118,7 +126,13 @@ def main(argv: list[str] | None = None) -> int:
         machine_config=machine_config,
         splits=splits,
         reference_limits_path=Path(args.reference_limits).resolve(),
+        reference_bounds_enabled=not bool(args.skip_reference_bounds),
         split_block_seconds=split_block_s,
+        split_policy=str(args.split_policy),
+        holdout_fraction=float(args.holdout_fraction),
+        window_steps=int(args.window_steps),
+        n_pfc=n_pfc,
+        n_sol=n_sol,
     )
     Path(args.out_json).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out_json).write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
@@ -159,14 +173,15 @@ def _load_two_column(path: Path, *, delimiter: str) -> np.ndarray:
     return arr
 
 
-def _load_coils(path: Path, *, delimiter: str) -> np.ndarray:
+def _load_coils(path: Path, *, delimiter: str, n_sol: int, n_pfc: int) -> np.ndarray:
     arr = np.loadtxt(path, delimiter=delimiter, dtype=float)
-    if arr.ndim != 2 or arr.shape[1] < 10:
-        raise ValueError(f"{path} must contain time + 3 SOL + 6 PFC columns")
+    expected = 1 + int(n_sol) + int(n_pfc)
+    if arr.ndim != 2 or arr.shape[1] < expected:
+        raise ValueError(f"{path} must contain at least time + {int(n_sol)} SOL + {int(n_pfc)} PFC columns")
     _validate_time(arr[:, 0], path)
     if not np.all(np.isfinite(arr)):
         raise ValueError(f"{path} contains non-finite values")
-    return arr[:, :10]
+    return arr[:, :expected]
 
 
 def _validate_time(t: np.ndarray, path: Path) -> None:
@@ -174,9 +189,12 @@ def _validate_time(t: np.ndarray, path: Path) -> None:
         raise ValueError(f"{path} time column must be strictly increasing")
 
 
-def _candidate_rows(ip: np.ndarray, coils: np.ndarray, *, max_rows: int) -> list[dict[str, object]]:
+def _candidate_rows(ip: np.ndarray, coils: np.ndarray, *, max_rows: int, n_sol: int, n_pfc: int, window_steps: int) -> list[dict[str, object]]:
     start = max(float(ip[0, 0]), float(coils[0, 0]))
     end = min(float(ip[-1, 0]), float(coils[-1, 0]))
+    if int(window_steps) > 0:
+        dt = float(np.median(np.diff(ip[:, 0])))
+        end = min(end, float(ip[-1, 0]) - float(window_steps) * dt)
     keep = (ip[:, 0] >= start) & (ip[:, 0] <= end)
     times = ip[keep, 0]
     source_indices = np.flatnonzero(keep)
@@ -187,8 +205,8 @@ def _candidate_rows(ip: np.ndarray, coils: np.ndarray, *, max_rows: int) -> list
     ip_interp = np.interp(times, ip[:, 0], ip[:, 1])
     dipdt = np.gradient(np.interp(ip[:, 0], ip[:, 0], ip[:, 1]), ip[:, 0])
     dipdt_interp = np.interp(times, ip[:, 0], np.abs(dipdt))
-    sol_cols = [1, 2, 3]
-    pfc_cols = [4, 5, 6, 7, 8, 9]
+    sol_cols = list(range(1, 1 + int(n_sol)))
+    pfc_cols = list(range(1 + int(n_sol), 1 + int(n_sol) + int(n_pfc)))
     sol = np.stack([np.interp(times, coils[:, 0], coils[:, col]) for col in sol_cols], axis=1)
     pfc = np.stack([np.interp(times, coils[:, 0], coils[:, col]) for col in pfc_cols], axis=1)
     out = []
@@ -232,11 +250,25 @@ def _reject(shot_id: str, row_index: int, time_s: float, reason: str, usage: flo
     }
 
 
-def _assign_splits(accepted: list[dict[str, object]], *, block_s: float = 0.5) -> np.ndarray:
+def _assign_splits(accepted: list[dict[str, object]], *, block_s: float = 0.5, policy: str = "block", holdout_fraction: float = 0.15) -> np.ndarray:
     split = np.full((len(accepted),), "train", dtype="<U8")
     by_shot: dict[str, list[tuple[int, float]]] = defaultdict(list)
     for index, row in enumerate(accepted):
         by_shot[str(row["shot_id"])].append((index, float(row["time_s"])))
+    if policy == "whole_shot":
+        shots = sorted(by_shot, key=lambda value: int(value))
+        if not shots:
+            return split
+        holdout_count = max(1, int(round(float(holdout_fraction) * len(shots))))
+        holdout_count = min(holdout_count, max(1, len(shots) - 1))
+        positions = np.linspace(0, len(shots) - 1, holdout_count + 2)[1:-1].round().astype(int)
+        holdout_shots = {shots[int(pos)] for pos in positions}
+        for shot in holdout_shots:
+            for row_index, _time_s in by_shot[shot]:
+                split[row_index] = "holdout"
+        return split
+    if policy != "block":
+        raise ValueError(f"unsupported split policy: {policy}")
     for shot_rows in by_shot.values():
         if not shot_rows:
             continue
@@ -255,7 +287,7 @@ def _assign_splits(accepted: list[dict[str, object]], *, block_s: float = 0.5) -
     return split
 
 
-def _validate_split_gates(accepted: list[dict[str, object]], splits: np.ndarray) -> None:
+def _validate_split_gates(accepted: list[dict[str, object]], splits: np.ndarray, *, split_policy: str) -> None:
     accepted_rows = int(len(accepted))
     train_rows = int(np.sum(splits == "train"))
     holdout_rows = int(np.sum(splits == "holdout"))
@@ -271,13 +303,19 @@ def _validate_split_gates(accepted: list[dict[str, object]], splits: np.ndarray)
         shot = str(row["shot_id"])
         by_shot[shot]["accepted"] += 1
         by_shot[shot][str(split)] += 1
-    small = {
-        shot: counts
-        for shot, counts in sorted(by_shot.items())
-        if counts["accepted"] < 100 or counts["train"] < 80 or counts["holdout"] < 10
-    }
-    if small:
-        errors.append(f"per-shot split gates failed: {small}")
+    if split_policy == "whole_shot":
+        train_shots = [shot for shot, counts in by_shot.items() if counts["train"] > 0]
+        holdout_shots = [shot for shot, counts in by_shot.items() if counts["holdout"] > 0]
+        if not train_shots or not holdout_shots:
+            errors.append("whole-shot split requires at least one train shot and one holdout shot")
+    else:
+        small = {
+            shot: counts
+            for shot, counts in sorted(by_shot.items())
+            if counts["accepted"] < 100 or counts["train"] < 80 or counts["holdout"] < 10
+        }
+        if small:
+            errors.append(f"per-shot split gates failed: {small}")
     if errors:
         raise ValueError("; ".join(errors))
 
@@ -290,7 +328,13 @@ def _summary(
     machine_config: Path,
     splits: np.ndarray,
     reference_limits_path: Path,
+    reference_bounds_enabled: bool,
     split_block_seconds: float,
+    split_policy: str,
+    holdout_fraction: float,
+    window_steps: int,
+    n_pfc: int,
+    n_sol: int,
 ) -> dict[str, object]:
     accepted_by_shot = Counter(str(row["shot_id"]) for row in accepted)
     split_counts = Counter(str(value) for value in splits.tolist())
@@ -317,9 +361,15 @@ def _summary(
         "source_root": str(data_root),
         "machine_config": str(machine_config),
         "reference_limits": str(reference_limits_path),
+        "reference_bounds_enabled": bool(reference_bounds_enabled),
         "simulator_validation": False,
         "split_gap_seconds": 0.0,
         "split_block_seconds": float(split_block_seconds),
+        "split_policy": str(split_policy),
+        "holdout_fraction": float(holdout_fraction),
+        "window_steps": int(window_steps),
+        "n_pfc": int(n_pfc),
+        "n_sol": int(n_sol),
         "split_policy": "deterministic_fifth_block_holdout_without_same_shot_gap_exclusion",
         "total_rows": int(len(accepted) + len(rejected)),
         "candidate_rows": int(len(accepted) + len(rejected)),

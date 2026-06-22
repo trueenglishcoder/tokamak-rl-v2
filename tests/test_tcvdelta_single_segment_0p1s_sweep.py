@@ -5,6 +5,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from tokamak_rl_v2.config import load_experiment_config
 from tokamak_rl_v2.sweeps.tcvdelta_single_segment_0p1s import (
     CANDIDATES_PER_TASK,
@@ -14,6 +16,7 @@ from tokamak_rl_v2.sweeps.tcvdelta_single_segment_0p1s import (
     summarize_root,
     write_manifest,
 )
+from tokamak_rl_v2.sweeps import tcvdelta_single_segment_0p1s_ablation as ablation
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,7 +37,7 @@ def test_tcvdelta_single_segment_manifest_has_36_mapped_variants() -> None:
         assert int(variant["local_index"]) == index % CANDIDATES_PER_TASK
 
 
-def test_tcvdelta_single_segment_candidate_config_loads_with_100_step_invariants(tmp_path: Path) -> None:
+def test_tcvjdot_single_segment_candidate_config_loads_with_100_step_invariants(tmp_path: Path) -> None:
     manifest = build_manifest()
     cfg_dict = generate_candidate_config(
         base_config=BASE_CONFIG,
@@ -66,8 +69,9 @@ def test_tcvdelta_single_segment_candidate_config_loads_with_100_step_invariants
     assert cfg.reward.current_weight == 3.0
     assert cfg.reward.derivative_weight == 0.75
     assert cfg.reward.actuator_saturation_weight == 0.75
-    assert cfg.sim.action_contract == "delta_jdot"
-    assert cfg.sim.delta_derivative_limits_aps is not None
+    assert cfg.sim.action_contract == "jdot_command"
+    assert cfg.observation.actor_kind == "controller_state_v4"
+    assert cfg.sim.delta_derivative_limits_aps is None
     assert cfg.sim.terminate_on_boundary_loss is True
     assert cfg.sim.terminate_on_current_limit is True
     assert cfg.sim.current_hard_termination_fraction == 1.2
@@ -150,3 +154,167 @@ def test_tcvdelta_single_segment_sweep_job_uses_100_step_local_replay_gpu_path()
     assert "--sim-gpu-device cuda:0" in text
     assert "--distributed-mode local_replay" in text
     assert "--distributed-mode single" not in text
+
+
+def test_tcvjdot_single_segment_ablation_manifest_has_36_variants() -> None:
+    manifest = ablation.build_manifest()
+    variants = manifest["variants"]
+    assert isinstance(variants, list)
+    assert len(variants) == 36
+    assert variants[0]["name"] == "s000_j0_c0_p0"
+    assert variants[-1]["name"] == "s035_j2_c2_p3"
+    assert len({variant["name"] for variant in variants}) == 36
+    assert {variant["regimes"]["jdot"] for variant in variants} == {"j0", "j1", "j2"}
+    assert {variant["regimes"]["termination"] for variant in variants} == {"c0", "c1", "c2"}
+    assert {variant["regimes"]["pressure"] for variant in variants} == {"p0", "p1", "p2", "p3"}
+
+
+def test_tcvjdot_single_segment_ablation_config_scales_action_range(tmp_path: Path) -> None:
+    manifest = ablation.build_manifest()
+    cfg_dict = ablation.generate_candidate_config(
+        base_config=BASE_CONFIG,
+        manifest=manifest,
+        variant_index=0,
+        output_dir=str(tmp_path / "candidate"),
+        train_steps=1_000_000,
+        eval_steps=100_000,
+        num_envs=256,
+        replay_capacity_episodes=288,
+        rl_root=str(ROOT),
+        sim_root=str((ROOT.parent / "tokamak-sim").resolve()),
+    )
+    path = tmp_path / "candidate.json"
+    path.write_text(json.dumps(cfg_dict), encoding="utf-8")
+    cfg = load_experiment_config(path)
+    assert cfg.training.production_mode is False
+    assert cfg.sim.terminate_on_boundary_loss is False
+    assert cfg.sim.terminate_on_current_limit is False
+    assert cfg.reward.terminal_reward == 0.0
+    assert cfg.reward.terminal_remaining_cost == 0.0
+    assert cfg.sim.action_contract == "jdot_command"
+    assert cfg.observation.actor_kind == "controller_state_v4"
+    assert cfg.sim.action_scale == pytest.approx(0.25)
+    assert cfg.sim.delta_derivative_limits_aps is None
+    assert cfg.reward.current_weight == 0.25
+    assert cfg.reward.derivative_weight == 0.0625
+    assert cfg.reward.actuator_saturation_weight == 0.0625
+
+
+def test_tcvdelta_single_segment_ablation_soft_and_strict_configs(tmp_path: Path) -> None:
+    manifest = ablation.build_manifest()
+    soft = ablation.generate_candidate_config(
+        base_config=BASE_CONFIG,
+        manifest=manifest,
+        variant_index=16,
+        output_dir=str(tmp_path / "soft"),
+        train_steps=1_000_000,
+        eval_steps=100_000,
+        num_envs=256,
+        replay_capacity_episodes=288,
+    )
+    strict = ablation.generate_candidate_config(
+        base_config=BASE_CONFIG,
+        manifest=manifest,
+        variant_index=32,
+        output_dir=str(tmp_path / "strict"),
+        train_steps=1_000_000,
+        eval_steps=100_000,
+        num_envs=256,
+        replay_capacity_episodes=288,
+    )
+    assert soft["sim"]["terminate_on_current_limit"] is True
+    assert soft["training"]["production_mode"] is True
+    assert soft["sim"]["current_termination_over_limit_a"] == 50000.0
+    assert soft["sim"]["current_termination_grace_steps"] == 50
+    assert soft["sim"]["current_hard_termination_fraction"] == 1.4
+    assert soft["reward"]["terminal_remaining_cost"] == 2.0
+    assert strict["sim"]["terminate_on_current_limit"] is True
+    assert strict["sim"]["current_termination_over_limit_a"] == 5000.0
+    assert strict["sim"]["current_termination_grace_steps"] == 1
+    assert strict["sim"]["current_hard_termination_fraction"] == 1.2
+    assert strict["reward"]["current_weight"] == 0.25
+
+
+def test_tcvdelta_single_segment_training_config_helper_modes(tmp_path: Path) -> None:
+    script = ROOT / "scripts/make_tcvdelta_single_segment_0p1s_training_config.py"
+    fixed_path = tmp_path / "fixed.json"
+    soft_path = tmp_path / "soft.json"
+    subprocess.run(
+        [
+            "python3",
+            str(script),
+            "--base-config",
+            str(BASE_CONFIG),
+            "--mode",
+            "fixed_horizon",
+            "--config-out",
+            str(fixed_path),
+            "--output-dir",
+            str(tmp_path / "fixed"),
+            "--train-steps",
+            "10000000",
+            "--eval-steps",
+            "500000",
+            "--checkpoint-steps",
+            "1000000",
+            "--num-envs",
+            "3072",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "python3",
+            str(script),
+            "--base-config",
+            str(BASE_CONFIG),
+            "--mode",
+            "soft_curriculum",
+            "--config-out",
+            str(soft_path),
+            "--output-dir",
+            str(tmp_path / "soft"),
+            "--train-steps",
+            "10000000",
+            "--eval-steps",
+            "500000",
+            "--checkpoint-steps",
+            "1000000",
+            "--num-envs",
+            "3072",
+        ],
+        check=True,
+    )
+    fixed = json.loads(fixed_path.read_text(encoding="utf-8"))
+    soft = json.loads(soft_path.read_text(encoding="utf-8"))
+    fixed_cfg = load_experiment_config(fixed_path)
+    soft_cfg = load_experiment_config(soft_path)
+    assert fixed["sim"]["terminate_on_boundary_loss"] is False
+    assert fixed["sim"]["terminate_on_current_limit"] is False
+    assert fixed["training"]["production_mode"] is False
+    assert fixed_cfg.training.production_mode is False
+    assert fixed_cfg.sim.terminate_on_boundary_loss is False
+    assert fixed_cfg.sim.terminate_on_current_limit is False
+    assert fixed["reward"]["terminal_reward"] == 0.0
+    assert fixed["reward"]["terminal_remaining_cost"] == 0.0
+    assert soft["sim"]["current_termination_over_limit_a"] == 50000.0
+    assert soft["training"]["production_mode"] is True
+    assert soft_cfg.training.production_mode is True
+    assert soft_cfg.sim.current_termination_over_limit_a == pytest.approx(50000.0)
+    assert soft_cfg.sim.current_termination_grace_steps == 50
+    assert soft_cfg.sim.current_hard_termination_fraction == pytest.approx(1.4)
+    assert soft["sim"]["current_termination_grace_steps"] == 50
+    assert soft["sim"]["current_hard_termination_fraction"] == 1.4
+    assert soft["reward"]["terminal_reward"] == -20.0
+    assert soft["reward"]["terminal_remaining_cost"] == 2.0
+
+
+def test_tcvdelta_deep_research_jobs_pass_bash_syntax() -> None:
+    jobs = [
+        ROOT / "jobs/train_t15_csv_single_segment_0p1s_tcvdelta_t1q1a1_fixed_horizon_64gpu_10m.sbatch",
+        ROOT / "jobs/train_t15_csv_single_segment_0p1s_tcvdelta_t1q1a1_soft_curriculum_64gpu_10m.sbatch",
+        ROOT / "jobs/sweep_t15_csv_single_segment_0p1s_tcvdelta_ablation_36gpu_36x1m.sbatch",
+        ROOT / "jobs/aggregate_tcvdelta_single_segment_0p1s_ablation_sweep.sbatch",
+    ]
+    for job in jobs:
+        subprocess.run(["bash", "-n", str(job)], check=True)

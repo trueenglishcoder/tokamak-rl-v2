@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=tokamak-rl-v2-tcvd-t15b
+#SBATCH --job-name=tokamak-rl-v2-tcvj-t15b
 #SBATCH --partition=batch
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:6
 #SBATCH --cpus-per-task=16
 #SBATCH --requeue
-#SBATCH --output=slurm_logs/tokamak-rl-v2-tcvd-t15boundary-12gpu-20m-%j.out
-#SBATCH --error=slurm_logs/tokamak-rl-v2-tcvd-t15boundary-12gpu-20m-%j.err
+#SBATCH --output=slurm_logs/tokamak-rl-v2-tcvj-t15boundary-12gpu-20m-%j.out
+#SBATCH --error=slurm_logs/tokamak-rl-v2-tcvj-t15boundary-12gpu-20m-%j.err
 
 set -euo pipefail
 
@@ -53,9 +53,9 @@ export NNODES=${SLURM_JOB_NUM_NODES:-2}
 export WORLD_SIZE=$(( NNODES * GPUS_PER_NODE ))
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=${MASTER_PORT:-29584}
-export TRAIN_OUTPUT=${TRAIN_OUTPUT:-outputs/t15_csv_segmented_profile_tcvdelta_t15boundary_12gpu_20m_${SLURM_JOB_ID:-manual}}
-export RUN_NAME=${RUN_NAME:-t15_csv_segmented_profile_tcvdelta_t15boundary_12gpu_20m_${SLURM_JOB_ID:-manual}}
-export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-tokamak-rl-v2-tcvdelta-t15boundary-12gpu-20m-${SLURM_JOB_ID:-manual}}
+export TRAIN_OUTPUT=${TRAIN_OUTPUT:-outputs/t15_csv_segmented_profile_tcvjdot_t15boundary_12gpu_20m_${SLURM_JOB_ID:-manual}}
+export RUN_NAME=${RUN_NAME:-t15_csv_segmented_profile_tcvjdot_t15boundary_12gpu_20m_${SLURM_JOB_ID:-manual}}
+export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-tokamak-rl-v2-tcvjdot-t15boundary-12gpu-20m-${SLURM_JOB_ID:-manual}}
 export WANDB_MODE=${WANDB_MODE:-online}
 export WANDB__SERVICE_WAIT=${WANDB__SERVICE_WAIT:-60}
 
@@ -72,7 +72,7 @@ if [[ ! -d ../tokamak-sim/runs/t15md_limited_replay_dataset ]]; then
   exit 2
 fi
 
-export GENERATED_CONFIG="${TRAIN_OUTPUT}/generated_configs/t15_csv_segmented_profile_tcvdelta_t15boundary_12gpu_20m.json"
+export GENERATED_CONFIG="${TRAIN_OUTPUT}/generated_configs/t15_csv_segmented_profile_tcvjdot_t15boundary_12gpu_20m.json"
 mkdir -p "$(dirname "${GENERATED_CONFIG}")"
 
 python3 - "${POLICY_CONFIG}" "${GENERATED_CONFIG}" "${TRAIN_OUTPUT}" <<'PYCFG'
@@ -86,7 +86,7 @@ generated_path = pathlib.Path(sys.argv[2])
 train_output = sys.argv[3]
 
 cfg = json.loads(base_path.read_text(encoding="utf-8"))
-cfg["name"] = "t15_csv_segmented_profile_tcvdelta_t15boundary_12gpu_20m"
+cfg["name"] = "t15_csv_segmented_profile_tcvjdot_t15boundary_12gpu_20m"
 cfg["sim"]["config_path"] = "/workspace/tokamak-sim/configs/T15MD_new_data.toml"
 cfg["sim"]["csv_initial_state_library"] = "/workspace/tokamak-rl-v2/data/processed/t15_csv_initial_states.npz"
 cfg["reference"]["ip"]["limits_path"] = "/workspace/tokamak-rl-v2/data/processed/t15_reference_limits.json"
@@ -115,7 +115,9 @@ learner["updates_per_rollout_chunk"] = int(os.environ["UPDATES_PER_ROLLOUT_CHUNK
 checks = {
     "reward.kind": cfg["reward"]["kind"] == "tcv_derivative",
     "reference.boundary.kind": cfg["reference"]["boundary"]["kind"] == "t15_replay_segment_conditioned",
-    "sim.action_contract": cfg["sim"]["action_contract"] == "delta_jdot",
+    "observation.actor_kind": cfg["observation"]["actor_kind"] == "controller_state_v4",
+    "sim.action_contract": cfg["sim"]["action_contract"] == "jdot_command",
+    "sim.no_delta_derivative_limits": "delta_derivative_limits_aps" not in cfg["sim"],
     "sim.terminate_on_boundary_loss": cfg["sim"]["terminate_on_boundary_loss"] is True,
     "sim.terminate_on_current_limit": cfg["sim"]["terminate_on_current_limit"] is True,
     "sim.current_hard_termination_fraction": float(cfg["sim"]["current_hard_termination_fraction"]) == 1.2,
