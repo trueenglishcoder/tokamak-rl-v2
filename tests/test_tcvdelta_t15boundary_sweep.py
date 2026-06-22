@@ -134,3 +134,11 @@ def test_tcvdelta_t15boundary_jobs_pass_bash_syntax() -> None:
     for job in jobs:
         subprocess.run(["bash", "-n", str(job)], check=True)
 
+
+def test_tcvdelta_t15boundary_sweep_job_uses_local_replay_gpu_path() -> None:
+    job = ROOT / "jobs/sweep_t15_csv_segmented_profile_tcvdelta_t15boundary_12gpu_36x2m.sbatch"
+    text = job.read_text(encoding="utf-8")
+    assert "--sim-compute-backend gpu" in text
+    assert "--sim-gpu-device cuda:0" in text
+    assert "--distributed-mode local_replay" in text
+    assert "--distributed-mode single" not in text

@@ -640,11 +640,16 @@ class Trainer:
                 if isinstance(comps, Mapping) and comps:
                     reward_acc.add(comps)
 
+                chunk_due = local_step % int(self.config.learner.rollout_chunk_length) == 0 or env_steps >= self.steps
                 if progress is not None:
                     progress.update(min(env_steps, self.steps) - min(previous_env_steps, self.steps))
-                    progress.set_postfix(replay=self.replay.size, updates=updates, reward=f"{float(batch_step.reward.mean().detach().cpu()):.4f}", refresh=False)
-
-                chunk_due = local_step % int(self.config.learner.rollout_chunk_length) == 0 or env_steps >= self.steps
+                    if chunk_due:
+                        progress.set_postfix(
+                            replay=self.replay.size,
+                            updates=updates,
+                            reward=f"{float(batch_step.reward.mean().detach().cpu()):.4f}",
+                            refresh=False,
+                        )
                 if not chunk_due:
                     continue
                 rollout_chunks_seen += 1

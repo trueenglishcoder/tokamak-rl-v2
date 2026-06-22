@@ -144,7 +144,7 @@ PYCUDA
         --sim-compute-backend gpu \
         --sim-gpu-device cuda:0 \
         --num-envs "${NUM_ENVS}" \
-        --distributed-mode single \
+        --distributed-mode local_replay \
         --actor-workers 1 \
         --batch-size "${BATCH_SIZE}" \
         --replay-capacity-episodes "${REPLAY_CAPACITY_EPISODES}" \

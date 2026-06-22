@@ -1138,7 +1138,12 @@ def _start_wandb(args: argparse.Namespace, cfg: ExperimentConfig, *, output_dir:
             mode=args.wandb_mode,
             config={
                 "experiment": cfg.name,
-                "policy_pipeline": "hold_reset_boundary",
+                "policy_pipeline": str(cfg.reference.boundary.kind),
+                "reference_boundary_kind": str(cfg.reference.boundary.kind),
+                "reference_ip_kind": str(cfg.reference.ip.kind),
+                "sim_action_contract": str(cfg.sim.action_contract),
+                "sim_compute_backend": str(cfg.sim.compute_backend),
+                "distributed_mode": str(cfg.training.distributed_mode),
                 "output_dir": str(output_dir),
                 "eval_seed_offset": int(args.eval_seed_offset),
                 "holdout_eval_seed_offset": int(args.holdout_eval_seed_offset),
