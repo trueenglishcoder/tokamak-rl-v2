@@ -1365,6 +1365,46 @@ def test_t15_replay_boundary_reference_uses_time_segment_not_ip_sort(tmp_path: P
     assert torch.allclose(batch.radii, expected)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA tensor conversion regression needs CUDA")
+def test_t15_replay_boundary_reference_accepts_cuda_reset_radii(tmp_path: Path) -> None:
+    replay_dir = tmp_path / "replay"
+    replay_dir.mkdir()
+    np.savez(
+        replay_dir / "lqr_boundary_reference_1_smoothed.npz",
+        shot=np.asarray([1]),
+        step=np.asarray([1, 2, 3], dtype=np.int64),
+        t=np.asarray([0.0, 0.001, 0.002], dtype=float),
+        angles_rad=np.asarray([0.0, np.pi], dtype=float),
+        radii_true=np.asarray([[1.0, 2.0], [1.1, 2.1], [1.2, 2.2]], dtype=float),
+        boundary_found=np.ones((3,), dtype=bool),
+    )
+    cfg = ReferenceConfig(
+        duration_s=0.002,
+        t_step=0.001,
+        theta_count=2,
+        seed=1,
+        ip=IpReferenceConfig(kind="hold_reset", min=0.0, max=1.0, rate_limit=0.0),
+        boundary=BoundaryReferenceConfig(kind="t15_replay_segment_conditioned", replay_reference_dir=replay_dir),
+    )
+    library = T15ReplayBoundaryLibrary(replay_dir, theta_count=2)
+    batch = generate_reference_batch(
+        config=cfg,
+        initial_ip=np.asarray([123.0], dtype=float),
+        initial_parameters=np.zeros((1, 5), dtype=float),
+        initial_boundary_points=torch.zeros((1, 2, 2), dtype=torch.float64, device="cuda:0"),
+        initial_boundary_radii=torch.tensor([[10.0, 20.0]], dtype=torch.float64, device="cuda:0"),
+        shot_ids=np.asarray(["1"]),
+        source_indices=np.asarray([0]),
+        boundary_replay_library=library,
+        boundary_center=(1.5, 0.0),
+        steps=2,
+        device="cuda:0",
+        seed=2,
+    )
+    assert batch.radii.device.type == "cuda"
+    assert torch.allclose(batch.radii.cpu(), torch.tensor([[[10.0, 20.0], [10.1, 20.1], [10.2, 20.2]]], dtype=torch.float64))
+
+
 def test_actuator_legality_analysis_reports_delta_jdot_plus_twenty_percent(tmp_path: Path) -> None:
     from scripts.analyze_t15_actuator_legality import analyze
 

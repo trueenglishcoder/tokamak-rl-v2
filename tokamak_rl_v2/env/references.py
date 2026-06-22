@@ -13,6 +13,15 @@ from tokamak_rl_v2.env.t15_reference_limits import T15ReferenceLimits, load_refe
 PARAMETER_ORDER = ("R0", "Z0", "A0", "kappa", "delta")
 
 
+def _as_numpy(value, *, dtype=None) -> np.ndarray:
+    if isinstance(value, torch.Tensor):
+        arr = value.detach().cpu().numpy()
+        if dtype is not None:
+            return arr.astype(dtype, copy=False)
+        return arr
+    return np.asarray(value, dtype=dtype)
+
+
 @dataclass(frozen=True, slots=True)
 class ReferenceBatch:
     ip: Tensor
@@ -195,7 +204,9 @@ def generate_reference_batch(
 ) -> ReferenceBatch:
     dev = torch.device(device)
     rng = np.random.default_rng(int(seed))
-    B = int(np.asarray(initial_ip).reshape(-1).shape[0])
+    initial_ip_np = _as_numpy(initial_ip, dtype=float).reshape(-1)
+    initial_parameters_np = _as_numpy(initial_parameters, dtype=float)
+    B = int(initial_ip_np.shape[0])
     ip = np.zeros((B, int(steps) + 1), dtype=np.float64)
     params = np.zeros((B, int(steps) + 1, 5), dtype=np.float64)
     theta = torch.linspace(-torch.pi, torch.pi, int(config.theta_count) + 1, dtype=torch.float64, device=dev)[:-1]
@@ -218,19 +229,19 @@ def generate_reference_batch(
 
     for b in range(B):
         if config.ip.kind == "hold_reset":
-            ip[b] = float(initial_ip[b])
+            ip[b] = float(initial_ip_np[b])
         elif config.ip.kind == "segmented_profile":
             ip[b] = _segmented_profile_ip(
                 config.ip,
-                float(initial_ip[b]),
+                float(initial_ip_np[b]),
                 int(steps),
                 rng,
                 dt=float(config.t_step),
             )
         else:
-            ip[b] = _segmented_ip(config.ip, float(initial_ip[b]), int(steps), rng, dt=float(config.t_step))
+            ip[b] = _segmented_ip(config.ip, float(initial_ip_np[b]), int(steps), rng, dt=float(config.t_step))
         if config.boundary.kind not in {"hold_reset_boundary", "t15_replay_segment_conditioned"}:
-            params[b] = _boundary_params(config.boundary, np.asarray(initial_parameters[b], dtype=float), int(steps), rng, dt=float(config.t_step))
+            params[b] = _boundary_params(config.boundary, np.asarray(initial_parameters_np[b], dtype=float), int(steps), rng, dt=float(config.t_step))
     params_t = torch.as_tensor(params, dtype=torch.float64, device=dev)
     if config.boundary.kind == "hold_reset_boundary":
         if initial_boundary_points is None or initial_boundary_radii is None:
@@ -244,7 +255,7 @@ def generate_reference_batch(
         params_t[..., 0:2] = centers[:, None, :]
     elif config.boundary.kind == "t15_replay_segment_conditioned":
         radii_np = np.zeros((B, int(steps) + 1, int(config.theta_count)), dtype=np.float64)
-        radii0_np = np.asarray(initial_boundary_radii, dtype=float).reshape(B, int(config.theta_count))
+        radii0_np = _as_numpy(initial_boundary_radii, dtype=float).reshape(B, int(config.theta_count))
         if not np.all(np.isfinite(radii0_np)) or not np.all(radii0_np > 0.0):
             raise ValueError("t15_replay_segment_conditioned reset boundary radii must be finite and positive")
         assert boundary_replay_library is not None
@@ -260,7 +271,7 @@ def generate_reference_batch(
                 source_time_s=source_time_s,
             )
         radii = torch.as_tensor(radii_np, dtype=torch.float64, device=dev)
-        center_t = torch.as_tensor(np.asarray(boundary_center, dtype=float).reshape(2), dtype=torch.float64, device=dev)
+        center_t = torch.as_tensor(_as_numpy(boundary_center, dtype=float).reshape(2), dtype=torch.float64, device=dev)
         dirs = torch.stack([torch.cos(theta), torch.sin(theta)], dim=-1)
         points = center_t[None, None, None, :] + radii[..., None] * dirs[None, None, :, :]
         params_t = torch.zeros((B, int(steps) + 1, 5), dtype=torch.float64, device=dev)
