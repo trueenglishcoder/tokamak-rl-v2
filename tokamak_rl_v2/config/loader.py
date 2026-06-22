@@ -240,7 +240,7 @@ def _reference(raw: Mapping[str, Any], base: Path) -> ReferenceConfig:
 def _observation(raw: Mapping[str, Any]) -> ObservationConfig:
     _reject_unknown_keys(raw, set(ObservationConfig.__dataclass_fields__), prefix="observation")
     return ObservationConfig(
-        actor_kind=str(raw.get("actor_kind", "controller_state_v3")),
+        actor_kind=str(raw.get("actor_kind", "controller_state_v4")),
         critic_kind=str(raw.get("critic_kind", "privileged_training_state_v1")),
         target_preview_steps=int(raw.get("target_preview_steps", 8)),
         target_preview_stride=int(raw.get("target_preview_stride", 10)),
@@ -424,8 +424,8 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
             raise ValueError(f"reference.boundary.replay_reference_dir does not exist: {replay_dir}")
         if cfg.sim.reset_source != "csv_initial_states":
             raise ValueError("reference.boundary.kind=t15_replay_segment_conditioned requires csv initial states")
-    if cfg.observation.actor_kind != "controller_state_v3":
-        raise ValueError("observation.actor_kind must be controller_state_v3")
+    if cfg.observation.actor_kind != "controller_state_v4":
+        raise ValueError("observation.actor_kind must be controller_state_v4")
     if cfg.observation.critic_kind != "privileged_training_state_v1":
         raise ValueError("observation.critic_kind must be privileged_training_state_v1")
     for key, value in cfg.reference.boundary.rate_limits.items():
@@ -435,13 +435,10 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
         raise ValueError("observation preview settings are invalid")
     if not math.isfinite(float(cfg.sim.action_scale)) or float(cfg.sim.action_scale) <= 0.0 or float(cfg.sim.action_scale) > 1.0:
         raise ValueError("sim.action_scale must be finite and in (0, 1]")
-    if cfg.sim.action_contract != "delta_jdot":
-        raise ValueError("sim.action_contract must be delta_jdot")
-    if not math.isfinite(float(cfg.sim.delta_derivative_scale_aps)) or float(cfg.sim.delta_derivative_scale_aps) <= 0.0:
-        raise ValueError("sim.delta_derivative_scale_aps must be finite and positive")
-    if cfg.sim.delta_derivative_limits_aps is None:
-        raise ValueError("sim.delta_derivative_limits_aps must be provided for delta_jdot")
-    cfg.sim.delta_derivative_limits_aps.validate()
+    if cfg.sim.action_contract != "jdot_command":
+        raise ValueError("sim.action_contract must be jdot_command")
+    if cfg.sim.delta_derivative_limits_aps is not None:
+        raise ValueError("learned-policy sim.action_contract=jdot_command must not set delta_derivative_limits_aps")
     for name in ("current_limit_scale", "derivative_limit_scale"):
         value = float(getattr(cfg.sim, name))
         if not math.isfinite(value) or value <= 0.0:
@@ -455,8 +452,8 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
     if not math.isfinite(float(cfg.sim.current_saturation_fraction)) or float(cfg.sim.current_saturation_fraction) < 1.0:
         raise ValueError("sim.current_saturation_fraction must be finite and >= 1")
     if cfg.reward.kind == "tcv_derivative":
-        if cfg.sim.action_contract != "delta_jdot":
-            raise ValueError("reward.kind=tcv_derivative requires sim.action_contract=delta_jdot")
+        if cfg.sim.action_contract != "jdot_command":
+            raise ValueError("reward.kind=tcv_derivative requires sim.action_contract=jdot_command")
         if cfg.training.production_mode and not cfg.sim.terminate_on_boundary_loss:
             raise ValueError("production reward.kind=tcv_derivative requires sim.terminate_on_boundary_loss=true")
         if cfg.training.production_mode and not cfg.sim.terminate_on_current_limit:
@@ -468,11 +465,11 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
         raise ValueError("randomization noise values must be non-negative")
     if cfg.randomization.action_offset_max < cfg.randomization.action_offset_min:
         raise ValueError("randomization.action_offset_max must be >= action_offset_min")
-    if cfg.sim.action_contract == "delta_jdot" and (
+    if cfg.sim.action_contract == "jdot_command" and (
         abs(float(cfg.randomization.action_offset_min)) > 1.0e-12
         or abs(float(cfg.randomization.action_offset_max)) > 1.0e-12
     ):
-        raise ValueError("sim.action_contract=delta_jdot requires zero randomization action offsets")
+        raise ValueError("sim.action_contract=jdot_command requires zero randomization action offsets")
     if cfg.network.hidden_dim <= 0 or cfg.network.critic_hidden_dim <= 0 or cfg.network.critic_mlp_hidden_dim <= 0:
         raise ValueError("network dimensions must be positive")
     if not math.isfinite(float(cfg.network.actor_min_std)) or float(cfg.network.actor_min_std) <= 0.0:
@@ -511,12 +508,12 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
             raise ValueError("training.production_mode requires sim.csv_initial_state_split=train")
         if cfg.sim.config_path.name not in {"T15MD_new_data.toml", "T15MD_4pfc.toml"}:
             raise ValueError("training.production_mode requires a current T15 tokamak-sim config")
-        if cfg.sim.action_contract != "delta_jdot" or cfg.sim.delta_derivative_limits_aps is None:
-            raise ValueError("training.production_mode requires delta-Jdot action contract with per-coil limits")
+        if cfg.sim.action_contract != "jdot_command" or cfg.sim.delta_derivative_limits_aps is not None:
+            raise ValueError("training.production_mode requires jdot_command action contract without delta-Jdot limits")
         if not cfg.sim.terminate_on_boundary_loss or not cfg.sim.terminate_on_current_limit:
             raise ValueError("training.production_mode requires boundary and current terminations")
-        if cfg.sim.config_path.name == "T15MD_new_data.toml" and cfg.reference.ip.kind not in {"segmented_profile", "single_segment_profile"}:
-            raise ValueError("T15MD_new_data production requires reference.ip.kind=segmented_profile or single_segment_profile")
+        if cfg.sim.config_path.name == "T15MD_new_data.toml" and cfg.reference.ip.kind not in {"segmented_profile", "single_segment_profile", "replay_window"}:
+            raise ValueError("T15MD_new_data production requires reference.ip.kind=segmented_profile, single_segment_profile, or replay_window")
         if cfg.sim.config_path.name == "T15MD_4pfc.toml" and cfg.reference.ip.kind != "replay_window":
             raise ValueError("T15MD_4pfc production requires reference.ip.kind=replay_window")
         if cfg.reference.ip.kind == "single_segment_profile":
@@ -587,7 +584,7 @@ def _validate_reward_config(reward: RewardConfig, *, prefix: str) -> None:
     if not math.isfinite(float(reward.terminal_remaining_cost)) or float(reward.terminal_remaining_cost) < 0.0:
         raise ValueError(f"{prefix}.terminal_remaining_cost must be finite and non-negative")
     if reward.kind == "tcv_derivative":
-        for name in ("terminal_remaining_cost", "current_usage_weight", "derivative_usage_weight", "action_weight", "delta_action_weight"):
+        for name in ("current_usage_weight", "derivative_usage_weight", "action_weight", "delta_action_weight"):
             if abs(float(getattr(reward, name))) > 1.0e-12:
                 raise ValueError(f"{prefix}.{name} must be 0 for reward.kind=tcv_derivative")
 
