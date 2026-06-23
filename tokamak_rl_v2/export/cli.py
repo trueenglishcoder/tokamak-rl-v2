@@ -33,9 +33,11 @@ def _validate_export_checkpoint(ckpt: object, *, checkpoint: Path) -> None:
     if not isinstance(schema, dict):
         raise ValueError(f"checkpoint does not contain an export schema: {checkpoint}")
     observation_kind = str(schema.get("observation_kind"))
-    if observation_kind != "controller_state_v4":
+    supported_observations = {"controller_state_v4", "controller_state_v5"}
+    if observation_kind not in supported_observations:
         raise ValueError(
-            f"checkpoint observation schema {observation_kind!r} is incompatible with learned_magnetic_controller: {checkpoint}"
+            f"checkpoint observation schema {observation_kind!r} is incompatible with learned_magnetic_controller; "
+            f"expected one of {sorted(supported_observations)}: {checkpoint}"
         )
     action_contract = str(schema.get("action_contract"))
     if action_contract != "absolute_jdot_command_v1":

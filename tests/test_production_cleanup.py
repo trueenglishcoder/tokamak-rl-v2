@@ -233,6 +233,24 @@ def test_manual_export_rejects_compact_joint_schema_checkpoint(tmp_path: Path) -
         _validate_export_checkpoint(checkpoint, checkpoint=tmp_path / "bad.pt")
 
 
+def test_manual_export_accepts_controller_state_v5_checkpoint(tmp_path: Path) -> None:
+    checkpoint = {
+        "checkpoint_version": 2,
+        "schema": {
+            "observation_kind": "controller_state_v5",
+            "action_contract": "absolute_jdot_command_v1",
+            "obs_dim": 502,
+            "action_dim": 9,
+        },
+        "network": {"hidden_dim": 8},
+        "actor_state_dict": {},
+        "normalization": {},
+        "metadata": {},
+    }
+
+    _validate_export_checkpoint(checkpoint, checkpoint=tmp_path / "v5.pt")
+
+
 def test_production_policy_gates_do_not_include_mpo_diagnostics() -> None:
     gates = evaluate_policy_gates(
         actor_eval={
