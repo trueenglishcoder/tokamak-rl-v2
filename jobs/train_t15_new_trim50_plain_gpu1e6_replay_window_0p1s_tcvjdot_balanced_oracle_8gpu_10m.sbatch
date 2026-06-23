@@ -16,7 +16,8 @@ mkdir -p slurm_logs outputs
 export SOURCE_CONFIG=${SOURCE_CONFIG:-configs/experiments/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_mpo_balanced.yaml}
 export TRIM_MACHINE_CONFIG=${TRIM_MACHINE_CONFIG:-../tokamak-sim/runs/t15md_trim50_plain_gpu_1e6_setup/T15MD_new_data_trim50_plain_gpu_1e6_3856.toml}
 export RESET_LIBRARY=${RESET_LIBRARY:-data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_initial_states.npz}
-export ORACLE_TARGETS=${ORACLE_TARGETS:-data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_targets/t15_replay_window_oracle_targets.npz}
+export ORACLE_TARGET_DIR=${ORACLE_TARGET_DIR:-data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_targets}
+export ORACLE_TARGETS=${ORACLE_TARGETS:-${ORACLE_TARGET_DIR}/t15_replay_window_oracle_targets.npz}
 export RUN_NAME=${RUN_NAME:-t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_10m_${SLURM_JOB_ID:-manual}}
 export TRAIN_OUTPUT=${TRAIN_OUTPUT:-outputs/${RUN_NAME}}
 export GENERATED_CONFIG=${GENERATED_CONFIG:-${TRAIN_OUTPUT}/generated_configs/${RUN_NAME}.json}
@@ -29,7 +30,7 @@ export GPUS_PER_NODE=8
 export WORLD_SIZE=8
 export WANDB_MODE=${WANDB_MODE:-online}
 export MASTER_ADDR=127.0.0.1
-export MASTER_PORT=${MASTER_PORT:-29593}
+export MASTER_PORT=${MASTER_PORT:-$(( 20000 + (${SLURM_JOB_ID:-1593} % 40000) ))}
 export HOLDOUT_EVAL_EPISODES=${HOLDOUT_EVAL_EPISODES:-1239}
 
 if [[ ! -f "${SOURCE_CONFIG}" ]]; then
@@ -47,6 +48,10 @@ if [[ ! -f "${RESET_LIBRARY}" ]]; then
 fi
 if [[ ! -f "${ORACLE_TARGETS}" ]]; then
   echo "missing trim50 oracle targets: ${ORACLE_TARGETS}" >&2
+  exit 2
+fi
+if [[ ! -d "${ORACLE_TARGET_DIR}" ]]; then
+  echo "missing trim50 oracle target directory: ${ORACLE_TARGET_DIR}" >&2
   exit 2
 fi
 if (( NUM_ENVS % WORLD_SIZE != 0 )); then
@@ -67,7 +72,7 @@ cfg = json.loads(source.read_text(encoding="utf-8"))
 cfg["name"] = "t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_10m"
 cfg["sim"]["config_path"] = "/workspace/tokamak-rl-v2/${TRAIN_OUTPUT}/generated_configs/T15MD_new_data.toml"
 cfg["sim"]["csv_initial_state_library"] = "/workspace/tokamak-rl-v2/${RESET_LIBRARY}"
-cfg["reference"]["boundary"]["replay_reference_dir"] = "/workspace/tokamak-rl-v2/data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_targets"
+cfg["reference"]["boundary"]["replay_reference_dir"] = "/workspace/tokamak-rl-v2/${ORACLE_TARGET_DIR}"
 cfg["training"]["steps"] = int("${TRAIN_ENV_STEPS}")
 cfg["training"]["num_envs"] = int("${NUM_ENVS}")
 cfg["training"]["output_dir"] = "/workspace/tokamak-rl-v2/${TRAIN_OUTPUT}"
@@ -105,27 +110,6 @@ out.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 print(out)
 PYCFG
 
-python3 - <<PYCHECK
-from pathlib import Path
-from tokamak_rl_v2.config import load_experiment_config
-
-cfg = load_experiment_config("${GENERATED_CONFIG}")
-print("preflight config_path", cfg.sim.config_path)
-print("preflight reset_library", cfg.sim.csv_initial_state_library)
-print("preflight replay_reference_dir", cfg.reference.boundary.replay_reference_dir)
-print("preflight action_contract", cfg.sim.action_contract)
-print("preflight steps", cfg.training.steps, "num_envs", cfg.training.num_envs)
-
-required = [
-    cfg.sim.config_path,
-    cfg.sim.csv_initial_state_library,
-    cfg.reference.boundary.replay_reference_dir,
-]
-missing = [str(p) for p in required if p is None or not Path(p).exists()]
-if missing:
-    raise SystemExit("generated trim50 training config has missing paths: " + ", ".join(missing))
-PYCHECK
-
 echo "job_id=${SLURM_JOB_ID:-manual}"
 echo "run_name=${RUN_NAME}"
 echo "train_output=${TRAIN_OUTPUT}"
@@ -155,6 +139,27 @@ srun \
     export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
     export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
     cd /workspace/tokamak-rl-v2
+
+    python3 - <<PYCHECK
+from pathlib import Path
+from tokamak_rl_v2.config import load_experiment_config
+
+cfg = load_experiment_config("/workspace/tokamak-rl-v2/${GENERATED_CONFIG}")
+print("preflight config_path", cfg.sim.config_path)
+print("preflight reset_library", cfg.sim.csv_initial_state_library)
+print("preflight replay_reference_dir", cfg.reference.boundary.replay_reference_dir)
+print("preflight action_contract", cfg.sim.action_contract)
+print("preflight steps", cfg.training.steps, "num_envs", cfg.training.num_envs)
+
+required = [
+    cfg.sim.config_path,
+    cfg.sim.csv_initial_state_library,
+    cfg.reference.boundary.replay_reference_dir,
+]
+missing = [str(p) for p in required if p is None or not Path(p).exists()]
+if missing:
+    raise SystemExit("generated trim50 training config has missing paths inside container: " + ", ".join(missing))
+PYCHECK
 
     python3 - <<PYCUDA
 import torch
