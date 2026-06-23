@@ -22,7 +22,7 @@ from tokamak_rl_v2.env.references import (
     generate_reference_batch,
     sample_initial_conditions,
 )
-from tokamak_rl_v2.env.t15_csv_initial_states import CsvInitialStateLibrary
+from tokamak_rl_v2.env.t15_csv_initial_states import CsvInitialStateLibrary, CsvInitialStateSample
 from tokamak_rl_v2.rewards import build_reward
 
 
@@ -142,7 +142,7 @@ class TokamakMagneticControlEnv:
         """Reset the whole batch to explicit CSV-library rows."""
         if self._csv_initial_states is None:
             raise ValueError("reset_to_csv_indices requires sim.reset_source=csv_initial_states")
-        payload = self._csv_initial_states.take(indices)
+        payload = self._reset_payload_from_csv_sample(self._csv_initial_states.take(indices))
         if int(payload.ip0.shape[0]) != self.batch_size:
             raise ValueError(f"reset_to_csv_indices count must equal batch_size={self.batch_size}")
         return self._reset_from_payload(payload)
@@ -232,22 +232,25 @@ class TokamakMagneticControlEnv:
 
     def _sample_reset_payload(self, count: int) -> ResetPayload:
         if self._csv_initial_states is not None:
-            reset = self._csv_initial_states.sample(self.rng, count=int(count))
-            return ResetPayload(
-                ip0=reset.ip0,
-                pfc0=reset.pfc0,
-                sol0=reset.sol0,
-                params0=np.zeros((int(count), 5), dtype=float),
-                reference_seed=int(self.rng.integers(0, 2**31 - 1)),
-                shot_ids=reset.shot_ids,
-                source_indices=reset.source_indices,
-                source_times_s=reset.source_times_s,
-                difficulty_bins=reset.difficulty_bins,
-            )
+            return self._reset_payload_from_csv_sample(self._csv_initial_states.sample(self.rng, count=int(count)))
         if self.config.sim.initial_ranges is None:
             raise ValueError("training config must provide replay-bounded initial_ranges")
         ip0, pfc0, sol0, params0 = sample_initial_conditions(self.rng, self.config.sim.initial_ranges, int(count))
         return ResetPayload(ip0=ip0, pfc0=pfc0, sol0=sol0, params0=params0, reference_seed=int(self.rng.integers(0, 2**31 - 1)))
+
+    def _reset_payload_from_csv_sample(self, reset: CsvInitialStateSample) -> ResetPayload:
+        count = int(reset.ip0.shape[0])
+        return ResetPayload(
+            ip0=reset.ip0,
+            pfc0=reset.pfc0,
+            sol0=reset.sol0,
+            params0=np.zeros((count, 5), dtype=float),
+            reference_seed=int(self.rng.integers(0, 2**31 - 1)),
+            shot_ids=reset.shot_ids,
+            source_indices=reset.source_indices,
+            source_times_s=reset.source_times_s,
+            difficulty_bins=reset.difficulty_bins,
+        )
 
     def _set_reset_currents(self, *, pfc0: np.ndarray, sol0: np.ndarray, indices: Tensor | None = None) -> None:
         current0 = torch.as_tensor(np.concatenate([pfc0, sol0], axis=1), dtype=torch.float32, device=self.device)

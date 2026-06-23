@@ -21,6 +21,7 @@ from tokamak_rl_v2.training.policy_pipeline import _ArrayReferenceScenario, _wri
 from tokamak_rl_v2.training.replay import FIFOSequenceReplay, SequenceBatch
 from tokamak_rl_v2.training.trainer import Trainer, _append_csv_row
 from tokamak_rl_v2.env.references import T15ReplayBoundaryLibrary, _segmented_ip, _segment_lengths, generate_reference_batch
+from tokamak_rl_v2.env.t15_csv_initial_states import CsvInitialStateSample
 from tokamak_rl_v2.training.cli import _device_list
 
 
@@ -139,6 +140,29 @@ def test_tcv_derivative_current_termination_grace_one_is_immediate() -> None:
     )
     assert terminated.tolist() == [False, True]
     assert grace.tolist() == [False, True]
+
+
+def test_exact_csv_reset_sample_is_wrapped_as_reset_payload() -> None:
+    env = object.__new__(TokamakMagneticControlEnv)
+    env.rng = np.random.default_rng(123)
+    sample = CsvInitialStateSample(
+        ip0=np.asarray([1.0, 2.0], dtype=float),
+        pfc0=np.zeros((2, 6), dtype=float),
+        sol0=np.ones((2, 3), dtype=float),
+        shot_ids=("3856", "3864"),
+        source_indices=(10, 20),
+        source_times_s=(0.1, 0.2),
+        difficulty_bins=("flat", "fast_up"),
+    )
+
+    payload = TokamakMagneticControlEnv._reset_payload_from_csv_sample(env, sample)
+
+    assert payload.params0.shape == (2, 5)
+    assert np.all(payload.params0 == 0.0)
+    assert payload.shot_ids == sample.shot_ids
+    assert payload.source_indices == sample.source_indices
+    assert payload.source_times_s == sample.source_times_s
+    assert payload.difficulty_bins == sample.difficulty_bins
 
 
 def test_critic_reads_normalized_env_actions_without_extra_squash() -> None:
