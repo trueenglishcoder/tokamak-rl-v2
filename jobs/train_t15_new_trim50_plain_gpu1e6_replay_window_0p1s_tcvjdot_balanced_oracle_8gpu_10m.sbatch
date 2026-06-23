@@ -88,6 +88,16 @@ cfg["training"]["save_checkpoints"] = True
 cfg["training"]["early_stop_patience_evals"] = 0
 cfg["training"]["early_stop_min_delta"] = 0.0
 
+boundary_override_keys = sorted(
+    key for key in cfg["sim"]
+    if str(key).startswith("boundary_soft_level_") or str(key) == "boundary_smooth_selected_level"
+)
+if boundary_override_keys:
+    raise SystemExit(
+        "trim50 training config must not set RL-side boundary soft/smoothing overrides: "
+        + ", ".join(boundary_override_keys)
+    )
+
 checks = {
     "trim50_config_copy": cfg["sim"]["config_path"].endswith("/generated_configs/T15MD_new_data.toml"),
     "trim50_reset_library": "trim50_plain_gpu1e6" in str(cfg["sim"]["csv_initial_state_library"]),
@@ -142,7 +152,11 @@ srun \
 
     python3 - <<PYCHECK
 from pathlib import Path
+from dataclasses import replace
+import math
+import torch
 from tokamak_rl_v2.config import load_experiment_config
+from tokamak_rl_v2.env import TokamakMagneticControlEnv
 
 cfg = load_experiment_config("/workspace/tokamak-rl-v2/${GENERATED_CONFIG}")
 print("preflight config_path", cfg.sim.config_path)
@@ -159,6 +173,31 @@ required = [
 missing = [str(p) for p in required if p is None or not Path(p).exists()]
 if missing:
     raise SystemExit("generated trim50 training config has missing paths inside container: " + ", ".join(missing))
+
+env_cfg = replace(cfg, sim=replace(cfg.sim, gpu_device="cuda:0"))
+env = TokamakMagneticControlEnv(env_cfg, batch_size=1, device="cuda:0", seed=int(cfg.training.seed))
+print("preflight boundary_mode", env.cfg.boundary_mode)
+print("preflight boundary_base_mode", env.cfg.boundary_base_mode)
+print("preflight boundary_legacy_precision_index2", env.cfg.boundary_legacy_precision_index2)
+print("preflight boundary_smooth_selected_level", env.cfg.boundary_smooth_selected_level)
+print("preflight boundary_soft_level_selection", env.cfg.boundary_soft_level_selection)
+if not math.isclose(float(env.cfg.boundary_legacy_precision_index2), 1.0e-6, rel_tol=0.0, abs_tol=1.0e-12):
+    raise SystemExit(
+        "trim50 plain-gpu1e6 training must use boundary.legacy_precision_index2=1e-6; "
+        f"loaded {env.cfg.boundary_legacy_precision_index2}"
+    )
+if str(env.cfg.boundary_mode) == "tracked_flux_contour":
+    raise SystemExit("trim50 plain-gpu1e6 training must not use tracked_flux_contour boundary mode")
+if bool(env.cfg.boundary_smooth_selected_level):
+    raise SystemExit("trim50 plain-gpu1e6 training must not use boundary.smooth_selected_level")
+if bool(env.cfg.boundary_soft_level_selection):
+    raise SystemExit("trim50 plain-gpu1e6 training must not use boundary.soft_level_selection")
+obs = env.reset()
+critic_obs = env.critic_obs()
+print("preflight env_reset_ok", "obs_dim", tuple(obs.shape), "critic_obs_dim", tuple(critic_obs.shape), "action_dim", env.action_dim)
+del env, obs, critic_obs
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
 PYCHECK
 
     python3 - <<PYCUDA
