@@ -14,6 +14,7 @@ cd /scratch/$USER/tokamak/tokamak-rl-v2
 mkdir -p slurm_logs outputs
 
 export SOURCE_CONFIG=${SOURCE_CONFIG:-configs/experiments/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_mpo_balanced.yaml}
+export TRIM_MACHINE_CONFIG=${TRIM_MACHINE_CONFIG:-../tokamak-sim/runs/t15md_trim50_plain_gpu_1e6_setup/T15MD_new_data_trim50_plain_gpu_1e6_3856.toml}
 export RESET_LIBRARY=${RESET_LIBRARY:-data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_initial_states.npz}
 export ORACLE_TARGETS=${ORACLE_TARGETS:-data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_targets/t15_replay_window_oracle_targets.npz}
 export RUN_NAME=${RUN_NAME:-t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_10m_${SLURM_JOB_ID:-manual}}
@@ -36,6 +37,10 @@ if [[ ! -f "${SOURCE_CONFIG}" ]]; then
   echo "run the trim50 oracle target build job first" >&2
   exit 2
 fi
+if [[ ! -f "${TRIM_MACHINE_CONFIG}" ]]; then
+  echo "missing trim50 machine config: ${TRIM_MACHINE_CONFIG}" >&2
+  exit 2
+fi
 if [[ ! -f "${RESET_LIBRARY}" ]]; then
   echo "missing trim50 oracle reset library: ${RESET_LIBRARY}" >&2
   exit 2
@@ -50,6 +55,7 @@ if (( NUM_ENVS % WORLD_SIZE != 0 )); then
 fi
 
 mkdir -p "$(dirname "${GENERATED_CONFIG}")"
+cp "${TRIM_MACHINE_CONFIG}" "$(dirname "${GENERATED_CONFIG}")/T15MD_new_data.toml"
 python3 - <<PYCFG
 import json
 from pathlib import Path
@@ -59,6 +65,9 @@ out = Path("${GENERATED_CONFIG}")
 cfg = json.loads(source.read_text(encoding="utf-8"))
 
 cfg["name"] = "t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_10m"
+cfg["sim"]["config_path"] = "/workspace/tokamak-rl-v2/${TRAIN_OUTPUT}/generated_configs/T15MD_new_data.toml"
+cfg["sim"]["csv_initial_state_library"] = "/workspace/tokamak-rl-v2/${RESET_LIBRARY}"
+cfg["reference"]["boundary"]["replay_reference_dir"] = "/workspace/tokamak-rl-v2/data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_targets"
 cfg["training"]["steps"] = int("${TRAIN_ENV_STEPS}")
 cfg["training"]["num_envs"] = int("${NUM_ENVS}")
 cfg["training"]["output_dir"] = "/workspace/tokamak-rl-v2/${TRAIN_OUTPUT}"
@@ -75,7 +84,7 @@ cfg["training"]["early_stop_patience_evals"] = 0
 cfg["training"]["early_stop_min_delta"] = 0.0
 
 checks = {
-    "trim50_config": "trim50_plain_gpu_1e6" in str(cfg["sim"]["config_path"]),
+    "trim50_config_copy": cfg["sim"]["config_path"].endswith("/generated_configs/T15MD_new_data.toml"),
     "trim50_reset_library": "trim50_plain_gpu1e6" in str(cfg["sim"]["csv_initial_state_library"]),
     "trim50_reference_dir": "trim50_plain_gpu1e6" in str(cfg["reference"]["boundary"]["replay_reference_dir"]),
     "replay_window_ip": cfg["reference"]["ip"]["kind"] == "replay_window",
