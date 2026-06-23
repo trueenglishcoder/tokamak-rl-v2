@@ -267,8 +267,10 @@ def _validate_contract(*, controller: LearnedMagneticController, env: TokamakMag
         raise ValueError(f"observation dimension mismatch: export={controller.obs_dim} env={env.obs_dim}")
     if controller.action_dim != env.action_dim:
         raise ValueError(f"action dimension mismatch: export={controller.action_dim} env={env.action_dim}")
-    if controller.n_pfc != env.n_pfc or controller.n_sol != env.n_sol:
-        raise ValueError(f"coil count mismatch: export=({controller.n_pfc}, {controller.n_sol}) env=({env.n_pfc}, {env.n_sol})")
+    env_n_pfc = int(env.cfg.pfc.n_coils)
+    env_n_sol = int(env.cfg.sol.n_coils)
+    if controller.n_pfc != env_n_pfc or controller.n_sol != env_n_sol:
+        raise ValueError(f"coil count mismatch: export=({controller.n_pfc}, {controller.n_sol}) env=({env_n_pfc}, {env_n_sol})")
     if not np.isclose(float(cfg.reference.t_step), 0.001):
         raise ValueError(f"expected local 1 ms timestep, got {cfg.reference.t_step}")
     if int(cfg.sim.max_episode_steps) != 100:
