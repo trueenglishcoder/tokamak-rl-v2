@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from tqdm.auto import tqdm
 
 from tokamak_rl_v2.config import load_experiment_config
 from tokamak_rl_v2.env import TokamakMagneticControlEnv
@@ -27,6 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--split", default="holdout", choices=("train", "holdout", "all"))
     ap.add_argument("--seed", type=int, default=386400)
     ap.add_argument("--device", default="cuda:0")
+    ap.add_argument("--no-progress", action="store_true", help="Disable per-policy rollout progress bars.")
     args = ap.parse_args(argv)
 
     if int(args.steps) <= 0:
@@ -43,9 +45,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     requested_episodes = int(args.episodes)
     if bool(args.all_windows) or requested_episodes <= 0:
+        print(f"Counting replay windows for split={args.split}...", flush=True)
         requested_episodes = _split_window_count(cfg=cfg, device=device, seed=int(args.seed))
     if requested_episodes <= 0:
         raise ValueError("requested split has no windows")
+    print(
+        f"Evaluating {requested_episodes} windows for {args.steps} steps on {device}.",
+        flush=True,
+    )
 
     policies = ["zero", "oracle"]
     trainer: Trainer | None = None
@@ -77,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
     window_rows: list[dict[str, object]] = []
     q_summary: dict[str, float] = {}
     for policy in policies:
+        print(f"Starting policy={policy}...", flush=True)
         metrics, per_category, q_values, per_window = _evaluate_policy(
             cfg=cfg,
             trainer=trainer,
@@ -86,7 +94,9 @@ def main(argv: list[str] | None = None) -> int:
             seed=int(args.seed),
             device=device,
             critic_available=critic_available,
+            show_progress=not bool(args.no_progress),
         )
+        print(f"Finished policy={policy}.", flush=True)
         policy_metrics[policy] = metrics
         for category, row in per_category.items():
             category_rows.append({"policy": policy, "category": category, **row})
@@ -133,8 +143,14 @@ def _evaluate_policy(
     seed: int,
     device: torch.device,
     critic_available: bool = True,
+    show_progress: bool = True,
 ) -> tuple[dict[str, float], dict[str, dict[str, float]], dict[str, float], list[dict[str, object]]]:
+    print(
+        f"  building env for policy={policy}, episodes={episodes}, steps={steps}, device={device}",
+        flush=True,
+    )
     env = TokamakMagneticControlEnv(cfg, batch_size=int(episodes), device=device, seed=int(seed))
+    print(f"  resetting {episodes} replay windows for policy={policy}", flush=True)
     obs = env.reset_to_csv_indices(np.arange(int(episodes), dtype=np.int64))
     metadata = list(env.reset_metadata)
     categories = [str(row.get("difficulty_bin") or "unknown") for row in metadata]
@@ -182,7 +198,15 @@ def _evaluate_policy(
     q_rank_count = 0
     critic_state = trainer.critic.zero_state(env.batch_size, device) if policy == "policy" and trainer is not None and critic_available else None
     active = torch.ones((env.batch_size,), dtype=torch.bool, device=device)
-    for step in range(int(steps)):
+    step_iter = tqdm(
+        range(int(steps)),
+        desc=f"{policy} rollout",
+        unit="step",
+        disable=not bool(show_progress),
+        dynamic_ncols=True,
+        mininterval=1.0,
+    )
+    for step in step_iter:
         if policy == "zero":
             action = torch.zeros((env.batch_size, env.action_dim), dtype=torch.float32, device=device)
         elif policy == "oracle":
