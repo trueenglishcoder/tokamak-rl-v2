@@ -1,0 +1,203 @@
+#!/bin/bash
+#SBATCH --job-name=tokamak-rl-v2-tcvj-trim50-gpu1e6
+#SBATCH --partition=batch
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --gres=gpu:8
+#SBATCH --cpus-per-task=16
+#SBATCH --output=slurm_logs/tokamak-rl-v2-tcvj-trim50-gpu1e6-8gpu-10m-%j.out
+#SBATCH --error=slurm_logs/tokamak-rl-v2-tcvj-trim50-gpu1e6-8gpu-10m-%j.err
+
+set -euo pipefail
+
+cd /scratch/$USER/tokamak/tokamak-rl-v2
+mkdir -p slurm_logs outputs
+
+export SOURCE_CONFIG=${SOURCE_CONFIG:-configs/experiments/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_mpo_balanced.yaml}
+export RESET_LIBRARY=${RESET_LIBRARY:-data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_initial_states.npz}
+export ORACLE_TARGETS=${ORACLE_TARGETS:-data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_targets/t15_replay_window_oracle_targets.npz}
+export RUN_NAME=${RUN_NAME:-t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_10m_${SLURM_JOB_ID:-manual}}
+export TRAIN_OUTPUT=${TRAIN_OUTPUT:-outputs/${RUN_NAME}}
+export GENERATED_CONFIG=${GENERATED_CONFIG:-${TRAIN_OUTPUT}/generated_configs/${RUN_NAME}.json}
+export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-tokamak-rl-v2-tcvjdot-trim50-gpu1e6-balanced-8gpu-10m-${SLURM_JOB_ID:-manual}}
+export TRAIN_ENV_STEPS=${TRAIN_ENV_STEPS:-10000000}
+export EVAL_ENV_STEPS=${EVAL_ENV_STEPS:-500000}
+export CHECKPOINT_ENV_STEPS=${CHECKPOINT_ENV_STEPS:-1000000}
+export NUM_ENVS=${NUM_ENVS:-2048}
+export GPUS_PER_NODE=8
+export WORLD_SIZE=8
+export WANDB_MODE=${WANDB_MODE:-online}
+export MASTER_ADDR=127.0.0.1
+export MASTER_PORT=${MASTER_PORT:-29593}
+export HOLDOUT_EVAL_EPISODES=${HOLDOUT_EVAL_EPISODES:-1239}
+
+if [[ ! -f "${SOURCE_CONFIG}" ]]; then
+  echo "missing trim50 training config: ${SOURCE_CONFIG}" >&2
+  echo "run the trim50 oracle target build job first" >&2
+  exit 2
+fi
+if [[ ! -f "${RESET_LIBRARY}" ]]; then
+  echo "missing trim50 oracle reset library: ${RESET_LIBRARY}" >&2
+  exit 2
+fi
+if [[ ! -f "${ORACLE_TARGETS}" ]]; then
+  echo "missing trim50 oracle targets: ${ORACLE_TARGETS}" >&2
+  exit 2
+fi
+if (( NUM_ENVS % WORLD_SIZE != 0 )); then
+  echo "NUM_ENVS=${NUM_ENVS} must be divisible by WORLD_SIZE=${WORLD_SIZE}" >&2
+  exit 2
+fi
+
+mkdir -p "$(dirname "${GENERATED_CONFIG}")"
+python3 - <<PYCFG
+import json
+from pathlib import Path
+
+source = Path("${SOURCE_CONFIG}")
+out = Path("${GENERATED_CONFIG}")
+cfg = json.loads(source.read_text(encoding="utf-8"))
+
+cfg["name"] = "t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_10m"
+cfg["training"]["steps"] = int("${TRAIN_ENV_STEPS}")
+cfg["training"]["num_envs"] = int("${NUM_ENVS}")
+cfg["training"]["output_dir"] = "/workspace/tokamak-rl-v2/${TRAIN_OUTPUT}"
+cfg["training"]["eval_interval_steps"] = int("${EVAL_ENV_STEPS}")
+cfg["training"]["checkpoint_interval_steps"] = int("${CHECKPOINT_ENV_STEPS}")
+cfg["training"]["milestone_checkpoint_interval_steps"] = int("${CHECKPOINT_ENV_STEPS}")
+cfg["training"]["eval_checkpoint_top_k"] = 10
+cfg["training"]["keep_latest_checkpoint"] = True
+cfg["training"]["distributed_mode"] = "local_replay"
+cfg["training"]["production_mode"] = True
+cfg["training"]["eval_max_steps"] = 100
+cfg["training"]["save_checkpoints"] = True
+cfg["training"]["early_stop_patience_evals"] = 0
+cfg["training"]["early_stop_min_delta"] = 0.0
+
+checks = {
+    "trim50_config": "trim50_plain_gpu_1e6" in str(cfg["sim"]["config_path"]),
+    "trim50_reset_library": "trim50_plain_gpu1e6" in str(cfg["sim"]["csv_initial_state_library"]),
+    "trim50_reference_dir": "trim50_plain_gpu1e6" in str(cfg["reference"]["boundary"]["replay_reference_dir"]),
+    "replay_window_ip": cfg["reference"]["ip"]["kind"] == "replay_window",
+    "replay_window_boundary": cfg["reference"]["boundary"]["kind"] == "t15_replay_segment_conditioned",
+    "jdot_command": cfg["sim"]["action_contract"] == "jdot_command",
+    "episode_steps_100": int(cfg["sim"]["max_episode_steps"]) == 100,
+    "duration_0p1": abs(float(cfg["reference"]["duration_s"]) - 0.1) < 1e-12,
+    "actor_obs_v6": cfg["observation"]["actor_kind"] == "controller_state_v6",
+    "critic_obs_v2": cfg["observation"]["critic_kind"] == "compact_training_state_v2",
+    "reward_tcv": cfg["reward"]["kind"] == "tcv_derivative",
+}
+failed = [name for name, ok in checks.items() if not ok]
+if failed:
+    raise SystemExit(f"trim50 training config failed invariant checks: {failed}")
+
+out.parent.mkdir(parents=True, exist_ok=True)
+out.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+print(out)
+PYCFG
+
+echo "job_id=${SLURM_JOB_ID:-manual}"
+echo "run_name=${RUN_NAME}"
+echo "train_output=${TRAIN_OUTPUT}"
+echo "source_config=${SOURCE_CONFIG}"
+echo "generated_config=${GENERATED_CONFIG}"
+echo "wandb_project=${WANDB_PROJECT_NAME}"
+echo "train_env_steps=${TRAIN_ENV_STEPS}"
+echo "num_envs=${NUM_ENVS}"
+echo "world_size=${WORLD_SIZE}"
+echo "local_envs_per_rank=$(( NUM_ENVS / WORLD_SIZE ))"
+echo "holdout_eval_episodes=${HOLDOUT_EVAL_EPISODES}"
+
+srun \
+  --container-image /scratch/$USER/tokamak/tokamak-rl-v2.sqsh \
+  --container-mounts /scratch/$USER/tokamak:/workspace,/dev:/dev,/lib/x86_64-linux-gnu:/host-libs \
+  bash -lc '
+    set -euo pipefail
+    mkdir -p /tmp/nvidia-lib
+    ln -sf /host-libs/libcuda.so.1 /tmp/nvidia-lib/libcuda.so.1
+    ln -sf /tmp/nvidia-lib/libcuda.so.1 /tmp/nvidia-lib/libcuda.so
+    ln -sf /host-libs/libnvidia-ml.so.1 /tmp/nvidia-lib/libnvidia-ml.so.1
+    ln -sf /tmp/nvidia-lib/libnvidia-ml.so.1 /tmp/nvidia-lib/libnvidia-ml.so
+    export LD_LIBRARY_PATH=/tmp/nvidia-lib:${LD_LIBRARY_PATH:-}
+    export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+    export PYTHONPATH=/workspace/tokamak-sim:/workspace/tokamak-rl-v2:${PYTHONPATH:-}
+    export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
+    export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+    export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
+    cd /workspace/tokamak-rl-v2
+
+    python3 - <<PYCUDA
+import torch
+count = torch.cuda.device_count()
+print("cuda_available", torch.cuda.is_available(), "device_count", count)
+print("devices", [torch.cuda.get_device_name(i) for i in range(count)])
+if count < 8:
+    raise SystemExit(f"expected 8 visible CUDA devices, got {count}")
+PYCUDA
+
+    python3 -m torch.distributed.run \
+      --nnodes 1 \
+      --nproc_per_node 8 \
+      --master_addr "${MASTER_ADDR}" \
+      --master_port "${MASTER_PORT}" \
+      scripts/train_policy_pipeline.py \
+        --config "/workspace/tokamak-rl-v2/${GENERATED_CONFIG}" \
+        --output-dir "/workspace/tokamak-rl-v2/${TRAIN_OUTPUT}" \
+        --steps "${TRAIN_ENV_STEPS}" \
+        --device cuda:0 \
+        --sim-compute-backend gpu \
+        --sim-gpu-device cuda \
+        --num-envs "${NUM_ENVS}" \
+        --distributed-mode local_replay \
+        --actor-workers 1 \
+        --batch-size 32 \
+        --unroll-length 100 \
+        --min-replay-sequence-length 100 \
+        --replay-capacity-episodes 1024 \
+        --rollout-chunk-length 100 \
+        --updates-per-rollout-chunk 64 \
+        --hidden-dim 256 \
+        --critic-hidden-dim 256 \
+        --critic-mlp-hidden-dim 256 \
+        --action-samples 64 \
+        --actor-update-chunk-size 2048 \
+        --save-checkpoints \
+        --checkpoint-interval-steps "${CHECKPOINT_ENV_STEPS}" \
+        --eval-interval-steps "${EVAL_ENV_STEPS}" \
+        --eval-episodes "${HOLDOUT_EVAL_EPISODES}" \
+        --eval-max-steps 100 \
+        --controller-rollout-steps 0 \
+        --wandb \
+        --wandb-project "${WANDB_PROJECT_NAME}" \
+        --wandb-name "${RUN_NAME}" \
+        --wandb-group "${RUN_NAME}" \
+        --wandb-mode "${WANDB_MODE}" \
+        --wandb-optional \
+        --wandb-metric-preset focused
+  '
+
+if [[ -d "${TRAIN_OUTPUT}/exports/best_actor" ]]; then
+  srun \
+    --ntasks=1 \
+    --container-image /scratch/$USER/tokamak/tokamak-rl-v2.sqsh \
+    --container-mounts /scratch/$USER/tokamak:/workspace,/dev:/dev,/lib/x86_64-linux-gnu:/host-libs \
+    bash -lc '
+      set -euo pipefail
+      mkdir -p /tmp/nvidia-lib
+      ln -sf /host-libs/libcuda.so.1 /tmp/nvidia-lib/libcuda.so.1
+      ln -sf /tmp/nvidia-lib/libcuda.so.1 /tmp/nvidia-lib/libcuda.so
+      export LD_LIBRARY_PATH=/tmp/nvidia-lib:${LD_LIBRARY_PATH:-}
+      export PYTHONPATH=/workspace/tokamak-sim:/workspace/tokamak-rl-v2:${PYTHONPATH:-}
+      cd /workspace/tokamak-rl-v2
+      python3 scripts/evaluate_replay_window_oracle_baselines.py \
+        --config "/workspace/tokamak-rl-v2/${GENERATED_CONFIG}" \
+        --export-dir "/workspace/tokamak-rl-v2/${TRAIN_OUTPUT}/exports/best_actor" \
+        --output-dir "/workspace/tokamak-rl-v2/${TRAIN_OUTPUT}/oracle_baseline_eval_best_actor" \
+        --all-windows \
+        --steps 100 \
+        --split holdout \
+        --device cuda:0
+    ' || echo "post-training oracle best-actor diagnostic failed; training artifacts remain valid" >&2
+else
+  echo "best actor export not found, skipping oracle best-actor diagnostic: ${TRAIN_OUTPUT}/exports/best_actor" >&2
+fi
