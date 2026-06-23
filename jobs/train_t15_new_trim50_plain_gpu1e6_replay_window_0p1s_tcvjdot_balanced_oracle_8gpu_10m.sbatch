@@ -105,6 +105,27 @@ out.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 print(out)
 PYCFG
 
+python3 - <<PYCHECK
+from pathlib import Path
+from tokamak_rl_v2.config import load_experiment_config
+
+cfg = load_experiment_config("${GENERATED_CONFIG}")
+print("preflight config_path", cfg.sim.config_path)
+print("preflight reset_library", cfg.sim.csv_initial_state_library)
+print("preflight replay_reference_dir", cfg.reference.boundary.replay_reference_dir)
+print("preflight action_contract", cfg.sim.action_contract)
+print("preflight steps", cfg.training.steps, "num_envs", cfg.training.num_envs)
+
+required = [
+    cfg.sim.config_path,
+    cfg.sim.csv_initial_state_library,
+    cfg.reference.boundary.replay_reference_dir,
+]
+missing = [str(p) for p in required if p is None or not Path(p).exists()]
+if missing:
+    raise SystemExit("generated trim50 training config has missing paths: " + ", ".join(missing))
+PYCHECK
+
 echo "job_id=${SLURM_JOB_ID:-manual}"
 echo "run_name=${RUN_NAME}"
 echo "train_output=${TRAIN_OUTPUT}"
