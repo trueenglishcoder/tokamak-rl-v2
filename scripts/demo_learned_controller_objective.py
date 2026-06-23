@@ -63,6 +63,8 @@ def main(argv: list[str] | None = None) -> int:
     steps = int(args.steps) if int(args.steps) > 0 else int(cfg.sim.max_episode_steps)
 
     controller = LearnedMagneticController(export_dir=export_dir)
+    coil_data_root = _resolve_coil_data_root(args.coil_data_root)
+    coil_cache: dict[str, np.ndarray | None] = {}
     episode_summaries: list[dict[str, Any]] = []
     all_rows: list[dict[str, Any]] = []
     boundary_snapshots: list[dict[str, Any]] = []
@@ -104,8 +106,19 @@ def main(argv: list[str] | None = None) -> int:
             sol_now = np.asarray(model.state.sol_currents, dtype=float).reshape(-1)
             pfc_next = np.asarray(action.pfc_currents_next, dtype=float).reshape(-1)
             sol_next = np.asarray(action.sol_currents_next, dtype=float).reshape(-1)
+            current_next = np.concatenate([pfc_next, sol_next])
             physical_derivs = np.concatenate([pfc_next - pfc_now, sol_next - sol_now]) / float(model.t_step)
             normalized_action = physical_derivs / np.where(np.abs(derivative_limits) > 0.0, derivative_limits, 1.0)
+            oracle = _oracle_transition(
+                coil_data_root=coil_data_root,
+                coil_cache=coil_cache,
+                reset_meta=reset_meta,
+                step=step,
+                dt=float(model.t_step),
+                n_pfc=pfc_now.shape[0],
+                n_sol=sol_now.shape[0],
+                derivative_limits=derivative_limits,
+            )
             model.step_currents(pfc_currents_next=pfc_next, sol_currents_next=sol_next)
 
             next_index = min(step + 1, ref_ip.shape[0] - 1)
@@ -137,6 +150,15 @@ def main(argv: list[str] | None = None) -> int:
                 "action_rms": float(np.sqrt(np.mean(np.square(normalized_action)))),
                 "max_abs_action": float(np.nanmax(np.abs(normalized_action))),
             }
+            _add_action_comparison(
+                row=row,
+                normalized_action=normalized_action,
+                physical_derivs=physical_derivs,
+                current_next=current_next,
+                oracle=oracle,
+                n_pfc=pfc_now.shape[0],
+                n_sol=sol_now.shape[0],
+            )
             all_rows.append(row)
             if episode == 0 and step in {0, max(0, steps // 2), max(0, steps - 1)}:
                 boundary_snapshots.append(
@@ -163,6 +185,7 @@ def main(argv: list[str] | None = None) -> int:
         episodes=episode_summaries,
         rows=all_rows,
         steps=steps,
+        coil_data_root=coil_data_root,
     )
     (out_dir / "controller_rollout_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     _write_report(out_dir / "controller_rollout_report.md", summary=summary)
@@ -181,8 +204,198 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     ap.add_argument("--steps", type=int, default=0, help="0 means full sim.max_episode_steps.")
     ap.add_argument("--seed", type=int, default=910000)
     ap.add_argument("--split", default="holdout", choices=("train", "holdout", "all"))
+    ap.add_argument(
+        "--coil-data-root",
+        help=(
+            "Directory containing T15 coil CSVs. Accepts either data/t15_data_new "
+            "or data/t15_data_new/coils. If omitted, common local/server paths are tried."
+        ),
+    )
     ap.add_argument("--stop-on-failure", action="store_true", help="Stop each episode when boundary is lost.")
     return ap.parse_args(argv)
+
+
+def _resolve_coil_data_root(raw: str | None) -> Path | None:
+    if raw:
+        root = Path(raw).expanduser().resolve()
+        if _coils_dir(root).is_dir():
+            return root
+        raise FileNotFoundError(f"could not find coil CSV directory under {root}")
+
+    script_root = Path(__file__).resolve().parents[2]
+    candidates = [
+        Path("/workspace/tokamak-sim/data/t15_data_new"),
+        Path("/workspace/tokamak-sim/data/t15_data_new/coils"),
+        script_root / "tokamak-sim/data/t15_data_new",
+        script_root / "tokamak-sim/data/t15_data_new/coils",
+        Path.cwd().parent / "tokamak-sim/data/t15_data_new",
+        Path.cwd().parent / "tokamak-sim/data/t15_data_new/coils",
+    ]
+    for candidate in candidates:
+        if _coils_dir(candidate).is_dir():
+            return candidate.resolve()
+    return None
+
+
+def _coils_dir(root: Path) -> Path:
+    return root if root.name == "coils" else root / "coils"
+
+
+def _oracle_transition(
+    *,
+    coil_data_root: Path | None,
+    coil_cache: dict[str, np.ndarray | None],
+    reset_meta: dict[str, Any],
+    step: int,
+    dt: float,
+    n_pfc: int,
+    n_sol: int,
+    derivative_limits: np.ndarray,
+) -> dict[str, np.ndarray] | None:
+    source_time = reset_meta.get("source_time_s", "")
+    try:
+        t0 = float(source_time) + int(step) * float(dt)
+    except (TypeError, ValueError):
+        return None
+    shot_id = _normalize_shot_id(reset_meta.get("shot_id", ""))
+    if not shot_id:
+        return None
+    coil_table = _load_coil_table(coil_data_root, shot_id, coil_cache)
+    if coil_table is None:
+        return None
+    currents = _currents_at_times(coil_table, np.asarray([t0, t0 + float(dt)], dtype=float), n_pfc=n_pfc, n_sol=n_sol)
+    if currents is None:
+        return None
+    jdot = (currents[1] - currents[0]) / float(dt)
+    scale = np.where(np.abs(derivative_limits) > 0.0, derivative_limits, 1.0)
+    return {
+        "action": jdot / scale,
+        "jdot": jdot,
+        "current_next": currents[1],
+    }
+
+
+def _normalize_shot_id(value: Any) -> str:
+    if value in ("", None):
+        return ""
+    try:
+        return str(int(float(value)))
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _load_coil_table(root: Path | None, shot_id: str, cache: dict[str, np.ndarray | None]) -> np.ndarray | None:
+    if root is None:
+        return None
+    if shot_id not in cache:
+        path = _coils_dir(root) / f"t15md_{shot_id}_coils.csv"
+        if not path.is_file():
+            cache[shot_id] = None
+        else:
+            cache[shot_id] = np.loadtxt(path, delimiter=";")
+    return cache[shot_id]
+
+
+def _currents_at_times(coil_table: np.ndarray, times: np.ndarray, *, n_pfc: int, n_sol: int) -> np.ndarray | None:
+    table = np.asarray(coil_table, dtype=float)
+    expected_cols = 1 + int(n_sol) + int(n_pfc)
+    if table.ndim != 2 or table.shape[1] != expected_cols or table.shape[0] < 2:
+        return None
+    t = table[:, 0]
+    if np.any(np.diff(t) <= 0.0):
+        order = np.argsort(t)
+        table = table[order]
+        t = table[:, 0]
+    eps = 1.0e-9
+    if float(np.min(times)) < float(t[0]) - eps or float(np.max(times)) > float(t[-1]) + eps:
+        return None
+
+    sol_cols = list(range(1, 1 + int(n_sol)))
+    pfc_cols = list(range(1 + int(n_sol), expected_cols))
+    ordered_cols = pfc_cols + sol_cols
+    currents = np.empty((times.shape[0], len(ordered_cols)), dtype=float)
+    for out_col, table_col in enumerate(ordered_cols):
+        currents[:, out_col] = np.interp(times, t, table[:, table_col])
+    return currents
+
+
+def _add_action_comparison(
+    *,
+    row: dict[str, Any],
+    normalized_action: np.ndarray,
+    physical_derivs: np.ndarray,
+    current_next: np.ndarray,
+    oracle: dict[str, np.ndarray] | None,
+    n_pfc: int,
+    n_sol: int,
+) -> None:
+    labels = _coil_labels(n_pfc=n_pfc, n_sol=n_sol)
+    _put_vector(row, "action", normalized_action, labels)
+    _put_vector(row, "jdot", physical_derivs, labels, suffix="_aps")
+    _put_vector(row, "current_next", current_next, labels, suffix="_a")
+
+    if oracle is None:
+        row.update(
+            {
+                "oracle_available": 0.0,
+                "oracle_action_rms": "",
+                "oracle_max_abs_action": "",
+                "action_oracle_rmse": "",
+                "jdot_oracle_rmse_aps": "",
+                "current_next_oracle_rmse_a": "",
+                "action_oracle_cosine": "",
+            }
+        )
+        _put_vector(row, "oracle_action", None, labels)
+        _put_vector(row, "oracle_jdot", None, labels, suffix="_aps")
+        _put_vector(row, "oracle_current_next", None, labels, suffix="_a")
+        _put_vector(row, "action_error", None, labels)
+        _put_vector(row, "jdot_error", None, labels, suffix="_aps")
+        _put_vector(row, "current_next_error", None, labels, suffix="_a")
+        return
+
+    oracle_action = np.asarray(oracle["action"], dtype=float)
+    oracle_jdot = np.asarray(oracle["jdot"], dtype=float)
+    oracle_current_next = np.asarray(oracle["current_next"], dtype=float)
+    action_error = normalized_action - oracle_action
+    jdot_error = physical_derivs - oracle_jdot
+    current_error = current_next - oracle_current_next
+    denom = float(np.linalg.norm(normalized_action) * np.linalg.norm(oracle_action))
+    cosine = "" if denom <= 1.0e-12 else float(np.dot(normalized_action, oracle_action) / denom)
+
+    row.update(
+        {
+            "oracle_available": 1.0,
+            "oracle_action_rms": float(np.sqrt(np.mean(np.square(oracle_action)))),
+            "oracle_max_abs_action": float(np.nanmax(np.abs(oracle_action))),
+            "action_oracle_rmse": float(np.sqrt(np.mean(np.square(action_error)))),
+            "jdot_oracle_rmse_aps": float(np.sqrt(np.mean(np.square(jdot_error)))),
+            "current_next_oracle_rmse_a": float(np.sqrt(np.mean(np.square(current_error)))),
+            "action_oracle_cosine": cosine,
+        }
+    )
+    _put_vector(row, "oracle_action", oracle_action, labels)
+    _put_vector(row, "oracle_jdot", oracle_jdot, labels, suffix="_aps")
+    _put_vector(row, "oracle_current_next", oracle_current_next, labels, suffix="_a")
+    _put_vector(row, "action_error", action_error, labels)
+    _put_vector(row, "jdot_error", jdot_error, labels, suffix="_aps")
+    _put_vector(row, "current_next_error", current_error, labels, suffix="_a")
+
+
+def _coil_labels(*, n_pfc: int, n_sol: int) -> list[str]:
+    return [f"pfc{i}" for i in range(int(n_pfc))] + [f"sol{i}" for i in range(int(n_sol))]
+
+
+def _put_vector(row: dict[str, Any], prefix: str, values: np.ndarray | None, labels: list[str], *, suffix: str = "") -> None:
+    if values is None:
+        for label in labels:
+            row[f"{prefix}_{label}{suffix}"] = ""
+        return
+    arr = np.asarray(values, dtype=float).reshape(-1)
+    if arr.shape[0] != len(labels):
+        raise ValueError(f"{prefix} length {arr.shape[0]} does not match {len(labels)} coil labels")
+    for label, value in zip(labels, arr):
+        row[f"{prefix}_{label}{suffix}"] = float(value)
 
 
 def _ensure_export_dir(*, args: argparse.Namespace, out_dir: Path) -> Path:
@@ -270,16 +483,32 @@ def _summarize_episode(*, episode: int, rows: list[dict[str, Any]], completion: 
         "current_over_limit_a_max": _max(rows, "current_over_limit_a"),
         "current_usage_fraction_max": _max(rows, "current_usage_fraction"),
         "action_rms": _mean(rows, "action_rms"),
+        "oracle_available_mean": _mean(rows, "oracle_available"),
+        "oracle_action_rms": _mean(rows, "oracle_action_rms"),
+        "action_oracle_rmse": _mean(rows, "action_oracle_rmse"),
+        "jdot_oracle_rmse_aps": _mean(rows, "jdot_oracle_rmse_aps"),
+        "current_next_oracle_rmse_a": _mean(rows, "current_next_oracle_rmse_a"),
+        "action_oracle_cosine": _mean(rows, "action_oracle_cosine"),
     }
 
 
-def _summarize_all(*, export_dir: Path, config_path: Path, checkpoint: Path | None, episodes: list[dict[str, Any]], rows: list[dict[str, Any]], steps: int) -> dict[str, Any]:
+def _summarize_all(
+    *,
+    export_dir: Path,
+    config_path: Path,
+    checkpoint: Path | None,
+    episodes: list[dict[str, Any]],
+    rows: list[dict[str, Any]],
+    steps: int,
+    coil_data_root: Path | None,
+) -> dict[str, Any]:
     completions = np.asarray([float(ep["completion"]) for ep in episodes], dtype=float)
     return {
         "status": "ok",
         "config": str(config_path),
         "checkpoint": None if checkpoint is None else str(checkpoint),
         "export_dir": str(export_dir),
+        "coil_data_root": None if coil_data_root is None else str(coil_data_root),
         "episodes": len(episodes),
         "steps": int(steps),
         "mean_episode_completion": float(np.nanmean(completions)) if completions.size else float("nan"),
@@ -292,6 +521,12 @@ def _summarize_all(*, export_dir: Path, config_path: Path, checkpoint: Path | No
         "current_over_limit_a_max": _max(rows, "current_over_limit_a"),
         "current_usage_fraction_max": _max(rows, "current_usage_fraction"),
         "action_rms": _mean(rows, "action_rms"),
+        "oracle_available_mean": _mean(rows, "oracle_available"),
+        "oracle_action_rms": _mean(rows, "oracle_action_rms"),
+        "action_oracle_rmse": _mean(rows, "action_oracle_rmse"),
+        "jdot_oracle_rmse_aps": _mean(rows, "jdot_oracle_rmse_aps"),
+        "current_next_oracle_rmse_a": _mean(rows, "current_next_oracle_rmse_a"),
+        "action_oracle_cosine": _mean(rows, "action_oracle_cosine"),
         "episode_summaries": episodes,
     }
 
@@ -303,6 +538,7 @@ def _write_report(path: Path, *, summary: dict[str, Any]) -> None:
         f"- status: `{summary['status']}`",
         f"- checkpoint: `{summary['checkpoint']}`",
         f"- export_dir: `{summary['export_dir']}`",
+        f"- coil_data_root: `{summary['coil_data_root']}`",
         f"- episodes: `{summary['episodes']}`",
         f"- steps: `{summary['steps']}`",
         f"- mean_episode_completion: `{summary['mean_episode_completion']:.6g}`",
@@ -315,6 +551,12 @@ def _write_report(path: Path, *, summary: dict[str, Any]) -> None:
         f"- current_over_limit_a_max: `{summary['current_over_limit_a_max']:.6g}`",
         f"- current_usage_fraction_max: `{summary['current_usage_fraction_max']:.6g}`",
         f"- action_rms: `{summary['action_rms']:.6g}`",
+        f"- oracle_available_mean: `{summary['oracle_available_mean']:.6g}`",
+        f"- oracle_action_rms: `{summary['oracle_action_rms']:.6g}`",
+        f"- action_oracle_rmse: `{summary['action_oracle_rmse']:.6g}`",
+        f"- jdot_oracle_rmse_aps: `{summary['jdot_oracle_rmse_aps']:.6g}`",
+        f"- current_next_oracle_rmse_a: `{summary['current_next_oracle_rmse_a']:.6g}`",
+        f"- action_oracle_cosine: `{summary['action_oracle_cosine']:.6g}`",
         "",
         "## Files",
         "",
@@ -322,6 +564,10 @@ def _write_report(path: Path, *, summary: dict[str, Any]) -> None:
         "- `controller_rollout_summary.json`",
         "- `objective_overview.png`",
         "- `boundary_radii_episode0.png`",
+        "- `action_oracle_episode0.png`",
+        "",
+        "`controller_rollout.csv` includes learned per-coil normalized Jdot actions, physical Jdot, next-current commands,",
+        "and replay/oracle per-coil comparisons when coil CSVs are available.",
     ]
     path.write_text("\n".join(text) + "\n", encoding="utf-8")
 
@@ -392,6 +638,60 @@ def _plot(*, out_dir: Path, rows: list[dict[str, Any]], boundary_snapshots: list
         fig2.tight_layout()
         fig2.savefig(out_dir / "boundary_radii_episode0.png", dpi=160)
         plt.close(fig2)
+
+    _plot_action_oracle(out_dir=out_dir, rows=first_episode, t=t)
+
+
+def _plot_action_oracle(*, out_dir: Path, rows: list[dict[str, Any]], t: np.ndarray) -> None:
+    if not rows or not any(float(r.get("oracle_available", 0.0) or 0.0) > 0.0 for r in rows):
+        return
+    labels = _row_coil_labels(rows[0])
+    if not labels:
+        return
+
+    fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
+    for label in labels:
+        axes[0].plot(t, _series(rows, f"action_{label}"), label=label, linewidth=1.1)
+        axes[1].plot(t, _series(rows, f"oracle_action_{label}"), label=label, linewidth=1.1)
+
+    axes[0].set_ylabel("learned action")
+    axes[0].set_title("Episode 0 Learned Normalized Jdot Commands")
+    axes[0].grid(True, alpha=0.25)
+    axes[0].legend(ncol=3, fontsize=8)
+
+    axes[1].set_ylabel("replay action")
+    axes[1].set_title("Replay/Oracle Normalized Jdot Commands")
+    axes[1].grid(True, alpha=0.25)
+    axes[1].legend(ncol=3, fontsize=8)
+
+    axes[2].plot(t, _series(rows, "action_oracle_rmse"), label="normalized action RMSE")
+    axes[2].plot(t, _series(rows, "action_oracle_cosine"), label="cosine", alpha=0.85)
+    axes[2].set_ylabel("alignment")
+    axes[2].set_xlabel("time [s]")
+    axes[2].grid(True, alpha=0.25)
+    axes[2].legend(loc="best")
+
+    fig.tight_layout()
+    fig.savefig(out_dir / "action_oracle_episode0.png", dpi=160)
+    plt.close(fig)
+
+
+def _row_coil_labels(row: dict[str, Any]) -> list[str]:
+    labels: list[str] = []
+    for prefix in ("pfc", "sol"):
+        idx = 0
+        while f"action_{prefix}{idx}" in row:
+            labels.append(f"{prefix}{idx}")
+            idx += 1
+    return labels
+
+
+def _series(rows: list[dict[str, Any]], key: str) -> np.ndarray:
+    values: list[float] = []
+    for row in rows:
+        value = row.get(key, "")
+        values.append(float(value) if value != "" else float("nan"))
+    return np.asarray(values, dtype=float)
 
 
 if __name__ == "__main__":
