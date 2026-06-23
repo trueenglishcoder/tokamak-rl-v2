@@ -50,8 +50,8 @@
     }
   },
   "observation": {
-    "actor_kind": "controller_state_v5",
-    "critic_kind": "privileged_training_state_v1",
+    "actor_kind": "controller_state_v6",
+    "critic_kind": "compact_training_state_v2",
     "target_preview_steps": 10,
     "target_preview_stride": 10,
     "ip_rate_scale_aps": 500000.0,
@@ -61,12 +61,12 @@
     "kind": "tcv_derivative",
     "shape_mean_scale_m": 0.03,
     "shape_max_scale_m": 0.08,
-    "ip_scale_a": 25000.0,
+    "ip_scale_a": 15000.0,
     "boundary_missing_error_m": 1.0,
     "boundary_missing_weight": 20.0,
-    "shape_mean_weight": 3.2,
-    "shape_max_weight": 0.8,
-    "ip_weight": 1.8,
+    "shape_mean_weight": 2.4,
+    "shape_max_weight": 0.6,
+    "ip_weight": 3.0,
     "current_weight": 0.75,
     "derivative_weight": 0.1875,
     "current_usage_weight": 0.0,
@@ -81,7 +81,7 @@
     "terminal_remaining_cost": 0.0,
     "actuator_saturation_weight": 0.1875,
     "reward_scale": 0.01,
-    "smoothmax_alpha": -5.0
+    "smoothmax_alpha": -1.0
   },
   "randomization": {
     "enabled": false
@@ -100,7 +100,7 @@
     "actor_lr": 0.0003,
     "critic_lr": 0.0003,
     "kl_lr": 0.0003,
-    "action_samples": 20,
+    "action_samples": 64,
     "min_replay_sequence_length": 100,
     "actor_update_chunk_size": 2048,
     "temperature": 1.0,

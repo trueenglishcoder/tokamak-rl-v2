@@ -240,8 +240,8 @@ def _reference(raw: Mapping[str, Any], base: Path) -> ReferenceConfig:
 def _observation(raw: Mapping[str, Any]) -> ObservationConfig:
     _reject_unknown_keys(raw, set(ObservationConfig.__dataclass_fields__), prefix="observation")
     return ObservationConfig(
-        actor_kind=str(raw.get("actor_kind", "controller_state_v5")),
-        critic_kind=str(raw.get("critic_kind", "privileged_training_state_v1")),
+        actor_kind=str(raw.get("actor_kind", "controller_state_v6")),
+        critic_kind=str(raw.get("critic_kind", "compact_training_state_v2")),
         target_preview_steps=int(raw.get("target_preview_steps", 8)),
         target_preview_stride=int(raw.get("target_preview_stride", 10)),
         ip_rate_scale_aps=float(raw.get("ip_rate_scale_aps", 500000.0)),
@@ -308,6 +308,8 @@ def _training(raw: Mapping[str, Any], base: Path) -> TrainingConfig:
         actor_devices=_string_tuple(raw.get("actor_devices"), "training.actor_devices"),
         distributed_mode=str(raw.get("distributed_mode", defaults.distributed_mode)),
         production_mode=bool(raw.get("production_mode", defaults.production_mode)),
+        early_stop_patience_evals=int(raw.get("early_stop_patience_evals", defaults.early_stop_patience_evals)),
+        early_stop_min_delta=float(raw.get("early_stop_min_delta", defaults.early_stop_min_delta)),
     )
 
 
@@ -426,10 +428,10 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
             raise ValueError(f"reference.boundary.replay_reference_dir does not exist: {replay_dir}")
         if cfg.sim.reset_source != "csv_initial_states":
             raise ValueError("reference.boundary.kind=t15_replay_segment_conditioned requires csv initial states")
-    if cfg.observation.actor_kind not in {"controller_state_v4", "controller_state_v5"}:
-        raise ValueError("observation.actor_kind must be controller_state_v4 or controller_state_v5")
-    if cfg.observation.critic_kind != "privileged_training_state_v1":
-        raise ValueError("observation.critic_kind must be privileged_training_state_v1")
+    if cfg.observation.actor_kind not in {"controller_state_v4", "controller_state_v5", "controller_state_v6"}:
+        raise ValueError("observation.actor_kind must be controller_state_v4, controller_state_v5, or controller_state_v6")
+    if cfg.observation.critic_kind not in {"privileged_training_state_v1", "compact_training_state_v2"}:
+        raise ValueError("observation.critic_kind must be privileged_training_state_v1 or compact_training_state_v2")
     for name in ("ip_rate_scale_aps", "boundary_rate_scale_mps"):
         value = float(getattr(cfg.observation, name))
         if not math.isfinite(value) or value <= 0.0:
@@ -500,9 +502,11 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
     for name in ("steps", "num_envs", "checkpoint_interval_steps", "eval_interval_steps", "eval_episodes", "eval_max_steps", "actor_workers"):
         if int(getattr(training, name)) <= 0:
             raise ValueError(f"training.{name} must be positive")
-    for name in ("eval_checkpoint_top_k", "milestone_checkpoint_interval_steps"):
+    for name in ("eval_checkpoint_top_k", "milestone_checkpoint_interval_steps", "early_stop_patience_evals"):
         if int(getattr(training, name)) < 0:
             raise ValueError(f"training.{name} must be non-negative")
+    if not math.isfinite(float(training.early_stop_min_delta)) or float(training.early_stop_min_delta) < 0.0:
+        raise ValueError("training.early_stop_min_delta must be finite and non-negative")
     if training.distributed_mode not in {"single", "local_replay"}:
         raise ValueError("training.distributed_mode must be single or local_replay")
     if training.distributed_mode == "local_replay" and int(training.actor_workers) != 1:
@@ -527,8 +531,10 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
                 raise ValueError("training.production_mode single_segment_profile requires reference.boundary.kind=hold_reset_boundary")
         elif cfg.reference.boundary.kind != "t15_replay_segment_conditioned":
             raise ValueError("training.production_mode requires reference.boundary.kind=t15_replay_segment_conditioned")
-        if cfg.reference.ip.kind == "replay_window" and cfg.observation.actor_kind != "controller_state_v5":
-            raise ValueError("training.production_mode replay_window requires observation.actor_kind=controller_state_v5")
+        if cfg.reference.ip.kind == "replay_window" and cfg.observation.actor_kind != "controller_state_v6":
+            raise ValueError("training.production_mode replay_window requires observation.actor_kind=controller_state_v6")
+        if cfg.reference.ip.kind == "replay_window" and cfg.observation.critic_kind != "compact_training_state_v2":
+            raise ValueError("training.production_mode replay_window requires observation.critic_kind=compact_training_state_v2")
         if cfg.reward.kind != "tcv_derivative":
             raise ValueError("training.production_mode requires reward.kind=tcv_derivative")
         expected_duration = float(cfg.sim.max_episode_steps) * float(cfg.reference.t_step)

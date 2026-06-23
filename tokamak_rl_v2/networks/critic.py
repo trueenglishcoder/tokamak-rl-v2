@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from tokamak_rl_v2.networks.initialization import truncated_fanin_init
 
 
-CRITIC_ACTION_INPUT_KIND = "requested_jdot_command_v1"
+CRITIC_ACTION_INPUT_KIND = "requested_jdot_command_v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +33,7 @@ class RecurrentQCritic(nn.Module):
         self.fc2 = nn.Linear(self.mlp_hidden_dim, self.mlp_hidden_dim)
         self.q_head = nn.Linear(self.mlp_hidden_dim, 1)
         self.apply(truncated_fanin_init)
+        truncated_fanin_init(self.q_head, final_scale=1.0e-4)
 
     def forward(self, obs: Tensor, action: Tensor, state: CriticState | None = None, mask: Tensor | None = None) -> tuple[Tensor, CriticState]:
         if obs.ndim == 2:

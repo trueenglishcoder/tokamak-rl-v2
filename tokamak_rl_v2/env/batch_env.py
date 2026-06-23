@@ -89,6 +89,8 @@ class TokamakMagneticControlEnv:
         self.action_offset = torch.zeros((self.batch_size, self.action_dim), dtype=torch.float32, device=self.device)
         self.current_over_limit_steps = torch.zeros((self.batch_size,), dtype=torch.long, device=self.device)
         self.ip_measured_rate = torch.zeros((self.batch_size,), dtype=torch.float32, device=self.device)
+        self.integral_ip_error = torch.zeros((self.batch_size,), dtype=torch.float32, device=self.device)
+        self.integral_boundary_radii_error = torch.zeros((self.batch_size, int(config.sim.angles)), dtype=torch.float32, device=self.device)
         self.psi_reset_mean = torch.zeros((self.batch_size,), dtype=torch.float32, device=self.device)
         self.psi_reset_std = torch.ones((self.batch_size,), dtype=torch.float32, device=self.device)
         self.reference: ReferenceBatch | None = None
@@ -134,6 +136,18 @@ class TokamakMagneticControlEnv:
 
     def reset(self) -> Tensor:
         payload = self._sample_reset_payload(self.batch_size)
+        return self._reset_from_payload(payload)
+
+    def reset_to_csv_indices(self, indices: np.ndarray | list[int] | tuple[int, ...]) -> Tensor:
+        """Reset the whole batch to explicit CSV-library rows."""
+        if self._csv_initial_states is None:
+            raise ValueError("reset_to_csv_indices requires sim.reset_source=csv_initial_states")
+        payload = self._csv_initial_states.take(indices)
+        if int(payload.ip0.shape[0]) != self.batch_size:
+            raise ValueError(f"reset_to_csv_indices count must equal batch_size={self.batch_size}")
+        return self._reset_from_payload(payload)
+
+    def _reset_from_payload(self, payload: ResetPayload) -> Tensor:
         ip0, pfc0, sol0, params0 = payload.ip0, payload.pfc0, payload.sol0, payload.params0
         self._record_reset_metadata(payload)
         self.previous_action.zero_()
@@ -142,6 +156,8 @@ class TokamakMagneticControlEnv:
         self.action_offset = self._sample_action_offset(self.batch_size)
         self.current_over_limit_steps.zero_()
         self.ip_measured_rate.zero_()
+        self.integral_ip_error.zero_()
+        self.integral_boundary_radii_error.zero_()
         self.step_index.zero_()
         self.done.zero_()
         if self.config.sim.compute_backend == "gpu":
@@ -192,6 +208,8 @@ class TokamakMagneticControlEnv:
         self.action_offset[indices_t] = self._sample_action_offset(count)
         self.current_over_limit_steps[indices_t] = 0
         self.ip_measured_rate[indices_t] = 0.0
+        self.integral_ip_error[indices_t] = 0.0
+        self.integral_boundary_radii_error[indices_t] = 0.0
         self.step_index[indices_t] = 0
         self.done[indices_t] = False
         if self.config.sim.compute_backend == "gpu":
@@ -359,6 +377,10 @@ class TokamakMagneticControlEnv:
             result = self._gpu_sim.step_currents(current_next)
             self._update_measured_ip_rate(result.state.Ip.to(torch.float32), ip_before)
             self.step_index += 1
+            self._accumulate_integral_errors(
+                ip=result.state.Ip.to(torch.float32),
+                measured_radii=result.boundary.radii[:, : int(self.config.sim.angles)].to(torch.float32),
+            )
             self.previous_action = applied_action.detach().clone()
             obs = self._obs_gpu(result=result)
             reward, terminated, info = self._reward_gpu(result, applied_action, previous_action, requested_action, applied_delta_action)
@@ -368,6 +390,8 @@ class TokamakMagneticControlEnv:
             ip_after = torch.as_tensor([float(model.state.Ip) for model in self._cpu_models], dtype=torch.float32, device=self.device)
             self._update_measured_ip_rate(ip_after, ip_before)
             self.step_index += 1
+            _points, radii, _found = self._cpu_boundary_samples()
+            self._accumulate_integral_errors(ip=ip_after, measured_radii=torch.as_tensor(radii, dtype=torch.float32, device=self.device))
             self.previous_action = applied_action.detach().clone()
             obs = self._obs_cpu()
             reward, terminated, info = self._reward_cpu(applied_action, previous_action, requested_action, applied_delta_action)
@@ -451,11 +475,16 @@ class TokamakMagneticControlEnv:
             ("boundary_radii_error", n_angles),
             ("boundary_found", 1),
         )
-        if self.config.observation.actor_kind == "controller_state_v5":
+        if self.config.observation.actor_kind in {"controller_state_v5", "controller_state_v6"}:
             sizes = sizes + (
                 ("ip_ref_rate", 1),
                 ("boundary_ref_rate", n_angles),
                 ("ip_measured_rate", 1),
+            )
+        if self.config.observation.actor_kind == "controller_state_v6":
+            sizes = sizes + (
+                ("integral_ip_error", 1),
+                ("integral_boundary_radii_error", n_angles),
             )
         sizes = sizes + (
             ("previous_action", self.action_dim),
@@ -470,11 +499,11 @@ class TokamakMagneticControlEnv:
         return out
 
     def _critic_feature_slices(self) -> dict[str, tuple[int, int]]:
-        start = self.actor_obs_dim
         nz, nr = int(self.cfg.grid.z.size), int(self.cfg.grid.r.size)
-        sizes = (
-            ("actor_obs", self.actor_obs_dim),
-            ("psi_flat_normalized", nz * nr),
+        sizes: tuple[tuple[str, int], ...] = (("actor_obs", self.actor_obs_dim),)
+        if self.config.observation.critic_kind == "privileged_training_state_v1":
+            sizes = sizes + (("psi_flat_normalized", nz * nr),)
+        sizes = sizes + (
             ("current_usage_fraction", 1),
             ("current_margin_fraction", 1),
             ("derivative_usage", 1),
@@ -515,6 +544,26 @@ class TokamakMagneticControlEnv:
         scale = max(float(self.config.observation.ip_rate_scale_aps), 1.0e-12)
         self.ip_measured_rate = (raw / scale).detach().clone()
 
+    def _accumulate_integral_errors(self, *, ip: Tensor, measured_radii: Tensor) -> None:
+        ip_ref, _points, ref_radii = self._reference_at()
+        dt = float(self.config.reference.t_step)
+        ip_err = ip_ref.to(torch.float32).reshape(self.batch_size) - torch.as_tensor(ip, dtype=torch.float32, device=self.device).reshape(self.batch_size)
+        radii_err = ref_radii[:, : int(self.config.sim.angles)].to(torch.float32) - torch.nan_to_num(
+            torch.as_tensor(measured_radii, dtype=torch.float32, device=self.device).reshape(self.batch_size, int(self.config.sim.angles)),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+        self.integral_ip_error = (self.integral_ip_error + float(dt) * ip_err).detach()
+        self.integral_boundary_radii_error = (self.integral_boundary_radii_error + float(dt) * radii_err).detach()
+
+    def _normalized_integral_features(self) -> tuple[Tensor, Tensor]:
+        ip_scale = 15000.0 * 0.1
+        boundary_scale = 0.02 * 0.1
+        ip_int = torch.clamp(self.integral_ip_error / ip_scale, -1.0, 1.0).reshape(self.batch_size, 1)
+        boundary_int = torch.clamp(self.integral_boundary_radii_error / boundary_scale, -1.0, 1.0)
+        return ip_int, boundary_int
+
     def _preview(self) -> Tensor:
         assert self.reference is not None
         P = int(self.config.observation.target_preview_steps)
@@ -548,7 +597,6 @@ class TokamakMagneticControlEnv:
         boundary_found = result.boundary.found.to(torch.float32).reshape(self.batch_size, 1)
         current_scale = torch.where(torch.isfinite(self.current_limits) & (self.current_limits > 0.0), self.current_limits, torch.ones_like(self.current_limits))
         deriv_scale = torch.where(torch.isfinite(self.derivative_limits) & (self.derivative_limits > 0.0), self.derivative_limits, torch.ones_like(self.derivative_limits))
-        psi = self._normalize_psi_flat(result.state.psi)
         current_usage_fraction, current_margin_fraction, derivative_usage = self._constraint_metrics(current=currents, derivs=derivs)
         parts = [
             self.step_index.to(torch.float32).reshape(self.batch_size, 1) / max(float(self.config.sim.max_episode_steps), 1.0),
@@ -562,7 +610,7 @@ class TokamakMagneticControlEnv:
             target_radii - measured_radii,
             boundary_found,
         ]
-        if self.config.observation.actor_kind == "controller_state_v5":
+        if self.config.observation.actor_kind in {"controller_state_v5", "controller_state_v6"}:
             parts.extend(
                 [
                     (ip_ref_rate / float(self.config.observation.ip_rate_scale_aps)).reshape(self.batch_size, 1),
@@ -570,24 +618,23 @@ class TokamakMagneticControlEnv:
                     self.ip_measured_rate.reshape(self.batch_size, 1),
                 ]
             )
+        if self.config.observation.actor_kind == "controller_state_v6":
+            integral_ip, integral_boundary = self._normalized_integral_features()
+            parts.extend([integral_ip, integral_boundary])
         parts.extend([self.previous_action, self._preview()])
         actor_obs = torch.cat(parts, dim=1)
         actor_obs = torch.nan_to_num(actor_obs, nan=0.0, posinf=0.0, neginf=0.0)
-        self._last_critic_obs = torch.nan_to_num(
-            torch.cat(
-                [
-                    actor_obs,
-                    psi,
-                    current_usage_fraction.reshape(self.batch_size, 1),
-                    current_margin_fraction.reshape(self.batch_size, 1),
-                    derivative_usage.reshape(self.batch_size, 1),
-                ],
-                dim=1,
-            ),
-            nan=0.0,
-            posinf=0.0,
-            neginf=0.0,
+        critic_parts = [actor_obs]
+        if self.config.observation.critic_kind == "privileged_training_state_v1":
+            critic_parts.append(self._normalize_psi_flat(result.state.psi))
+        critic_parts.extend(
+            [
+                current_usage_fraction.reshape(self.batch_size, 1),
+                current_margin_fraction.reshape(self.batch_size, 1),
+                derivative_usage.reshape(self.batch_size, 1),
+            ]
         )
+        self._last_critic_obs = torch.nan_to_num(torch.cat(critic_parts, dim=1), nan=0.0, posinf=0.0, neginf=0.0)
         return actor_obs
 
     def _obs_cpu(self) -> Tensor:
@@ -641,12 +688,20 @@ class TokamakMagneticControlEnv:
                 target_radii - np.nan_to_num(measured_radii, nan=0.0, posinf=0.0, neginf=0.0),
                 np.array([boundary_found], dtype=float),
             ]
-            if self.config.observation.actor_kind == "controller_state_v5":
+            if self.config.observation.actor_kind in {"controller_state_v5", "controller_state_v6"}:
                 parts.extend(
                     [
                         np.array([float(ip_ref_rate[b].item()) / float(self.config.observation.ip_rate_scale_aps)], dtype=float),
                         boundary_ref_rate[b].detach().cpu().numpy().astype(float, copy=False) / float(self.config.observation.boundary_rate_scale_mps),
                         np.array([float(self.ip_measured_rate[b].item())], dtype=float),
+                    ]
+                )
+            if self.config.observation.actor_kind == "controller_state_v6":
+                integral_ip, integral_boundary = self._normalized_integral_features()
+                parts.extend(
+                    [
+                        integral_ip[b].detach().cpu().numpy().astype(float, copy=False),
+                        integral_boundary[b].detach().cpu().numpy().astype(float, copy=False),
                     ]
                 )
             parts.extend(
@@ -659,20 +714,20 @@ class TokamakMagneticControlEnv:
             current_usage_by_coil = np.abs(currents) / current_scale
             raw_deriv_scale = np.asarray(self.raw_derivative_limits.detach().cpu().numpy(), dtype=float)
             raw_deriv_scale = np.where(np.isfinite(raw_deriv_scale) & (raw_deriv_scale > 0.0), raw_deriv_scale, 1.0)
-            critic = np.concatenate(
-                [
-                    actor,
-                    ((np.asarray(model.state.psi, dtype=float).reshape(-1) - float(self.psi_reset_mean[b].item())) / (float(self.psi_reset_std[b].item()) + 1.0e-6)),
-                    np.array(
-                        [
-                            float(np.max(current_usage_by_coil)),
-                            float(np.min(1.0 - current_usage_by_coil)),
-                            float(np.max(np.abs(derivs) / raw_deriv_scale)),
-                        ],
-                        dtype=float,
-                    ),
-                ]
+            critic_parts = [actor]
+            if self.config.observation.critic_kind == "privileged_training_state_v1":
+                critic_parts.append((np.asarray(model.state.psi, dtype=float).reshape(-1) - float(self.psi_reset_mean[b].item())) / (float(self.psi_reset_std[b].item()) + 1.0e-6))
+            critic_parts.append(
+                np.array(
+                    [
+                        float(np.max(current_usage_by_coil)),
+                        float(np.min(1.0 - current_usage_by_coil)),
+                        float(np.max(np.abs(derivs) / raw_deriv_scale)),
+                    ],
+                    dtype=float,
+                )
             )
+            critic = np.concatenate(critic_parts)
             obs.append(actor)
             critic_obs.append(critic)
         actor_t = torch.nan_to_num(torch.as_tensor(np.stack(obs, axis=0), dtype=torch.float32, device=self.device), nan=0.0, posinf=0.0, neginf=0.0)
@@ -905,6 +960,8 @@ class TokamakMagneticControlEnv:
             "done": self.done.detach().cpu(),
             "previous_action": self.previous_action.detach().cpu(),
             "ip_measured_rate": self.ip_measured_rate.detach().cpu(),
+            "integral_ip_error": self.integral_ip_error.detach().cpu(),
+            "integral_boundary_radii_error": self.integral_boundary_radii_error.detach().cpu(),
             "reset_currents": self.reset_currents.detach().cpu(),
             "applied_action_sum": self.applied_action_sum.detach().cpu(),
             "action_offset": self.action_offset.detach().cpu(),
@@ -946,9 +1003,18 @@ class TokamakMagneticControlEnv:
         self.step_index = torch.as_tensor(state["step_index"], dtype=torch.long, device=self.device).clone()
         self.done = torch.as_tensor(state["done"], dtype=torch.bool, device=self.device).clone()
         self.previous_action = torch.as_tensor(state["previous_action"], dtype=torch.float32, device=self.device).clone()
-        if self.config.observation.actor_kind == "controller_state_v5" and "ip_measured_rate" not in state:
-            raise ValueError("environment checkpoint is missing controller_state_v5 ip_measured_rate")
+        if self.config.observation.actor_kind in {"controller_state_v5", "controller_state_v6"} and "ip_measured_rate" not in state:
+            raise ValueError(f"environment checkpoint is missing {self.config.observation.actor_kind} ip_measured_rate")
         self.ip_measured_rate = torch.as_tensor(state.get("ip_measured_rate", torch.zeros((self.batch_size,), dtype=torch.float32)), dtype=torch.float32, device=self.device).clone()
+        if self.config.observation.actor_kind == "controller_state_v6":
+            if "integral_ip_error" not in state or "integral_boundary_radii_error" not in state:
+                raise ValueError("environment checkpoint is missing controller_state_v6 integral-error state")
+        self.integral_ip_error = torch.as_tensor(state.get("integral_ip_error", torch.zeros((self.batch_size,), dtype=torch.float32)), dtype=torch.float32, device=self.device).clone()
+        self.integral_boundary_radii_error = torch.as_tensor(
+            state.get("integral_boundary_radii_error", torch.zeros((self.batch_size, int(self.config.sim.angles)), dtype=torch.float32)),
+            dtype=torch.float32,
+            device=self.device,
+        ).clone()
         if "reset_currents" not in state or "applied_action_sum" not in state:
             raise ValueError("environment checkpoint is missing jdot drift state")
         self.reset_currents = torch.as_tensor(state["reset_currents"], dtype=torch.float32, device=self.device).clone()

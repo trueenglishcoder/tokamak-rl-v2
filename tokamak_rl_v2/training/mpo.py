@@ -20,6 +20,8 @@ class UpdateMetrics:
     std_kl: float
     q_mean: float
     target_q_mean: float
+    q_p99: float
+    q_bound_warning: float
     actor_mle_loss: float
     actor_param_delta_norm: float
     action_mean_abs: float
@@ -97,7 +99,7 @@ class MaximumAPosterioriPolicyOptimiser:
             raise ValueError("checkpoint contains the obsolete MPO learner state and cannot be resumed exactly")
 
     def update(self, batch: SequenceBatch) -> UpdateMetrics:
-        critic_loss, q_mean, target_mean = self._critic_update(batch)
+        critic_loss, q_mean, target_mean, q_p99, q_bound_warning = self._critic_update(batch)
         actor_metrics = self._actor_update(batch)
         self._soft_sync(float(self.config.target_update_tau))
         return UpdateMetrics(
@@ -107,6 +109,8 @@ class MaximumAPosterioriPolicyOptimiser:
             std_kl=float(actor_metrics[2]),
             q_mean=float(q_mean),
             target_q_mean=float(target_mean),
+            q_p99=float(q_p99),
+            q_bound_warning=float(q_bound_warning),
             actor_mle_loss=float(actor_metrics[3]),
             actor_param_delta_norm=float(actor_metrics[4]),
             action_mean_abs=float(actor_metrics[5]),
@@ -119,21 +123,11 @@ class MaximumAPosterioriPolicyOptimiser:
             std_kl_penalty=float(actor_metrics[12]),
         )
 
-    def _critic_update(self, batch: SequenceBatch) -> tuple[float, float, float]:
+    def _critic_update(self, batch: SequenceBatch) -> tuple[float, float, float, float, float]:
         mask = batch.mask.to(dtype=torch.float32)
         q, _ = self.critic(batch.critic_obs, batch.action, mask=mask)
         with torch.no_grad():
-            B, T, O = batch.next_obs.shape
-            next_action = self.target_actor.deterministic(batch.next_obs.reshape(B * T, O)).reshape(B, T, -1)
-            q_next = self.target_critic.evaluate_query_actions_with_history(
-                history_obs=batch.critic_obs,
-                history_action=batch.action,
-                query_obs=batch.next_critic_obs,
-                query_action=next_action,
-                mask=mask,
-                include_current_history=True,
-            )
-            target = batch.reward + batch.discount * (~batch.done).to(torch.float32) * q_next
+            target = self._return_to_go_targets(batch)
         denom = torch.clamp(mask.sum(), min=1.0)
         loss = torch.sum(((q - target).pow(2)) * mask) / denom
         self.critic_optim.zero_grad(set_to_none=True)
@@ -141,9 +135,36 @@ class MaximumAPosterioriPolicyOptimiser:
         self._average_gradients(self.critic.parameters())
         torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 10.0)
         self.critic_optim.step()
-        q_mean = torch.sum(q.detach() * mask) / denom
+        q_detached = q.detach()
+        q_mean = torch.sum(q_detached * mask) / denom
         target_mean = torch.sum(target.detach() * mask) / denom
-        return float(loss.detach().cpu()), float(q_mean.cpu()), float(target_mean.cpu())
+        valid_q = q_detached[mask > 0.0]
+        if valid_q.numel() > 0:
+            q_p99 = torch.quantile(valid_q, 0.99)
+        else:
+            q_p99 = torch.zeros((), dtype=torch.float32, device=q_detached.device)
+        warning = torch.as_tensor(
+            1.0 if float(q_mean.detach().cpu()) > 0.75 or float(q_p99.detach().cpu()) > 0.80 else 0.0,
+            dtype=torch.float32,
+            device=q_detached.device,
+        )
+        return float(loss.detach().cpu()), float(q_mean.cpu()), float(target_mean.cpu()), float(q_p99.cpu()), float(warning.cpu())
+
+    @staticmethod
+    def _return_to_go_targets(batch: SequenceBatch) -> Tensor:
+        """Compute full discounted return-to-go targets for sampled sequences."""
+        mask = batch.mask.to(dtype=torch.float32)
+        reward = batch.reward.to(dtype=torch.float32)
+        discount = batch.discount.to(dtype=torch.float32)
+        not_done = (~batch.done).to(dtype=torch.float32)
+        B, T = reward.shape
+        targets = torch.zeros_like(reward)
+        running = torch.zeros((B,), dtype=reward.dtype, device=reward.device)
+        for t in range(T - 1, -1, -1):
+            running = reward[:, t] + discount[:, t] * not_done[:, t] * running
+            running = torch.where(mask[:, t] > 0.0, running, torch.zeros_like(running))
+            targets[:, t] = running
+        return targets
 
     def _actor_update(self, batch: SequenceBatch) -> tuple[float, float, float, float, float, float, float, float, float, float, float, float, float]:
         obs_seq = batch.obs.detach()

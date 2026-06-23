@@ -2596,6 +2596,24 @@ def test_mpo_update_accepts_padded_short_terminal_sequence() -> None:
     assert np.isfinite(metrics.sampled_q_spread)
 
 
+def test_mpo_critic_target_is_full_discounted_return_to_go() -> None:
+    batch = _sequence_batch(
+        obs=torch.zeros((2, 4, 3)),
+        action=torch.zeros((2, 4, 1)),
+        reward=torch.tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 7.0, 11.0, 13.0]], dtype=torch.float32),
+        discount=torch.full((2, 4), 0.5, dtype=torch.float32),
+        next_obs=torch.zeros((2, 4, 3)),
+        done=torch.tensor([[False, False, True, False], [False, False, False, False]], dtype=torch.bool),
+        mask=torch.tensor([[1.0, 1.0, 1.0, 0.0], [1.0, 1.0, 0.0, 0.0]], dtype=torch.float32),
+    )
+
+    target = MaximumAPosterioriPolicyOptimiser._return_to_go_targets(batch)
+
+    assert target.shape == batch.reward.shape
+    assert target[0].tolist() == pytest.approx([2.75, 3.5, 3.0, 0.0])
+    assert target[1].tolist() == pytest.approx([8.5, 7.0, 0.0, 0.0])
+
+
 def test_mpo_actor_update_honors_chunk_size(monkeypatch: pytest.MonkeyPatch) -> None:
     torch.manual_seed(779)
     obs_dim = 5

@@ -586,7 +586,8 @@ def _write_config(
     cfg["reference"]["ip"] = {"kind": "replay_window"}
     cfg["reference"]["boundary"] = {"kind": "t15_replay_segment_conditioned", "replay_reference_dir": rel(target_dir)}
 
-    cfg["observation"]["actor_kind"] = "controller_state_v5"
+    cfg["observation"]["actor_kind"] = "controller_state_v6"
+    cfg["observation"]["critic_kind"] = "compact_training_state_v2"
     cfg["observation"]["target_preview_steps"] = 10
     cfg["observation"]["target_preview_stride"] = 10
     cfg["observation"]["ip_rate_scale_aps"] = 500000.0
@@ -598,27 +599,31 @@ def _write_config(
     cfg["learner"]["batch_size"] = 32
     cfg["learner"]["updates_per_rollout_chunk"] = 64
     cfg["learner"]["replay_capacity_episodes"] = 1024
+    cfg["learner"]["action_samples"] = 64
 
     cfg["training"]["num_envs"] = 2048
     cfg["training"]["eval_max_steps"] = 100
     cfg["training"]["distributed_mode"] = "local_replay"
     cfg["training"]["production_mode"] = True
+    cfg["training"]["early_stop_patience_evals"] = 5
+    cfg["training"]["early_stop_min_delta"] = 0.0
     cfg["training"]["output_dir"] = "../../" + train_output
 
     cfg["reward"]["kind"] = "tcv_derivative"
     cfg["reward"]["terminal_reward"] = -20.0
     cfg["reward"]["reward_scale"] = 0.01
-    cfg["reward"]["smoothmax_alpha"] = -5.0
     if balanced:
         cfg["reward"]["shape_mean_weight"] = 2.4
         cfg["reward"]["shape_max_weight"] = 0.6
         cfg["reward"]["ip_weight"] = 3.0
         cfg["reward"]["ip_scale_a"] = 15000.0
+        cfg["reward"]["smoothmax_alpha"] = -1.0
     else:
         cfg["reward"]["shape_mean_weight"] = 3.2
         cfg["reward"]["shape_max_weight"] = 0.8
         cfg["reward"]["ip_weight"] = 1.8
         cfg["reward"]["ip_scale_a"] = 25000.0
+        cfg["reward"]["smoothmax_alpha"] = -5.0
 
     config_out.parent.mkdir(parents=True, exist_ok=True)
     config_out.write_text(json.dumps(cfg, indent=2), encoding="utf-8")

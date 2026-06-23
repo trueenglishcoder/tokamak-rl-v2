@@ -76,6 +76,8 @@ _FOCUSED_WANDB_METRICS = {
     "train/critic_loss",
     "train/actor_loss",
     "train/q_mean",
+    "train/q_p99",
+    "train/q_bound_warning",
     "train/sampled_q_spread",
     "train/policy_weight_max",
 }
@@ -121,6 +123,8 @@ _SWEEP_WANDB_METRICS = {
     "train/critic_loss",
     "train/actor_loss",
     "train/q_mean",
+    "train/q_p99",
+    "train/q_bound_warning",
     "train/sampled_q_spread",
     "train/policy_weight_max",
 }
@@ -375,6 +379,13 @@ class Trainer:
         dist.all_reduce(flag, op=dist.ReduceOp.MIN)
         return bool(int(flag.detach().cpu().item()) == 1)
 
+    def _broadcast_rank0_bool(self, value: bool) -> bool:
+        if not self._distributed_initialized() or int(dist.get_world_size()) <= 1:
+            return bool(value)
+        flag = torch.tensor([1 if value else 0], dtype=torch.int32, device=self.device)
+        dist.broadcast(flag, src=0)
+        return bool(int(flag.detach().cpu().item()) == 1)
+
     def _barrier(self) -> None:
         if self._distributed_initialized() and int(dist.get_world_size()) > 1:
             dist.barrier()
@@ -466,7 +477,7 @@ class Trainer:
         health_path = self.output_dir / "replay_health.csv"
         replay_health_fields = self._replay_health_fields()
         with losses_path.open("w", newline="", encoding="utf-8") as loss_f, rewards_path.open("w", newline="", encoding="utf-8") as reward_f, health_path.open("w", newline="", encoding="utf-8") as health_f:
-            loss_writer = csv.DictWriter(loss_f, fieldnames=["step", "critic_loss", "actor_loss", "mean_kl", "std_kl", "q_mean", "target_q_mean", "actor_mle_loss", "actor_param_delta_norm", "action_mean_abs", "action_std_mean", "sampled_q_spread", "policy_weight_entropy", "policy_weight_max", "mpo_temperature", "mean_kl_penalty", "std_kl_penalty", "env_steps_per_second", *replay_health_fields])
+            loss_writer = csv.DictWriter(loss_f, fieldnames=["step", "critic_loss", "actor_loss", "mean_kl", "std_kl", "q_mean", "target_q_mean", "q_p99", "q_bound_warning", "actor_mle_loss", "actor_param_delta_norm", "action_mean_abs", "action_std_mean", "sampled_q_spread", "policy_weight_entropy", "policy_weight_max", "mpo_temperature", "mean_kl_penalty", "std_kl_penalty", "env_steps_per_second", *replay_health_fields])
             health_writer = csv.DictWriter(health_f, fieldnames=["step", *replay_health_fields])
             reward_writer = None
             loss_writer.writeheader()
@@ -483,6 +494,9 @@ class Trainer:
             start = time.time()
             updates = int(self.start_updates)
             last_update_step = int(self.start_step)
+            no_improve_evals = 0
+            early_stopped = False
+            early_stop_step: int | None = None
             progress = tqdm(total=max(self.steps - self.start_step, 0), desc="train", unit="step", dynamic_ncols=True)
             for step in range(self.start_step + 1, self.steps + 1):
                 with torch.no_grad():
@@ -531,21 +545,31 @@ class Trainer:
                     self._wandb_log({f"eval/{k}": v for k, v in eval_metrics.items()}, step=step)
                     if self._retained_eval_checkpoints_enabled():
                         self._save_retained_eval_checkpoint(step=step, updates=updates, score=score, eval_metrics=eval_metrics)
-                    if score > self.best_eval:
+                    improved = score > self.best_eval + float(self.config.training.early_stop_min_delta)
+                    if improved:
                         self.best_eval = score
                         self.best_eval_details = dict(eval_metrics)
+                        no_improve_evals = 0
                         self._remember_best_actor()
                         if self._save_checkpoints_enabled() and not self._retained_eval_checkpoints_enabled():
                             self._save_checkpoint("best.pt", step=step, updates=updates)
                         self._export("exports/best_actor", step=step, updates=updates, eval_score=score)
+                    else:
+                        no_improve_evals += 1
+                    patience = int(self.config.training.early_stop_patience_evals)
+                    if patience > 0 and no_improve_evals >= patience:
+                        early_stopped = True
+                        early_stop_step = int(step)
+                        break
                 progress.update(1)
                 progress.set_postfix(replay=self.replay.size, updates=updates, reward=f"{float(batch_step.reward.mean().detach().cpu()):.4f}", refresh=False)
             progress.close()
+        final_step = int(early_stop_step) if early_stop_step is not None else int(self.steps)
         final = {
             "start_step": self.start_step,
-            "steps": self.steps,
-            "decision_steps": self.steps,
-            "env_steps": self.steps * self.num_envs,
+            "steps": final_step,
+            "decision_steps": final_step,
+            "env_steps": final_step * self.num_envs,
             "updates": updates,
             "best_eval": self.best_eval,
             "best_eval_details": self.best_eval_details,
@@ -554,10 +578,12 @@ class Trainer:
             "total_training_envs": self.num_envs,
             "save_checkpoints": self._save_checkpoints_enabled(),
             "warm_start_checkpoint": None if self.warm_start_checkpoint is None else str(self.warm_start_checkpoint),
+            "status": "early_stopped" if early_stopped else "completed",
+            "early_stop_step": early_stop_step,
         }
         if self._save_final_checkpoint_enabled():
-            self._save_checkpoint("final.pt", step=self.steps, updates=updates)
-        self._export("exports/final_actor", step=self.steps, updates=updates, eval_score=self.best_eval)
+            self._save_checkpoint("final.pt", step=final_step, updates=updates)
+        self._export("exports/final_actor", step=final_step, updates=updates, eval_score=self.best_eval)
         metrics_path.write_text(json.dumps(final, indent=2), encoding="utf-8")
         return final
 
@@ -578,7 +604,7 @@ class Trainer:
             "local_envs_per_rank",
             "global_envs",
         ]
-        loss_fields = ["step", "critic_loss", "actor_loss", "mean_kl", "std_kl", "q_mean", "target_q_mean", "actor_mle_loss", "actor_param_delta_norm", "action_mean_abs", "action_std_mean", "sampled_q_spread", "policy_weight_entropy", "policy_weight_max", "mpo_temperature", "mean_kl_penalty", "std_kl_penalty", "env_steps_per_second", *replay_health_fields]
+        loss_fields = ["step", "critic_loss", "actor_loss", "mean_kl", "std_kl", "q_mean", "target_q_mean", "q_p99", "q_bound_warning", "actor_mle_loss", "actor_param_delta_norm", "action_mean_abs", "action_std_mean", "sampled_q_spread", "policy_weight_entropy", "policy_weight_max", "mpo_temperature", "mean_kl_penalty", "std_kl_penalty", "env_steps_per_second", *replay_health_fields]
 
         loss_f = reward_f = health_f = None
         loss_writer = health_writer = reward_writer = None
@@ -636,6 +662,9 @@ class Trainer:
         last_update_step = int(self.start_step)
         last_checkpoint_step = int(self.start_step)
         last_eval_step = int(self.start_step)
+        no_improve_evals = 0
+        early_stopped = False
+        early_stop_step: int | None = None
         rollout_chunks_seen = 0
         reward_acc = _RewardComponentAccumulator(self.device)
         progress = tqdm(total=max(self.steps - self.start_step, 0), desc="local-replay-train", unit="env-step", dynamic_ncols=True) if self._rank0() else None
@@ -735,6 +764,7 @@ class Trainer:
                     self._save_checkpoint("latest.pt", step=env_steps, updates=updates)
                     last_checkpoint_step = env_steps
 
+                should_stop = False
                 if self._rank0() and env_steps - last_eval_step >= max(int(self.config.training.eval_interval_steps), 1):
                     eval_metrics = self.evaluate_detailed(max_steps=_eval_max_steps_for_config(self.config), episodes=int(self.config.training.eval_episodes))
                     score = self._selection_score(eval_metrics)
@@ -743,16 +773,28 @@ class Trainer:
                     self._wandb_log({f"eval/{k}": v for k, v in eval_metrics.items()}, step=env_steps)
                     if self._retained_eval_checkpoints_enabled():
                         self._save_retained_eval_checkpoint(step=env_steps, updates=updates, score=score, eval_metrics=eval_metrics)
-                    if score > self.best_eval:
+                    improved = score > self.best_eval + float(self.config.training.early_stop_min_delta)
+                    if improved:
                         self.best_eval = score
                         self.best_eval_details = dict(eval_metrics)
+                        no_improve_evals = 0
                         self._remember_best_actor()
                         if self._save_checkpoints_enabled() and not self._retained_eval_checkpoints_enabled():
                             self._save_checkpoint("best.pt", step=env_steps, updates=updates)
                         self._export("exports/best_actor", step=env_steps, updates=updates, eval_score=score)
+                    else:
+                        no_improve_evals += 1
+                    patience = int(self.config.training.early_stop_patience_evals)
+                    if patience > 0 and no_improve_evals >= patience:
+                        should_stop = True
                     last_eval_step = env_steps
 
+                should_stop = self._broadcast_rank0_bool(should_stop)
                 self._barrier()
+                if should_stop:
+                    early_stopped = True
+                    early_stop_step = int(env_steps)
+                    break
         finally:
             if progress is not None:
                 progress.close()
@@ -781,7 +823,8 @@ class Trainer:
                 "total_training_envs": int(self.global_num_envs),
                 "save_checkpoints": self._save_checkpoints_enabled(),
                 "warm_start_checkpoint": None if self.warm_start_checkpoint is None else str(self.warm_start_checkpoint),
-                "status": "completed",
+                "status": "early_stopped" if early_stopped else "completed",
+                "early_stop_step": early_stop_step,
             }
             metrics_path.write_text(json.dumps(final, indent=2), encoding="utf-8")
         else:
@@ -836,7 +879,7 @@ class Trainer:
         start = time.time()
         try:
             with losses_path.open("w", newline="", encoding="utf-8") as loss_f, rewards_path.open("w", newline="", encoding="utf-8") as reward_f, health_path.open("w", newline="", encoding="utf-8") as health_f:
-                loss_writer = csv.DictWriter(loss_f, fieldnames=["step", "critic_loss", "actor_loss", "mean_kl", "std_kl", "q_mean", "target_q_mean", "actor_mle_loss", "actor_param_delta_norm", "action_mean_abs", "action_std_mean", "sampled_q_spread", "policy_weight_entropy", "policy_weight_max", "mpo_temperature", "mean_kl_penalty", "std_kl_penalty", "env_steps_per_second", *replay_health_fields])
+                loss_writer = csv.DictWriter(loss_f, fieldnames=["step", "critic_loss", "actor_loss", "mean_kl", "std_kl", "q_mean", "target_q_mean", "q_p99", "q_bound_warning", "actor_mle_loss", "actor_param_delta_norm", "action_mean_abs", "action_std_mean", "sampled_q_spread", "policy_weight_entropy", "policy_weight_max", "mpo_temperature", "mean_kl_penalty", "std_kl_penalty", "env_steps_per_second", *replay_health_fields])
                 health_writer = csv.DictWriter(health_f, fieldnames=["step", *replay_health_fields])
                 loss_writer.writeheader()
                 health_writer.writeheader()
@@ -993,6 +1036,8 @@ class Trainer:
             raise ValueError(f"unsupported evaluation policy: {policy}")
         batch_size = max(1, min(int(episodes), self.num_envs))
         eval_config = self._evaluation_config()
+        if eval_config.reference.ip.kind == "replay_window" and eval_config.sim.reset_source == "csv_initial_states":
+            return self._evaluate_replay_windows_exact(eval_config=eval_config, episodes=int(episodes), max_steps=int(max_steps), policy=policy, seed_offset=seed_offset)
         env = TokamakMagneticControlEnv(eval_config, batch_size=batch_size, device=self.device, seed=int(eval_config.training.seed) + int(seed_offset))
         obs = env.reset()
         returns: list[float] = []
@@ -1159,6 +1204,7 @@ class Trainer:
             arr = np.asarray(values, dtype=float)
             if arr.size:
                 metrics[name] = float(np.nanmean(arr))
+                metrics[f"{name}_p90"] = float(np.nanpercentile(arr, 90))
                 if name in max_metrics:
                     metrics[f"{name}_max"] = float(np.nanmax(arr))
                 if name in min_metrics:
@@ -1177,6 +1223,7 @@ class Trainer:
                 metrics[f"{name}_early"] = float(np.nanmean(early))
             if late.size:
                 metrics[f"{name}_late"] = float(np.nanmean(late))
+                metrics[f"{name}_late_p90"] = float(np.nanpercentile(late, 90))
                 if name in max_metrics:
                     metrics[f"{name}_late_max"] = float(np.nanmax(late))
                 if name in min_metrics:
@@ -1218,6 +1265,124 @@ class Trainer:
                     metrics["padded_current_over_limit_1pct_fraction_late"] = float(np.nanmean(arr > 1.01))
         return metrics
 
+    @torch.no_grad()
+    def _evaluate_replay_windows_exact(self, *, eval_config: ExperimentConfig, episodes: int, max_steps: int, policy: Literal["actor", "no_control"], seed_offset: int) -> dict[str, float]:
+        probe = TokamakMagneticControlEnv(eval_config, batch_size=1, device=self.device, seed=int(eval_config.training.seed) + int(seed_offset))
+        library = getattr(probe, "_csv_initial_states", None)
+        if library is None:
+            raise ValueError("exact replay-window eval requires CSV initial states")
+        total = min(int(episodes), len(library))
+        if total <= 0:
+            total = len(library)
+        chunk = max(1, min(int(self.num_envs), total))
+        component_values: dict[str, list[float]] = {}
+        late_component_values: dict[str, list[float]] = {}
+        returns: list[float] = []
+        episode_steps: list[int] = []
+        full_episode_successes: list[float] = []
+        max_steps_f = max(float(max_steps), 1.0)
+        for start in range(0, total, chunk):
+            end = min(start + chunk, total)
+            indices = np.arange(start, end, dtype=np.int64)
+            env = TokamakMagneticControlEnv(eval_config, batch_size=int(indices.size), device=self.device, seed=int(eval_config.training.seed) + int(seed_offset) + int(start))
+            obs = env.reset_to_csv_indices(indices)
+            totals = torch.zeros((env.batch_size,), dtype=torch.float32, device=self.device)
+            steps = torch.zeros((env.batch_size,), dtype=torch.long, device=self.device)
+            active = torch.ones((env.batch_size,), dtype=torch.bool, device=self.device)
+            terminal_seen = torch.zeros((env.batch_size,), dtype=torch.bool, device=self.device)
+            terminal_steps = torch.full((env.batch_size,), int(max_steps), dtype=torch.long, device=self.device)
+            episode_success = torch.zeros((env.batch_size,), dtype=torch.float32, device=self.device)
+            for _t in range(int(max_steps)):
+                if policy == "actor":
+                    action = self.actor.deterministic(obs)
+                else:
+                    action = torch.zeros((env.batch_size, env.action_dim), dtype=torch.float32, device=self.device)
+                out = env.step(action)
+                totals = torch.where(active, totals + out.reward, totals)
+                steps = torch.where(active, steps + 1, steps)
+                comps = out.info.get("reward_components", {}) if isinstance(out.info, dict) else {}
+                active_cpu = active.detach().cpu().numpy().astype(bool)
+                progress = (steps.to(torch.float32) / max_steps_f).detach().cpu().numpy().reshape(-1)
+                if isinstance(comps, dict):
+                    for name, value in comps.items():
+                        arr = np.asarray(_value_to_numpy(value), dtype=float).reshape(-1)
+                        finite = np.isfinite(arr) & active_cpu
+                        if np.any(finite):
+                            component_values.setdefault(str(name), []).extend(arr[finite].astype(float).tolist())
+                            late = finite & (progress >= 0.8)
+                            if np.any(late):
+                                late_component_values.setdefault(str(name), []).extend(arr[late].astype(float).tolist())
+                finished_horizon = steps >= int(max_steps)
+                done = out.terminated | out.truncated | finished_horizon
+                newly_done = active & done
+                terminal_steps = torch.where(newly_done & ~terminal_seen, steps, terminal_steps)
+                success = newly_done & finished_horizon & ~out.terminated
+                episode_success = torch.where(success, torch.ones_like(episode_success), episode_success)
+                terminal_seen = terminal_seen | newly_done
+                active = active & ~done
+                obs = out.obs
+                if not bool(torch.any(active).item()):
+                    break
+            returns.extend(totals.detach().cpu().numpy().astype(float).tolist())
+            terminal_cpu = terminal_steps.detach().cpu().numpy().astype(float)
+            episode_steps.extend(terminal_cpu.tolist())
+            full_episode_successes.extend(episode_success.detach().cpu().numpy().astype(float).tolist())
+        selected_returns = np.asarray(returns, dtype=float)
+        selected_steps = np.asarray(episode_steps, dtype=float)
+        metrics: dict[str, float] = {"mean_return": float(np.nanmean(selected_returns)) if selected_returns.size else float("nan")}
+        if selected_steps.size:
+            completion = selected_steps / max_steps_f
+            metrics["mean_episode_steps"] = float(np.nanmean(selected_steps))
+            metrics["min_episode_steps"] = float(np.nanmin(selected_steps))
+            metrics["mean_episode_completion"] = float(np.nanmean(completion))
+            metrics["min_episode_completion"] = float(np.nanmin(completion))
+        if full_episode_successes:
+            successes = np.asarray(full_episode_successes, dtype=float)
+            metrics["full_episode_success"] = float(np.nanmean(successes))
+            metrics["termination_failure_fraction"] = float(np.nanmean(successes < 0.5))
+        max_metrics = {
+            "shape_error_mean_m",
+            "shape_error_max_m",
+            "ip_error_a",
+            "current_over_limit_a",
+            "current_usage_fraction",
+            "current_usage_mean_fraction",
+            "action_rms",
+            "action_saturation_fraction",
+            "terminated_boundary",
+            "terminated_current",
+        }
+        min_metrics = {"current_margin_fraction", "boundary_found"}
+        for name, values in component_values.items():
+            arr = np.asarray(values, dtype=float)
+            if arr.size:
+                metrics[name] = float(np.nanmean(arr))
+                metrics[f"{name}_p90"] = float(np.nanpercentile(arr, 90))
+                if name in max_metrics:
+                    metrics[f"{name}_max"] = float(np.nanmax(arr))
+                if name in min_metrics:
+                    metrics[f"{name}_min"] = float(np.nanmin(arr))
+                if name == "current_over_limit_a":
+                    metrics["current_over_limit_fraction"] = float(np.nanmean(arr > 0.0))
+                    metrics["current_over_limit_5ka_fraction"] = float(np.nanmean(arr > 5000.0))
+                if name == "current_usage_fraction":
+                    metrics["current_over_limit_1pct_fraction"] = float(np.nanmean(arr > 1.01))
+        for name, values in late_component_values.items():
+            arr = np.asarray(values, dtype=float)
+            if arr.size:
+                metrics[f"{name}_late"] = float(np.nanmean(arr))
+                metrics[f"{name}_late_p90"] = float(np.nanpercentile(arr, 90))
+                if name in max_metrics:
+                    metrics[f"{name}_late_max"] = float(np.nanmax(arr))
+                if name in min_metrics:
+                    metrics[f"{name}_late_min"] = float(np.nanmin(arr))
+                if name == "current_over_limit_a":
+                    metrics["current_over_limit_fraction_late"] = float(np.nanmean(arr > 0.0))
+                    metrics["current_over_limit_5ka_fraction_late"] = float(np.nanmean(arr > 5000.0))
+                if name == "current_usage_fraction":
+                    metrics["current_over_limit_1pct_fraction_late"] = float(np.nanmean(arr > 1.01))
+        return metrics
+
     def _evaluation_config(self) -> ExperimentConfig:
         if str(self.config.sim.reset_source) != "csv_initial_states":
             return self.config
@@ -1246,26 +1411,24 @@ class Trainer:
             "padded_current_over_limit_1pct_fraction_late",
             metric("current_over_limit_1pct_fraction_late", metric("current_over_limit_fraction_late", metric("current_over_limit_fraction", 0.0))),
         )
-        shape_mean = metric("padded_shape_error_mean_m_late", metric("shape_error_mean_m_late", metric("shape_error_mean_m", 1.0)))
-        shape_max = metric("padded_shape_error_max_m_late", metric("shape_error_max_m_late", metric("shape_error_max_m", 1.0)))
-        ip_error = metric("padded_ip_error_a_late", metric("ip_error_a_late", metric("ip_error_a", 1.0e6)))
-        action_rms = metric("action_rms_late", metric("action_rms", 1.0))
-        delta_action_rms = metric("delta_action_rms_late", metric("delta_action_rms", 1.0))
+        saturation_fraction = metric("action_saturation_fraction_late", metric("action_saturation_fraction", 1.0))
+        shape_mean = metric("shape_error_mean_m_late_p90", metric("shape_error_mean_m_p90", metric("shape_error_mean_m_late", metric("shape_error_mean_m", 1.0))))
+        shape_max = metric("shape_error_max_m_late_p90", metric("shape_error_max_m_p90", metric("shape_error_max_m_late", metric("shape_error_max_m", 1.0))))
+        ip_error = metric("ip_error_a_late_p90", metric("ip_error_a_p90", metric("ip_error_a_late", metric("ip_error_a", 1.0e6))))
 
         objective = (
-            200.0 * max(0.95 - completion, 0.0)
-            + 200.0 * max(0.95 - full_success, 0.0)
-            + 200.0 * max(0.90 - min_completion, 0.0)
-            + 1000.0 * max(0.999 - boundary_late, 0.0)
-            + 100.0 * max(terminated_boundary, 0.0)
-            + 3.0 * max(current_over, 0.0) / 20000.0
-            + 2.0 * max(current_fraction, 0.0)
-            + 1.0 * max(current_1pct_fraction, 0.0)
-            + 2.0 * max(shape_mean, 0.0) / 0.03
-            + 1.0 * max(shape_max, 0.0) / 0.08
-            + 2.0 * max(ip_error, 0.0) / 25000.0
-            + 0.5 * max(action_rms, 0.0) / 0.5
-            + 0.25 * max(delta_action_rms, 0.0) / 0.1
+            1000.0 * max(1.0 - completion, 0.0)
+            + 1000.0 * max(1.0 - full_success, 0.0)
+            + 1000.0 * max(1.0 - min_completion, 0.0)
+            + 1000.0 * max(1.0 - boundary_late, 0.0)
+            + 500.0 * max(terminated_boundary, 0.0)
+            + 500.0 * max(current_over, 0.0) / 5000.0
+            + 500.0 * max(current_fraction, 0.0)
+            + 500.0 * max(current_1pct_fraction, 0.0)
+            + 500.0 * max(saturation_fraction - 0.01, 0.0)
+            + max(shape_mean, 0.0) / 0.03
+            + 0.5 * max(shape_max, 0.0) / 0.08
+            + max(ip_error, 0.0) / 15000.0
         )
         return float(-objective)
 
