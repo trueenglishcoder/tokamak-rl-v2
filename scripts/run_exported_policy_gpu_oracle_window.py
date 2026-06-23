@@ -276,13 +276,15 @@ def _validate_contract(*, controller: LearnedMagneticController, env: TokamakMag
     export_angles = np.asarray(controller.schema.get("angles_rad", []), dtype=float)
     if export_angles.shape != _angles_np(env).shape or not np.allclose(export_angles, _angles_np(env), atol=1.0e-7, rtol=0.0):
         raise ValueError("boundary angle grid mismatch between export and environment")
-    if controller.derivative_scale.shape != env.derivative_limits.detach().cpu().numpy().shape:
+    derivative_limits = _as_numpy(env.derivative_limits)
+    current_limits = _as_numpy(env.current_limits)
+    if controller.derivative_scale.shape != derivative_limits.shape:
         raise ValueError("derivative normalization shape mismatch")
-    if not np.allclose(controller.derivative_scale, env.derivative_limits.detach().cpu().numpy(), rtol=1.0e-6, atol=1.0e-3):
+    if not np.allclose(controller.derivative_scale, derivative_limits, rtol=1.0e-6, atol=1.0e-3):
         raise ValueError("derivative normalization mismatch between export and environment")
-    if controller.current_scale.shape != env.current_limits.detach().cpu().numpy().shape:
+    if controller.current_scale.shape != current_limits.shape:
         raise ValueError("current normalization shape mismatch")
-    if not np.allclose(controller.current_scale, env.current_limits.detach().cpu().numpy(), rtol=1.0e-6, atol=1.0e-3):
+    if not np.allclose(controller.current_scale, current_limits, rtol=1.0e-6, atol=1.0e-3):
         raise ValueError("current normalization mismatch between export and environment")
     expected_reference_hash = _reference_hash(cfg.reference)
     export_reference_hash = str(controller.metadata.get("reference_hash", ""))
@@ -351,7 +353,14 @@ def _model_view(sim: BatchedGpuTokamakSimulator, *, lane: int) -> _ModelView:
 
 
 def _angles_np(env: TokamakMagneticControlEnv) -> np.ndarray:
-    return env.angles.detach().cpu().numpy().astype(float)
+    return _as_numpy(env.angles)
+
+
+def _as_numpy(value: object) -> np.ndarray:
+    """Return a float NumPy array from either tensor or array-like values."""
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().numpy().astype(float)
+    return np.asarray(value, dtype=float)
 
 
 def _slice_from_obs(obs: torch.Tensor, env: TokamakMagneticControlEnv, name: str) -> np.ndarray:
