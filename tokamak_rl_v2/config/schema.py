@@ -66,7 +66,14 @@ class IpReferenceConfig:
     segment_count_min: int = 3
     segment_count_max: int = 8
     hold_probability: float = 0.35
-    kind: Literal["segmented", "hold_reset", "segmented_profile", "single_segment_profile", "replay_window"] = "segmented"
+    kind: Literal[
+        "segmented",
+        "hold_reset",
+        "segmented_profile",
+        "single_segment_profile",
+        "replay_window",
+        "hold_boundary_eval_profile",
+    ] = "segmented"
     limits_path: Path | None = None
     start_mode: Literal["reset_ip"] = "reset_ip"
     plateau_min_fraction: float = 0.25

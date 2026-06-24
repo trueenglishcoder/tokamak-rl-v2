@@ -190,7 +190,7 @@ def _reference(raw: Mapping[str, Any], base: Path) -> ReferenceConfig:
     _reject_unknown_keys(ip_raw, set(IpReferenceConfig.__dataclass_fields__), prefix="reference.ip")
     _reject_unknown_keys(b_raw, set(BoundaryReferenceConfig.__dataclass_fields__), prefix="reference.boundary")
     kind = str(ip_raw.get("kind", "segmented")).lower()
-    if kind in {"segmented_profile", "single_segment_profile", "replay_window"}:
+    if kind in {"segmented_profile", "single_segment_profile", "replay_window", "hold_boundary_eval_profile"}:
         min_value = float(ip_raw.get("min", 1.0))
         max_value = float(ip_raw.get("max", min_value))
         rate_limit = float(ip_raw.get("rate_limit", 1.0))
@@ -348,9 +348,10 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
     if int(cfg.reference.theta_count) <= 0:
         raise ValueError("reference.theta_count must be positive")
     ip = cfg.reference.ip
-    if ip.kind not in {"segmented", "hold_reset", "segmented_profile", "single_segment_profile", "replay_window"}:
+    profile_kinds = {"segmented_profile", "single_segment_profile", "hold_boundary_eval_profile"}
+    if ip.kind not in {"segmented", "hold_reset", "segmented_profile", "single_segment_profile", "replay_window", "hold_boundary_eval_profile"}:
         raise ValueError("reference.ip.kind is unsupported")
-    if ip.kind not in {"segmented_profile", "single_segment_profile", "replay_window"}:
+    if ip.kind not in profile_kinds | {"replay_window"}:
         if not (math.isfinite(ip.min) and math.isfinite(ip.max) and ip.max >= ip.min):
             raise ValueError("reference.ip min/max are invalid")
         if _range_crosses_or_touches_zero(float(ip.min), float(ip.max)):
@@ -361,7 +362,7 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
                 raise ValueError("sim.initial_ranges.ip must stay strictly on one side of zero")
             if _sign(float(initial_ip.min)) != _sign(float(ip.min)):
                 raise ValueError("sim.initial_ranges.ip must have the same sign as reference.ip")
-    if ip.kind in {"segmented_profile", "single_segment_profile"}:
+    if ip.kind in profile_kinds:
         if ip.limits_path is None:
             raise ValueError(f"reference.ip.kind={ip.kind} requires reference.ip.limits_path")
         if ip.start_mode != "reset_ip":
@@ -371,6 +372,13 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
                 raise ValueError("reference.ip segmented_profile step bounds are invalid")
             if ip.segment_count_min < 2 or ip.segment_count_max < ip.segment_count_min:
                 raise ValueError("reference.ip segmented_profile count bounds are invalid")
+        if ip.kind == "hold_boundary_eval_profile":
+            if ip.segment_min_steps <= 0 or ip.segment_max_steps < ip.segment_min_steps:
+                raise ValueError("reference.ip hold_boundary_eval_profile step bounds are invalid")
+            if ip.segment_count_min < 1 or ip.segment_count_max < ip.segment_count_min:
+                raise ValueError("reference.ip hold_boundary_eval_profile count bounds are invalid")
+            if not 0.0 <= float(ip.hold_probability) <= 1.0:
+                raise ValueError("reference.ip.hold_probability must be in [0, 1]")
         if ip.ramp_rate_reference not in {"p95", "robust_mean"}:
             raise ValueError("reference.ip.ramp_rate_reference must be 'p95' or 'robust_mean'")
         for name in (
@@ -402,7 +410,7 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
                 raise ValueError(f"reference.ip.{name} must be non-negative")
         if int(ip.hold_max_steps) < int(ip.hold_min_steps):
             raise ValueError("reference.ip hold step bounds are invalid")
-    if ip.kind not in {"segmented_profile", "single_segment_profile", "replay_window"}:
+    if ip.kind not in profile_kinds | {"replay_window"}:
         if not math.isfinite(ip.rate_limit) or ip.rate_limit < 0.0:
             raise ValueError("reference.ip.rate_limit must be finite and non-negative")
         if ip.segment_min_steps <= 0 or ip.segment_max_steps < ip.segment_min_steps:

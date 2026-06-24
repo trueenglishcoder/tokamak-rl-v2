@@ -389,6 +389,14 @@ def generate_reference_batch(
                 rng,
                 dt=float(config.t_step),
             )
+        elif config.ip.kind == "hold_boundary_eval_profile":
+            ip[b] = _hold_boundary_eval_profile_ip(
+                config.ip,
+                float(initial_ip_np[b]),
+                int(steps),
+                rng,
+                dt=float(config.t_step),
+            )
         elif config.ip.kind == "replay_window":
             assert boundary_replay_library is not None
             assert shot_id_arr is not None
@@ -643,6 +651,95 @@ def _single_segment_profile_ip(
     raise ValueError("failed to sample a single_segment_profile Ip reference that fits the episode")
 
 
+def _hold_boundary_eval_profile_ip(
+    cfg: IpReferenceConfig,
+    start: float,
+    steps: int,
+    rng: np.random.Generator,
+    *,
+    dt: float,
+) -> np.ndarray:
+    if cfg.limits_path is None:
+        raise ValueError("hold_boundary_eval_profile requires limits_path")
+    limits = load_reference_limits(cfg.limits_path)
+    lo = float(limits.ip_p01_a)
+    hi = float(limits.ip_p99_a)
+    start_ip = float(start)
+    if not (lo <= start_ip <= hi):
+        raise ValueError(f"hold_boundary_eval_profile reset Ip {start_ip:g} is outside production bounds [{lo:g}, {hi:g}]")
+    step_count = int(steps)
+    if step_count <= 0:
+        raise ValueError("hold_boundary_eval_profile requires at least one step")
+
+    width = max(hi - lo, 1.0)
+    max_total_delta = float(cfg.max_delta_fraction) * width
+    positive_rate_base, negative_rate_base = _segmented_profile_rate_bases(cfg, limits)
+    positive_rate_min = float(cfg.ramp_up_rate_min_fraction) * float(positive_rate_base)
+    positive_rate_max = float(cfg.ramp_up_rate_fraction) * float(positive_rate_base)
+    negative_rate_min = float(cfg.ramp_down_rate_min_fraction) * float(negative_rate_base)
+    negative_rate_max = float(cfg.ramp_down_rate_fraction) * float(negative_rate_base)
+    if positive_rate_max <= 0.0 or negative_rate_max <= 0.0:
+        raise ValueError("hold_boundary_eval_profile ramp rate fractions must allow nonzero ramps")
+
+    for _attempt in range(512):
+        lengths = _segment_lengths(cfg, step_count, rng)
+        if int(lengths.size) == 0:
+            continue
+        kinds = _sample_hold_boundary_eval_kinds(lengths, cfg, rng)
+        out = np.full((step_count + 1,), np.nan, dtype=float)
+        out[0] = start_ip
+        current = start_ip
+        cursor = 0
+        total_delta_abs = 0.0
+        valid = True
+        for segment_steps_raw, kind_raw in zip(lengths.tolist(), kinds.tolist(), strict=True):
+            segment_steps = int(segment_steps_raw)
+            kind = int(kind_raw)
+            if segment_steps <= 0:
+                valid = False
+                break
+            if kind == 0:
+                out[cursor : cursor + segment_steps + 1] = current
+                cursor += segment_steps
+                continue
+
+            if kind > 0:
+                room = max(hi - current, 0.0)
+                rate_low = max(0.0, positive_rate_min)
+                rate_high = max(rate_low, positive_rate_max)
+            else:
+                room = max(current - lo, 0.0)
+                rate_low = max(0.0, negative_rate_min)
+                rate_high = max(rate_low, negative_rate_max)
+
+            remaining_delta = max(max_total_delta - total_delta_abs, 0.0)
+            delta_high = min(room, remaining_delta, float(rate_high) * float(dt) * float(segment_steps))
+            if delta_high <= 1.0e-6:
+                out[cursor : cursor + segment_steps + 1] = current
+                cursor += segment_steps
+                continue
+            delta_low = min(delta_high, max(1.0e-6, float(rate_low) * float(dt) * float(segment_steps)))
+            delta = float(rng.uniform(delta_low, delta_high)) if delta_high > delta_low else float(delta_high)
+            target = current + float(kind) * delta
+            out[cursor : cursor + segment_steps + 1] = np.linspace(current, target, segment_steps + 1, dtype=float)
+            cursor += segment_steps
+            current = target
+            total_delta_abs += abs(delta)
+
+        if not valid:
+            continue
+        out[cursor:] = current
+        if (
+            np.all(np.isfinite(out))
+            and np.nanmin(out) >= lo
+            and np.nanmax(out) <= hi
+            and _reference_signed_rate_ok(out, max_positive_rate=positive_rate_max, max_negative_abs_rate=negative_rate_max, dt=dt)
+            and _has_no_adjacent_ramp_runs(out)
+        ):
+            return out
+    raise ValueError("failed to sample a hold_boundary_eval_profile Ip reference that fits the episode")
+
+
 def _segmented_profile_rate_bases(cfg: IpReferenceConfig, limits: T15ReferenceLimits) -> tuple[float, float]:
     if cfg.ramp_rate_reference == "robust_mean":
         if limits.positive_ramp_mean_a_per_s is None or limits.negative_ramp_abs_mean_a_per_s is None:
@@ -699,6 +796,39 @@ def _sample_segment_kinds(cfg: IpReferenceConfig, lengths: np.ndarray, rng: np.r
     if not np.any(kinds == 0) or not np.any(kinds != 0):
         return None
     return kinds
+
+
+def _sample_hold_boundary_eval_kinds(lengths: np.ndarray, cfg: IpReferenceConfig, rng: np.random.Generator) -> np.ndarray:
+    count = int(np.asarray(lengths).size)
+    kinds = np.zeros((count,), dtype=np.int8)
+    if count <= 1:
+        return kinds
+    previous_was_ramp = False
+    for idx in range(count):
+        if previous_was_ramp:
+            previous_was_ramp = False
+            continue
+        if rng.random() < float(cfg.hold_probability):
+            continue
+        kinds[idx] = np.int8(int(rng.choice((-1, 1))))
+        previous_was_ramp = True
+    if np.any(kinds != 0) and not np.any(kinds == 0):
+        kinds[int(rng.integers(0, count))] = 0
+    return kinds
+
+
+def _has_no_adjacent_ramp_runs(values: np.ndarray) -> bool:
+    diff = np.diff(np.asarray(values, dtype=float))
+    signs = np.sign(diff).astype(int)
+    signs[np.abs(diff) <= 1.0e-9] = 0
+    runs: list[int] = []
+    for sign in signs.tolist():
+        if not runs or int(sign) != runs[-1]:
+            runs.append(int(sign))
+    for left, right in zip(runs, runs[1:], strict=False):
+        if int(left) != 0 and int(right) != 0:
+            return False
+    return True
 
 
 def _profile_ramp_delta(
