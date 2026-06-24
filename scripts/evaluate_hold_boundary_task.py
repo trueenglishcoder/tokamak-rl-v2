@@ -50,6 +50,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--expected-shot", default="3864")
     ap.add_argument("--seed", type=int, default=386400)
     ap.add_argument("--base-index", type=int, default=0)
+    ap.add_argument(
+        "--ip-profile-kind",
+        default="hold_boundary_eval_profile",
+        choices=("hold_boundary_eval_profile", "hold_boundary_eval_cut_profile"),
+    )
+    ap.add_argument("--parent-steps", type=int, default=900)
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--no-progress", action="store_true")
     args = ap.parse_args(argv)
@@ -66,7 +72,14 @@ def main(argv: list[str] | None = None) -> int:
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    cfg = _forced_hold_boundary_config(load_experiment_config(args.config), steps=int(args.steps), split=str(args.split), device=str(device))
+    cfg = _forced_hold_boundary_config(
+        load_experiment_config(args.config),
+        steps=int(args.steps),
+        split=str(args.split),
+        device=str(device),
+        ip_profile_kind=str(args.ip_profile_kind),
+        parent_steps=int(args.parent_steps),
+    )
     _write_config_snapshot(cfg, out_dir / "hold_boundary_eval_config_snapshot.json")
     indices = _select_heldout_indices(
         cfg,
@@ -125,24 +138,51 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _forced_hold_boundary_config(cfg, *, steps: int, split: str, device: str):
+def _forced_hold_boundary_config(cfg, *, steps: int, split: str, device: str, ip_profile_kind: str = "hold_boundary_eval_profile", parent_steps: int = 900):
     limits_path = cfg.reference.ip.limits_path or Path("data/processed/t15_reference_limits.json").resolve()
+    if ip_profile_kind not in {"hold_boundary_eval_profile", "hold_boundary_eval_cut_profile"}:
+        raise ValueError(f"unsupported hold_boundary_eval Ip profile: {ip_profile_kind}")
+    if ip_profile_kind == "hold_boundary_eval_cut_profile":
+        ip_kwargs = {
+            "kind": "hold_boundary_eval_cut_profile",
+            "parent_steps": int(parent_steps),
+            "segment_min_steps": 300,
+            "segment_max_steps": int(parent_steps),
+            "segment_count_min": 1,
+            "segment_count_max": 3,
+            "hold_probability": 0.45,
+            "hold_min_steps": 300,
+            "hold_max_steps": int(parent_steps),
+        }
+    else:
+        ip_kwargs = {
+            "kind": "hold_boundary_eval_profile",
+            "parent_steps": 0,
+            "segment_min_steps": 50,
+            "segment_max_steps": 170,
+            "segment_count_min": 1,
+            "segment_count_max": 6,
+            "hold_probability": 0.45,
+            "hold_min_steps": 35,
+            "hold_max_steps": 220,
+        }
     ip = IpReferenceConfig(
-        kind="hold_boundary_eval_profile",
+        kind=ip_kwargs["kind"],
         limits_path=limits_path,
         start_mode="reset_ip",
-        segment_min_steps=50,
-        segment_max_steps=170,
-        segment_count_min=1,
-        segment_count_max=6,
-        hold_probability=0.45,
+        parent_steps=int(ip_kwargs["parent_steps"]),
+        segment_min_steps=int(ip_kwargs["segment_min_steps"]),
+        segment_max_steps=int(ip_kwargs["segment_max_steps"]),
+        segment_count_min=int(ip_kwargs["segment_count_min"]),
+        segment_count_max=int(ip_kwargs["segment_count_max"]),
+        hold_probability=float(ip_kwargs["hold_probability"]),
         ramp_rate_reference="robust_mean",
         ramp_up_rate_min_fraction=0.05,
         ramp_up_rate_fraction=0.20,
         ramp_down_rate_min_fraction=0.05,
         ramp_down_rate_fraction=0.20,
-        hold_min_steps=35,
-        hold_max_steps=220,
+        hold_min_steps=int(ip_kwargs["hold_min_steps"]),
+        hold_max_steps=int(ip_kwargs["hold_max_steps"]),
         final_hold_min_steps=0,
         smooth_ramps=False,
         max_delta_fraction=0.35,
@@ -414,6 +454,11 @@ def _write_config_snapshot(cfg, path: Path) -> None:
                     "ip": {
                         "kind": cfg.reference.ip.kind,
                         "limits_path": str(cfg.reference.ip.limits_path),
+                        "parent_steps": cfg.reference.ip.parent_steps,
+                        "segment_min_steps": cfg.reference.ip.segment_min_steps,
+                        "segment_max_steps": cfg.reference.ip.segment_max_steps,
+                        "segment_count_min": cfg.reference.ip.segment_count_min,
+                        "segment_count_max": cfg.reference.ip.segment_count_max,
                         "ramp_rate_reference": cfg.reference.ip.ramp_rate_reference,
                         "ramp_up_rate_min_fraction": cfg.reference.ip.ramp_up_rate_min_fraction,
                         "ramp_up_rate_fraction": cfg.reference.ip.ramp_up_rate_fraction,

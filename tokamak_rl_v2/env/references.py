@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +29,13 @@ class ReferenceBatch:
     points: Tensor
     radii: Tensor
     theta: Tensor
+
+
+@dataclass(frozen=True, slots=True)
+class HoldBoundaryEvalCutSample:
+    ip: np.ndarray
+    parent_ip: np.ndarray
+    cut_start_step: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -397,6 +404,14 @@ def generate_reference_batch(
                 rng,
                 dt=float(config.t_step),
             )
+        elif config.ip.kind == "hold_boundary_eval_cut_profile":
+            ip[b] = sample_hold_boundary_eval_cut_profile(
+                config.ip,
+                float(initial_ip_np[b]),
+                int(steps),
+                rng,
+                dt=float(config.t_step),
+            ).ip
         elif config.ip.kind == "replay_window":
             assert boundary_replay_library is not None
             assert shot_id_arr is not None
@@ -738,6 +753,57 @@ def _hold_boundary_eval_profile_ip(
         ):
             return out
     raise ValueError("failed to sample a hold_boundary_eval_profile Ip reference that fits the episode")
+
+
+def sample_hold_boundary_eval_cut_profile(
+    cfg: IpReferenceConfig,
+    start: float,
+    steps: int,
+    rng: np.random.Generator,
+    *,
+    dt: float,
+) -> HoldBoundaryEvalCutSample:
+    """Sample a long parent Ip program and return a reset-aligned episode cut."""
+    if cfg.limits_path is None:
+        raise ValueError("hold_boundary_eval_cut_profile requires limits_path")
+    limits = load_reference_limits(cfg.limits_path)
+    lo = float(limits.ip_p01_a)
+    hi = float(limits.ip_p99_a)
+    start_ip = float(start)
+    if not (lo <= start_ip <= hi):
+        raise ValueError(f"hold_boundary_eval_cut_profile reset Ip {start_ip:g} is outside production bounds [{lo:g}, {hi:g}]")
+    step_count = int(steps)
+    parent_steps = int(cfg.parent_steps)
+    if step_count <= 0:
+        raise ValueError("hold_boundary_eval_cut_profile requires at least one step")
+    if parent_steps < step_count:
+        raise ValueError("hold_boundary_eval_cut_profile parent_steps must be >= episode steps")
+
+    positive_rate_base, negative_rate_base = _segmented_profile_rate_bases(cfg, limits)
+    positive_rate_max = float(cfg.ramp_up_rate_fraction) * float(positive_rate_base)
+    negative_rate_max = float(cfg.ramp_down_rate_fraction) * float(negative_rate_base)
+    parent_cfg = replace(cfg, kind="hold_boundary_eval_profile")
+    max_cut_start = int(parent_steps - step_count)
+
+    for _attempt in range(512):
+        cut_start = int(rng.integers(0, max_cut_start + 1)) if max_cut_start > 0 else 0
+        parent = _hold_boundary_eval_profile_ip(parent_cfg, start_ip, parent_steps, rng, dt=dt)
+        shifted = parent + (start_ip - float(parent[cut_start]))
+        if np.nanmin(shifted) < lo or np.nanmax(shifted) > hi:
+            continue
+        if not _reference_signed_rate_ok(shifted, max_positive_rate=positive_rate_max, max_negative_abs_rate=negative_rate_max, dt=dt):
+            continue
+        if not _has_no_adjacent_ramp_runs(shifted):
+            continue
+        cut = np.asarray(shifted[cut_start : cut_start + step_count + 1], dtype=float)
+        if cut.shape != (step_count + 1,):
+            continue
+        if not np.all(np.isfinite(cut)):
+            continue
+        if not np.isclose(float(cut[0]), start_ip, rtol=0.0, atol=1.0e-6):
+            continue
+        return HoldBoundaryEvalCutSample(ip=cut, parent_ip=np.asarray(shifted, dtype=float), cut_start_step=int(cut_start))
+    raise ValueError("failed to sample a hold_boundary_eval_cut_profile Ip reference that fits the episode")
 
 
 def _segmented_profile_rate_bases(cfg: IpReferenceConfig, limits: T15ReferenceLimits) -> tuple[float, float]:

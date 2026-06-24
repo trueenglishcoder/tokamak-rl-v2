@@ -7,13 +7,14 @@ from pathlib import Path
 import sys
 
 import numpy as np
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT.parent / "tokamak-sim"))
 
 from tokamak_rl_v2.config.schema import BoundaryReferenceConfig, IpReferenceConfig, ReferenceConfig
-from tokamak_rl_v2.env.references import generate_reference_batch
+from tokamak_rl_v2.env.references import generate_reference_batch, sample_hold_boundary_eval_cut_profile
 from tokamak_rl_v2.env.t15_reference_limits import load_reference_limits
 
 _SUMMARY_SPEC = importlib.util.spec_from_file_location("summarize_hold_boundary_eval", ROOT / "scripts/summarize_hold_boundary_eval.py")
@@ -78,6 +79,37 @@ def _hold_eval_config(limits_path: Path) -> ReferenceConfig:
     )
 
 
+def _hold_eval_cut_config(limits_path: Path) -> ReferenceConfig:
+    return ReferenceConfig(
+        duration_s=0.5,
+        t_step=0.001,
+        theta_count=4,
+        seed=1,
+        ip=IpReferenceConfig(
+            kind="hold_boundary_eval_cut_profile",
+            limits_path=limits_path,
+            start_mode="reset_ip",
+            parent_steps=900,
+            segment_min_steps=300,
+            segment_max_steps=900,
+            segment_count_min=1,
+            segment_count_max=3,
+            hold_probability=0.35,
+            ramp_rate_reference="robust_mean",
+            ramp_up_rate_min_fraction=0.05,
+            ramp_up_rate_fraction=0.20,
+            ramp_down_rate_min_fraction=0.05,
+            ramp_down_rate_fraction=0.20,
+            hold_min_steps=300,
+            hold_max_steps=900,
+            final_hold_min_steps=0,
+            smooth_ramps=False,
+            max_delta_fraction=0.35,
+        ),
+        boundary=BoundaryReferenceConfig(kind="hold_reset_boundary"),
+    )
+
+
 def test_hold_boundary_eval_profile_shapes_bounds_and_static_boundary(tmp_path: Path) -> None:
     cfg = _hold_eval_config(_limits(tmp_path / "limits.json"))
     batch_size = 64
@@ -134,6 +166,61 @@ def test_hold_boundary_eval_profile_has_no_adjacent_ramps(tmp_path: Path) -> Non
                 runs.append(int(sign))
         for left, right in zip(runs, runs[1:], strict=False):
             assert not (left != 0 and right != 0), runs
+
+
+def test_hold_boundary_eval_cut_profile_uses_long_parent_and_static_boundary(tmp_path: Path) -> None:
+    cfg = _hold_eval_cut_config(_limits(tmp_path / "limits.json"))
+    batch_size = 32
+    initial_ip = np.linspace(180000.0, 320000.0, batch_size, dtype=float)
+    initial_radii = np.linspace(0.50, 0.65, batch_size * 4, dtype=float).reshape(batch_size, 4)
+    ref = generate_reference_batch(
+        config=cfg,
+        initial_ip=initial_ip,
+        initial_parameters=np.zeros((batch_size, 5), dtype=float),
+        steps=500,
+        device="cpu",
+        seed=789,
+        initial_boundary_points=np.zeros((batch_size, 4, 2), dtype=float),
+        initial_boundary_radii=initial_radii,
+    )
+
+    ip = ref.ip.detach().cpu().numpy()
+    radii = ref.radii.detach().cpu().numpy()
+    assert ip.shape == (batch_size, 501)
+    assert radii.shape == (batch_size, 501, 4)
+    assert np.allclose(ip[:, 0], initial_ip)
+    assert np.allclose(radii, initial_radii[:, None, :])
+    assert float(np.min(ip)) >= 100000.0
+    assert float(np.max(ip)) <= 400000.0
+
+    rng1 = np.random.default_rng(1234)
+    rng2 = np.random.default_rng(1234)
+    sample1 = sample_hold_boundary_eval_cut_profile(cfg.ip, 250000.0, 500, rng1, dt=0.001)
+    sample2 = sample_hold_boundary_eval_cut_profile(cfg.ip, 250000.0, 500, rng2, dt=0.001)
+    assert sample1.parent_ip.shape == (901,)
+    assert sample1.ip.shape == (501,)
+    assert 0 <= sample1.cut_start_step <= 400
+    assert np.allclose(sample1.ip, sample2.ip)
+    assert sample1.cut_start_step == sample2.cut_start_step
+    assert sample1.ip[0] == pytest.approx(250000.0)
+    assert np.allclose(sample1.ip, sample1.parent_ip[sample1.cut_start_step : sample1.cut_start_step + 501])
+    signs = np.sign(np.diff(sample1.parent_ip)).astype(int)
+    signs[np.abs(np.diff(sample1.parent_ip)) <= 1.0e-9] = 0
+    run_lengths: list[int] = []
+    current_sign: int | None = None
+    current_len = 0
+    for sign in signs.tolist():
+        if current_sign is None or int(sign) == current_sign:
+            current_sign = int(sign)
+            current_len += 1
+        else:
+            run_lengths.append(current_len)
+            current_sign = int(sign)
+            current_len = 1
+    if current_len:
+        run_lengths.append(current_len)
+    assert run_lengths
+    assert min(run_lengths) >= 300
 
 
 def test_summarize_hold_boundary_eval_aggregates_fake_shards(tmp_path: Path) -> None:

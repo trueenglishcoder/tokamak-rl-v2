@@ -190,7 +190,7 @@ def _reference(raw: Mapping[str, Any], base: Path) -> ReferenceConfig:
     _reject_unknown_keys(ip_raw, set(IpReferenceConfig.__dataclass_fields__), prefix="reference.ip")
     _reject_unknown_keys(b_raw, set(BoundaryReferenceConfig.__dataclass_fields__), prefix="reference.boundary")
     kind = str(ip_raw.get("kind", "segmented")).lower()
-    if kind in {"segmented_profile", "single_segment_profile", "replay_window", "hold_boundary_eval_profile"}:
+    if kind in {"segmented_profile", "single_segment_profile", "replay_window", "hold_boundary_eval_profile", "hold_boundary_eval_cut_profile"}:
         min_value = float(ip_raw.get("min", 1.0))
         max_value = float(ip_raw.get("max", min_value))
         rate_limit = float(ip_raw.get("rate_limit", 1.0))
@@ -214,6 +214,7 @@ def _reference(raw: Mapping[str, Any], base: Path) -> ReferenceConfig:
             kind=kind,
             limits_path=None if ip_raw.get("limits_path") is None else _resolve(base, ip_raw.get("limits_path")),
             start_mode=str(ip_raw.get("start_mode", "reset_ip")),
+            parent_steps=int(ip_raw.get("parent_steps", 0)),
             plateau_min_fraction=float(ip_raw.get("plateau_min_fraction", 0.25)),
             plateau_max_fraction=float(ip_raw.get("plateau_max_fraction", 1.0)),
             end_min_fraction=float(ip_raw.get("end_min_fraction", 0.25)),
@@ -348,8 +349,8 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
     if int(cfg.reference.theta_count) <= 0:
         raise ValueError("reference.theta_count must be positive")
     ip = cfg.reference.ip
-    profile_kinds = {"segmented_profile", "single_segment_profile", "hold_boundary_eval_profile"}
-    if ip.kind not in {"segmented", "hold_reset", "segmented_profile", "single_segment_profile", "replay_window", "hold_boundary_eval_profile"}:
+    profile_kinds = {"segmented_profile", "single_segment_profile", "hold_boundary_eval_profile", "hold_boundary_eval_cut_profile"}
+    if ip.kind not in {"segmented", "hold_reset", "segmented_profile", "single_segment_profile", "replay_window", "hold_boundary_eval_profile", "hold_boundary_eval_cut_profile"}:
         raise ValueError("reference.ip.kind is unsupported")
     if ip.kind not in profile_kinds | {"replay_window"}:
         if not (math.isfinite(ip.min) and math.isfinite(ip.max) and ip.max >= ip.min):
@@ -372,13 +373,18 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
                 raise ValueError("reference.ip segmented_profile step bounds are invalid")
             if ip.segment_count_min < 2 or ip.segment_count_max < ip.segment_count_min:
                 raise ValueError("reference.ip segmented_profile count bounds are invalid")
-        if ip.kind == "hold_boundary_eval_profile":
+        if ip.kind in {"hold_boundary_eval_profile", "hold_boundary_eval_cut_profile"}:
             if ip.segment_min_steps <= 0 or ip.segment_max_steps < ip.segment_min_steps:
-                raise ValueError("reference.ip hold_boundary_eval_profile step bounds are invalid")
+                raise ValueError(f"reference.ip {ip.kind} step bounds are invalid")
             if ip.segment_count_min < 1 or ip.segment_count_max < ip.segment_count_min:
-                raise ValueError("reference.ip hold_boundary_eval_profile count bounds are invalid")
+                raise ValueError(f"reference.ip {ip.kind} count bounds are invalid")
             if not 0.0 <= float(ip.hold_probability) <= 1.0:
                 raise ValueError("reference.ip.hold_probability must be in [0, 1]")
+        if ip.kind == "hold_boundary_eval_cut_profile":
+            if int(ip.parent_steps) <= 0:
+                raise ValueError("reference.ip.hold_boundary_eval_cut_profile requires parent_steps > 0")
+            if int(ip.parent_steps) < int(cfg.sim.max_episode_steps):
+                raise ValueError("reference.ip.parent_steps must be >= sim.max_episode_steps")
         if ip.ramp_rate_reference not in {"p95", "robust_mean"}:
             raise ValueError("reference.ip.ramp_rate_reference must be 'p95' or 'robust_mean'")
         for name in (

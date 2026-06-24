@@ -73,9 +73,11 @@ class IpReferenceConfig:
         "single_segment_profile",
         "replay_window",
         "hold_boundary_eval_profile",
+        "hold_boundary_eval_cut_profile",
     ] = "segmented"
     limits_path: Path | None = None
     start_mode: Literal["reset_ip"] = "reset_ip"
+    parent_steps: int = 0
     plateau_min_fraction: float = 0.25
     plateau_max_fraction: float = 1.0
     end_min_fraction: float = 0.25
