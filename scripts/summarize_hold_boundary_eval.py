@@ -4,10 +4,9 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 from pathlib import Path
 from typing import Any
-
-import numpy as np
 
 SUMMARY_METRICS = (
     "mean_episode_completion",
@@ -117,16 +116,16 @@ def _summary_from_windows(rows: list[dict[str, object]]) -> dict[str, float]:
         "terminated_current",
     ):
         values = _col(rows, key)
-        out[_summary_key(key)] = float(np.nanmean(values)) if values.size else float("nan")
+        out[_summary_key(key)] = _mean(values)
     for key in ("episode_completion", "boundary_found_late"):
         values = _col(rows, key)
-        out[f"{_summary_key(key)}_min"] = float(np.nanmin(values)) if values.size else float("nan")
+        out[f"{_summary_key(key)}_min"] = min(values) if values else float("nan")
     current_over = _col(rows, "current_over_limit_a_late")
     usage = _col(rows, "current_usage_fraction_late")
-    out["current_over_limit_a_late_max"] = float(np.nanmax(current_over)) if current_over.size else float("nan")
-    out["current_over_limit_fraction_late"] = float(np.nanmean(current_over > 0.0)) if current_over.size else float("nan")
-    out["current_over_limit_5ka_fraction_late"] = float(np.nanmean(current_over > 5000.0)) if current_over.size else float("nan")
-    out["current_over_limit_1pct_fraction_late"] = float(np.nanmean(usage > 1.01)) if usage.size else float("nan")
+    out["current_over_limit_a_late_max"] = max(current_over) if current_over else float("nan")
+    out["current_over_limit_fraction_late"] = _fraction(current_over, threshold=0.0)
+    out["current_over_limit_5ka_fraction_late"] = _fraction(current_over, threshold=5000.0)
+    out["current_over_limit_1pct_fraction_late"] = _fraction(usage, threshold=1.01)
     return out
 
 
@@ -139,16 +138,26 @@ def _summary_key(key: str) -> str:
     }.get(key, key)
 
 
-def _col(rows: list[dict[str, object]], key: str) -> np.ndarray:
+def _col(rows: list[dict[str, object]], key: str) -> list[float]:
     values = []
     for row in rows:
         try:
             value = float(row.get(key, float("nan")))
         except (TypeError, ValueError):
             value = float("nan")
-        if np.isfinite(value):
+        if math.isfinite(value):
             values.append(value)
-    return np.asarray(values, dtype=float)
+    return values
+
+
+def _mean(values: list[float]) -> float:
+    return float(sum(values) / len(values)) if values else float("nan")
+
+
+def _fraction(values: list[float], *, threshold: float) -> float:
+    if not values:
+        return float("nan")
+    return float(sum(1 for value in values if value > float(threshold)) / len(values))
 
 
 def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:
@@ -183,7 +192,7 @@ def _fmt(value: object) -> str:
         number = float(value)
     except (TypeError, ValueError):
         return "nan"
-    if not np.isfinite(number):
+    if not math.isfinite(number):
         return "nan"
     if abs(number) >= 1000.0 or (0.0 < abs(number) < 1.0e-3):
         return f"{number:.4g}"
