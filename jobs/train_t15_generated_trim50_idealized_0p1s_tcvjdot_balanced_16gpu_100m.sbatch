@@ -260,6 +260,7 @@ srun --ntasks="${NNODES}" --ntasks-per-node=1 \
     export PYTHONPATH=/workspace/tokamak-sim:/workspace/tokamak-rl-v2:${PYTHONPATH:-}
     export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
     export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+    export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=${TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-1800}
     export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
     cd /workspace/tokamak-rl-v2
 
