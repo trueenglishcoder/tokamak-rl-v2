@@ -24,6 +24,7 @@ from tokamak_rl_v2.env.references import (
     sample_generated_segment_profile,
 )
 from tokamak_rl_v2.env.t15_csv_initial_states import CsvInitialStateLibrary
+from tokamak_rl_v2.training.policy_pipeline import _preflight_artifact_failure
 
 
 def test_generated_preprocessing_writes_exact_current_envelope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -221,3 +222,9 @@ def test_generated_config_loads_and_env_uses_params0() -> None:
     env = TokamakMagneticControlEnv(env_cfg, batch_size=1, device="cpu", seed=123)
     payload = env._reset_payload_from_csv_sample(sample)
     assert np.allclose(payload.params0, sample.params0)
+
+
+def test_generated_config_artifact_preflight_allows_params0() -> None:
+    cfg = load_experiment_config("configs/experiments/t15_generated_trim50_idealized_0p5s_tcvjdot_balanced_mpo.yaml")
+
+    assert _preflight_artifact_failure(cfg) is None

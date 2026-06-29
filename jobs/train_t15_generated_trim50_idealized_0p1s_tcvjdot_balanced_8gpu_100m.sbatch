@@ -31,6 +31,20 @@ export WANDB_MODE=${WANDB_MODE:-online}
 export MASTER_ADDR=127.0.0.1
 export MASTER_PORT=${MASTER_PORT:-$(( 20000 + (${SLURM_JOB_ID:-1731} % 40000) ))}
 
+print_failure_report() {
+  status=$?
+  if (( status != 0 )); then
+    report="${TRAIN_OUTPUT}/policy_validation.json"
+    if [[ -f "${report}" ]]; then
+      echo
+      echo "===== POLICY VALIDATION FAILURE REPORT =====" >&2
+      cat "${report}" >&2
+    fi
+  fi
+  return "${status}"
+}
+trap print_failure_report EXIT
+
 if [[ ! -f "${SOURCE_CONFIG}" ]]; then
   echo "missing generated training config: ${SOURCE_CONFIG}" >&2
   exit 2
