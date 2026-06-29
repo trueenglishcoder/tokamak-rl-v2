@@ -19,7 +19,7 @@ from tokamak_rl_v2.export.cli import main as export_cli_main
 from tokamak_rl_v2.training.mpo import MaximumAPosterioriPolicyOptimiser
 from tokamak_rl_v2.training.policy_pipeline import _ArrayReferenceScenario, _write_baseline_report, evaluate_policy_gates, run_reset_sanity
 from tokamak_rl_v2.training.replay import FIFOSequenceReplay, SequenceBatch
-from tokamak_rl_v2.training.trainer import Trainer, _append_csv_row
+from tokamak_rl_v2.training.trainer import Trainer, _append_csv_row, _distributed_eval_reduce
 from tokamak_rl_v2.env.references import T15ReplayBoundaryLibrary, _segmented_ip, _segment_lengths, generate_reference_batch
 from tokamak_rl_v2.env.t15_csv_initial_states import CsvInitialStateSample
 from tokamak_rl_v2.training.cli import _device_list
@@ -2300,6 +2300,42 @@ def test_evaluate_detailed_reports_physical_metrics(tmp_path: Path) -> None:
     assert 0.0 < metrics["mean_episode_completion"] <= 1.0
     assert repeat["mean_return"] == pytest.approx(metrics["mean_return"])
     assert np.isfinite(holdout["mean_return"])
+
+
+def test_distributed_eval_reduce_combines_metric_shards(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tokamak_rl_v2.training import trainer as trainer_module
+
+    def fake_all_gather_object(out: list[object], payload: object) -> None:
+        out[0] = {
+            "count": 2,
+            "metrics": {
+                "mean_return": 1.0,
+                "mean_episode_completion": 0.5,
+                "min_episode_steps": 4.0,
+                "current_over_limit_a_max": 7.0,
+            },
+        }
+        out[1] = {
+            "count": 1,
+            "metrics": {
+                "mean_return": 3.0,
+                "mean_episode_completion": 1.0,
+                "min_episode_steps": 9.0,
+                "current_over_limit_a_max": 5.0,
+            },
+        }
+
+    monkeypatch.setattr(trainer_module.dist, "is_available", lambda: True)
+    monkeypatch.setattr(trainer_module.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(trainer_module.dist, "get_world_size", lambda: 2)
+    monkeypatch.setattr(trainer_module.dist, "all_gather_object", fake_all_gather_object)
+
+    merged = _distributed_eval_reduce({}, count=0, device=torch.device("cpu"), enabled=True)
+    assert merged["distributed_eval_episode_count"] == 3.0
+    assert merged["mean_return"] == pytest.approx((2.0 * 1.0 + 1.0 * 3.0) / 3.0)
+    assert merged["mean_episode_completion"] == pytest.approx((2.0 * 0.5 + 1.0 * 1.0) / 3.0)
+    assert merged["min_episode_steps"] == 4.0
+    assert merged["current_over_limit_a_max"] == 7.0
 
 
 def test_evaluate_detailed_failure_padding_marks_short_termination_bad(tmp_path: Path) -> None:

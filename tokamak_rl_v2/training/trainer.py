@@ -173,6 +173,70 @@ def _distributed_mean_scalars(values: dict[str, float], *, device: torch.device,
     return out
 
 
+def _distributed_eval_reduce(metrics: dict[str, float], *, count: int, device: torch.device, enabled: bool) -> dict[str, float]:
+    if not enabled or not (dist.is_available() and dist.is_initialized()) or int(dist.get_world_size()) <= 1:
+        return metrics
+    world_size = int(dist.get_world_size())
+    payload: dict[str, object] = {"count": int(count), "metrics": dict(metrics)}
+    gathered: list[object] = [None for _ in range(world_size)]
+    dist.all_gather_object(gathered, payload)
+
+    metric_keys: set[str] = set()
+    total_count = 0
+    local_counts: list[int] = []
+    payloads: list[dict[str, object]] = []
+    for raw in gathered:
+        if not isinstance(raw, dict):
+            continue
+        payloads.append(raw)
+        raw_count = max(0, int(raw.get("count", 0)))
+        local_counts.append(raw_count)
+        total_count += raw_count
+        raw_metrics = raw.get("metrics", {})
+        if isinstance(raw_metrics, Mapping):
+            metric_keys.update(str(k) for k in raw_metrics.keys())
+
+    def combine_kind(name: str) -> str:
+        if name in {"min_episode_steps", "min_episode_completion"} or name.endswith("_min"):
+            return "min"
+        if name.endswith("_max"):
+            return "max"
+        return "mean"
+
+    out: dict[str, float] = {}
+    for key in sorted(metric_keys):
+        values: list[tuple[float, int]] = []
+        for payload in payloads:
+            raw_metrics = payload.get("metrics", {})
+            if not isinstance(raw_metrics, Mapping) or key not in raw_metrics:
+                continue
+            value = float(raw_metrics[key])
+            if not math_isfinite(value):
+                continue
+            values.append((value, max(0, int(payload.get("count", 0)))))
+        if not values:
+            out[key] = float("nan")
+            continue
+        kind = combine_kind(key)
+        if kind == "min":
+            out[key] = float(min(value for value, _count in values))
+        elif kind == "max":
+            out[key] = float(max(value for value, _count in values))
+        else:
+            weight_sum = sum(count for _value, count in values)
+            if weight_sum > 0:
+                out[key] = float(sum(value * count for value, count in values) / weight_sum)
+            else:
+                out[key] = float(np.mean([value for value, _count in values]))
+
+    out["distributed_eval_world_size"] = float(world_size)
+    out["distributed_eval_episode_count"] = float(total_count)
+    if local_counts:
+        out["distributed_eval_local_episodes_min"] = float(min(local_counts))
+        out["distributed_eval_local_episodes_max"] = float(max(local_counts))
+    return out
+
+
 class _RewardComponentAccumulator:
     def __init__(self, device: torch.device) -> None:
         self.device = torch.device(device)
@@ -765,28 +829,33 @@ class Trainer:
                     last_checkpoint_step = env_steps
 
                 should_stop = False
-                if self._rank0() and env_steps - last_eval_step >= max(int(self.config.training.eval_interval_steps), 1):
-                    eval_metrics = self.evaluate_detailed(max_steps=_eval_max_steps_for_config(self.config), episodes=int(self.config.training.eval_episodes))
-                    score = self._selection_score(eval_metrics)
-                    eval_metrics["selection_score"] = score
-                    _append_csv_row(eval_path, {"step": env_steps, "env_step": env_steps, **eval_metrics})
-                    self._wandb_log({f"eval/{k}": v for k, v in eval_metrics.items()}, step=env_steps)
-                    if self._retained_eval_checkpoints_enabled():
-                        self._save_retained_eval_checkpoint(step=env_steps, updates=updates, score=score, eval_metrics=eval_metrics)
-                    improved = score > self.best_eval + float(self.config.training.early_stop_min_delta)
-                    if improved:
-                        self.best_eval = score
-                        self.best_eval_details = dict(eval_metrics)
-                        no_improve_evals = 0
-                        self._remember_best_actor()
-                        if self._save_checkpoints_enabled() and not self._retained_eval_checkpoints_enabled():
-                            self._save_checkpoint("best.pt", step=env_steps, updates=updates)
-                        self._export("exports/best_actor", step=env_steps, updates=updates, eval_score=score)
-                    else:
-                        no_improve_evals += 1
-                    patience = int(self.config.training.early_stop_patience_evals)
-                    if patience > 0 and no_improve_evals >= patience:
-                        should_stop = True
+                if env_steps - last_eval_step >= max(int(self.config.training.eval_interval_steps), 1):
+                    eval_metrics = self.evaluate_detailed(
+                        max_steps=_eval_max_steps_for_config(self.config),
+                        episodes=int(self.config.training.eval_episodes),
+                        distributed=True,
+                    )
+                    if self._rank0():
+                        score = self._selection_score(eval_metrics)
+                        eval_metrics["selection_score"] = score
+                        _append_csv_row(eval_path, {"step": env_steps, "env_step": env_steps, **eval_metrics})
+                        self._wandb_log({f"eval/{k}": v for k, v in eval_metrics.items()}, step=env_steps)
+                        if self._retained_eval_checkpoints_enabled():
+                            self._save_retained_eval_checkpoint(step=env_steps, updates=updates, score=score, eval_metrics=eval_metrics)
+                        improved = score > self.best_eval + float(self.config.training.early_stop_min_delta)
+                        if improved:
+                            self.best_eval = score
+                            self.best_eval_details = dict(eval_metrics)
+                            no_improve_evals = 0
+                            self._remember_best_actor()
+                            if self._save_checkpoints_enabled() and not self._retained_eval_checkpoints_enabled():
+                                self._save_checkpoint("best.pt", step=env_steps, updates=updates)
+                            self._export("exports/best_actor", step=env_steps, updates=updates, eval_score=score)
+                        else:
+                            no_improve_evals += 1
+                        patience = int(self.config.training.early_stop_patience_evals)
+                        if patience > 0 and no_improve_evals >= patience:
+                            should_stop = True
                     last_eval_step = env_steps
 
                 should_stop = self._broadcast_rank0_bool(should_stop)
@@ -1031,14 +1100,36 @@ class Trainer:
         return float(self.evaluate_detailed(episodes=episodes, max_steps=max_steps)["mean_return"])
 
     @torch.no_grad()
-    def evaluate_detailed(self, *, episodes: int, max_steps: int, policy: Literal["actor", "no_control"] = "actor", seed_offset: int = 100000) -> dict[str, float]:
+    def evaluate_detailed(
+        self,
+        *,
+        episodes: int,
+        max_steps: int,
+        policy: Literal["actor", "no_control"] = "actor",
+        seed_offset: int = 100000,
+        distributed: bool = False,
+    ) -> dict[str, float]:
         if policy not in {"actor", "no_control"}:
             raise ValueError(f"unsupported evaluation policy: {policy}")
-        batch_size = max(1, min(int(episodes), self.num_envs))
+        distributed_eval = bool(distributed) and self._distributed_initialized() and int(dist.get_world_size()) > 1
+        requested_episodes = int(episodes)
         eval_config = self._evaluation_config()
         if eval_config.reference.ip.kind == "replay_window" and eval_config.sim.reset_source == "csv_initial_states":
-            return self._evaluate_replay_windows_exact(eval_config=eval_config, episodes=int(episodes), max_steps=int(max_steps), policy=policy, seed_offset=seed_offset)
-        env = TokamakMagneticControlEnv(eval_config, batch_size=batch_size, device=self.device, seed=int(eval_config.training.seed) + int(seed_offset))
+            return self._evaluate_replay_windows_exact(
+                eval_config=eval_config,
+                episodes=requested_episodes,
+                max_steps=int(max_steps),
+                policy=policy,
+                seed_offset=seed_offset,
+                distributed=distributed_eval,
+            )
+        local_episodes = requested_episodes
+        local_seed_offset = int(seed_offset)
+        if distributed_eval:
+            local_episodes = self._distributed_local_episode_count(requested_episodes)
+            local_seed_offset = int(seed_offset) + int(self.distributed_rank) * 1000003
+        batch_size = max(1, min(int(local_episodes), self.num_envs))
+        env = TokamakMagneticControlEnv(eval_config, batch_size=batch_size, device=self.device, seed=int(eval_config.training.seed) + int(local_seed_offset))
         obs = env.reset()
         returns: list[float] = []
         episode_steps: list[int] = []
@@ -1082,7 +1173,7 @@ class Trainer:
             if late_count > 0:
                 padded_late_component_values.setdefault(name, []).extend([float(value)] * int(late_count))
 
-        while len(returns) < int(episodes):
+        while len(returns) < int(local_episodes):
             if policy == "actor":
                 action = self.actor.deterministic(obs)
             else:
@@ -1125,7 +1216,7 @@ class Trainer:
                     return value if np.isfinite(value) else float(default)
 
                 for index, is_done in enumerate(done_cpu):
-                    if is_done and len(returns) < int(episodes):
+                    if is_done and len(returns) < int(local_episodes):
                         returns.append(float(totals_cpu[index]))
                         episode_steps.append(int(steps_cpu[index]))
                         finished_horizon = int(steps_cpu[index]) >= int(max_steps)
@@ -1150,11 +1241,11 @@ class Trainer:
                             _append_padded_failure("current_usage_fraction", terminal_current_usage, remaining, late_count)
                 totals = torch.where(done, torch.zeros_like(totals), totals)
                 steps = torch.where(done, torch.zeros_like(steps), steps)
-                obs = env.reset_indices(done) if len(returns) < int(episodes) else out.obs
+                obs = env.reset_indices(done) if len(returns) < int(local_episodes) else out.obs
             else:
                 obs = out.obs
-        selected_returns = np.asarray(returns[: int(episodes)], dtype=float)
-        selected_steps = np.asarray(episode_steps[: int(episodes)], dtype=float)
+        selected_returns = np.asarray(returns[: int(local_episodes)], dtype=float)
+        selected_steps = np.asarray(episode_steps[: int(local_episodes)], dtype=float)
         max_steps_f = max(float(max_steps), 1.0)
         metrics: dict[str, float] = {"mean_return": float(np.nanmean(selected_returns)) if selected_returns.size else float("nan")}
         if selected_steps.size:
@@ -1164,7 +1255,7 @@ class Trainer:
             metrics["mean_episode_completion"] = float(np.nanmean(completion))
             metrics["min_episode_completion"] = float(np.nanmin(completion))
         if full_episode_successes:
-            successes = np.asarray(full_episode_successes[: int(episodes)], dtype=float)
+            successes = np.asarray(full_episode_successes[: int(local_episodes)], dtype=float)
             metrics["full_episode_success"] = float(np.nanmean(successes))
             metrics["termination_failure_fraction"] = float(np.nanmean(successes < 0.5))
         max_metrics = {
@@ -1263,10 +1354,38 @@ class Trainer:
                     metrics["padded_current_over_limit_5ka_fraction_late"] = float(np.nanmean(arr > 5000.0))
                 if name == "current_usage_fraction":
                     metrics["padded_current_over_limit_1pct_fraction_late"] = float(np.nanmean(arr > 1.01))
-        return metrics
+        return _distributed_eval_reduce(metrics, count=int(local_episodes), device=self.device, enabled=distributed_eval)
 
     @torch.no_grad()
-    def _evaluate_replay_windows_exact(self, *, eval_config: ExperimentConfig, episodes: int, max_steps: int, policy: Literal["actor", "no_control"], seed_offset: int) -> dict[str, float]:
+    def _distributed_local_episode_count(self, total_episodes: int) -> int:
+        if not self._distributed_initialized() or int(dist.get_world_size()) <= 1:
+            return int(total_episodes)
+        total = max(0, int(total_episodes))
+        world_size = int(dist.get_world_size())
+        rank = int(dist.get_rank())
+        base = total // world_size
+        remainder = total % world_size
+        return int(base + (1 if rank < remainder else 0))
+
+    def _distributed_shard_indices(self, total_episodes: int) -> np.ndarray:
+        total = max(0, int(total_episodes))
+        if not self._distributed_initialized() or int(dist.get_world_size()) <= 1:
+            return np.arange(total, dtype=np.int64)
+        world_size = int(dist.get_world_size())
+        rank = int(dist.get_rank())
+        return np.arange(total, dtype=np.int64)[rank::world_size]
+
+    @torch.no_grad()
+    def _evaluate_replay_windows_exact(
+        self,
+        *,
+        eval_config: ExperimentConfig,
+        episodes: int,
+        max_steps: int,
+        policy: Literal["actor", "no_control"],
+        seed_offset: int,
+        distributed: bool = False,
+    ) -> dict[str, float]:
         probe = TokamakMagneticControlEnv(eval_config, batch_size=1, device=self.device, seed=int(eval_config.training.seed) + int(seed_offset))
         library = getattr(probe, "_csv_initial_states", None)
         if library is None:
@@ -1274,16 +1393,18 @@ class Trainer:
         total = min(int(episodes), len(library))
         if total <= 0:
             total = len(library)
-        chunk = max(1, min(int(self.num_envs), total))
+        distributed_eval = bool(distributed) and self._distributed_initialized() and int(dist.get_world_size()) > 1
+        selected_indices = self._distributed_shard_indices(total) if distributed_eval else np.arange(total, dtype=np.int64)
+        chunk = max(1, min(int(self.num_envs), int(selected_indices.size)))
         component_values: dict[str, list[float]] = {}
         late_component_values: dict[str, list[float]] = {}
         returns: list[float] = []
         episode_steps: list[int] = []
         full_episode_successes: list[float] = []
         max_steps_f = max(float(max_steps), 1.0)
-        for start in range(0, total, chunk):
-            end = min(start + chunk, total)
-            indices = np.arange(start, end, dtype=np.int64)
+        for start in range(0, int(selected_indices.size), chunk):
+            end = min(start + chunk, int(selected_indices.size))
+            indices = selected_indices[start:end]
             env = TokamakMagneticControlEnv(eval_config, batch_size=int(indices.size), device=self.device, seed=int(eval_config.training.seed) + int(seed_offset) + int(start))
             obs = env.reset_to_csv_indices(indices)
             totals = torch.zeros((env.batch_size,), dtype=torch.float32, device=self.device)
@@ -1381,7 +1502,7 @@ class Trainer:
                     metrics["current_over_limit_5ka_fraction_late"] = float(np.nanmean(arr > 5000.0))
                 if name == "current_usage_fraction":
                     metrics["current_over_limit_1pct_fraction_late"] = float(np.nanmean(arr > 1.01))
-        return metrics
+        return _distributed_eval_reduce(metrics, count=int(selected_indices.size), device=self.device, enabled=distributed_eval)
 
     def _evaluation_config(self) -> ExperimentConfig:
         if str(self.config.sim.reset_source) != "csv_initial_states":
