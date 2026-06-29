@@ -11,6 +11,7 @@ class CsvInitialStateSample:
     ip0: np.ndarray
     pfc0: np.ndarray
     sol0: np.ndarray
+    params0: np.ndarray | None
     shot_ids: tuple[str, ...]
     source_indices: tuple[int, ...]
     source_times_s: tuple[float, ...]
@@ -38,6 +39,7 @@ class CsvInitialStateLibrary:
             self.ip0 = np.asarray(data["ip0"], dtype=float).reshape(-1)
             self.pfc0 = np.asarray(data["pfc0"], dtype=float)
             self.sol0 = np.asarray(data["sol0"], dtype=float)
+            raw_params0 = np.asarray(data["params0"], dtype=float) if "params0" in data.files else None
             raw_split = np.asarray(data["split"]).astype(str) if "split" in data.files else None
             raw_difficulty = np.asarray(data["difficulty_bin"]).astype(str) if "difficulty_bin" in data.files else None
         if raw_split is None and split != "all":
@@ -57,6 +59,8 @@ class CsvInitialStateLibrary:
                 self.ip0 = self.ip0[keep]
                 self.pfc0 = self.pfc0[keep]
                 self.sol0 = self.sol0[keep]
+                if raw_params0 is not None:
+                    raw_params0 = raw_params0[keep]
                 if raw_difficulty is not None:
                     raw_difficulty = raw_difficulty.reshape(-1)[keep]
                 raw_split = raw_split[keep]
@@ -81,7 +85,15 @@ class CsvInitialStateLibrary:
             raise ValueError(f"CSV initial-state PFC shape must be ({count}, {int(n_pfc)}), got {self.pfc0.shape}")
         if self.sol0.shape != (count, int(n_sol)):
             raise ValueError(f"CSV initial-state SOL shape must be ({count}, {int(n_sol)}), got {self.sol0.shape}")
-        for name, arr in (("time_s", self.time_s), ("ip0", self.ip0), ("pfc0", self.pfc0), ("sol0", self.sol0)):
+        self.params0 = None
+        if raw_params0 is not None:
+            raw_params0 = np.asarray(raw_params0, dtype=float)
+            if raw_params0.shape != (count, 5):
+                raise ValueError(f"CSV initial-state params0 shape must be ({count}, 5), got {raw_params0.shape}")
+            self.params0 = raw_params0
+        for name, arr in (("time_s", self.time_s), ("ip0", self.ip0), ("pfc0", self.pfc0), ("sol0", self.sol0), ("params0", self.params0)):
+            if arr is None:
+                continue
             if not np.all(np.isfinite(arr)):
                 raise ValueError(f"CSV initial-state library contains non-finite {name}")
         self._bin_shot_indices: dict[str, dict[str, np.ndarray]] = {}
@@ -126,6 +138,7 @@ class CsvInitialStateLibrary:
             ip0=self.ip0[idx].astype(float, copy=True),
             pfc0=self.pfc0[idx].astype(float, copy=True),
             sol0=self.sol0[idx].astype(float, copy=True),
+            params0=None if self.params0 is None else self.params0[idx].astype(float, copy=True),
             shot_ids=tuple(str(v) for v in self.shot_id[idx].tolist()),
             source_indices=tuple(int(v) for v in self.source_index[idx].tolist()),
             source_times_s=tuple(float(v) for v in self.time_s[idx].tolist()),

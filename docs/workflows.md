@@ -1,181 +1,122 @@
 # Workflows
 
-This document records the maintained local and Slurm workflows.
+This file records maintained workflows only. Historical reward searches and old
+delta-Jdot learned-policy jobs were removed from active launch paths.
 
-## Local Setup
-
-```bash
-cd ~/tokamak/tokamak-rl-v2
-python3 -m venv .venv
-. .venv/bin/activate
-python3 -m pip install -e ".[dev]"
-python3 -m pip install -e ../tokamak-sim
-```
-
-Or use the simulator environment directly:
+## Local Checks
 
 ```bash
 cd ~/tokamak/tokamak-rl-v2
-PYTHONPATH=.:../tokamak-sim ../tokamak-sim/.venv/bin/python -m pytest -q tests/test_core_contracts.py
-```
-
-## Fast Local Validation
-
-Production cleanup checks:
-
-```bash
-cd ~/tokamak/tokamak-rl-v2
-PYTHONPATH=.:../tokamak-sim ../tokamak-sim/.venv/bin/python -m pytest -q \
+PYTHONPATH=.:../tokamak-sim python3 -m pytest -q \
   tests/test_production_cleanup.py \
-  tests/test_t15_csv_initial_states.py \
-  tests/test_t15_reference_limits.py
+  tests/test_replay_window_oracle_contracts.py \
+  tests/test_hold_boundary_eval.py
 ```
 
-Core contracts:
+Run all core contracts when changing env/reward/replay/export code:
 
 ```bash
-cd ~/tokamak/tokamak-rl-v2
-PYTHONPATH=.:../tokamak-sim ../tokamak-sim/.venv/bin/python -m pytest -q tests/test_core_contracts.py
+PYTHONPATH=.:../tokamak-sim python3 -m pytest -q tests/test_core_contracts.py
 ```
 
-## Non-Production Tiny Smoke
-
-Use a non-production config for tiny local smoke checks:
+## Build Trim50 Oracle Targets
 
 ```bash
-cd ~/tokamak/tokamak-rl-v2
+cd /scratch/$USER/tokamak/tokamak-sim
+git pull --ff-only origin main
 
-PYTHONPATH=.:../tokamak-sim python3 scripts/train_policy_pipeline.py \
-  --config configs/experiments/t15_static_boundary.yaml \
-  --output-dir /tmp/tokamak_rl_v2_smoke \
-  --steps 2 \
-  --num-envs 2 \
-  --device cpu \
-  --sim-compute-backend cpu \
-  --batch-size 2 \
-  --unroll-length 2 \
-  --replay-capacity-episodes 8 \
-  --rollout-chunk-length 1 \
-  --updates-per-rollout-chunk 1 \
-  --eval-episodes 1 \
-  --eval-max-steps 5 \
-  --eval-interval-steps 1 \
-  --controller-rollout-steps 2 \
-  --allow-failed-gates \
-  --wandb-mode disabled
+cd /scratch/$USER/tokamak/tokamak-rl-v2
+git pull --ff-only origin main
+mkdir -p slurm_logs
+
+BUILD_JOB=$(sbatch --parsable jobs/build_t15_new_replay_window_oracle_targets_1gpu.sbatch)
+echo "BUILD_JOB=$BUILD_JOB"
+squeue -j "$BUILD_JOB"
 ```
 
-Use this only as a wiring check. It is not a policy-quality run.
+Expected generated files:
 
-## Production Local Run
-
-```bash
-cd ~/tokamak/tokamak-rl-v2
-
-PYTHONPATH=.:../tokamak-sim python3 scripts/train_policy_pipeline.py \
-  --config configs/experiments/t15_csv_initial_segmented_profile_boundary_mpo.yaml \
-  --output-dir outputs/t15_csv_initial_segmented_profile_boundary_mpo_local \
-  --steps 1000000 \
-  --num-envs 256 \
-  --device cuda:0 \
-  --sim-compute-backend gpu \
-  --sim-gpu-device cuda:0 \
-  --wandb \
-  --wandb-project tokamak-rl-v2-local \
-  --wandb-name t15_csv_initial_segmented_profile_boundary_mpo_local
+```text
+data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_initial_states.npz
+data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_targets/t15_replay_window_oracle_targets.npz
+data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_targets/oracle_summary.json
+configs/experiments/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_mpo_balanced.yaml
 ```
 
-Production notes:
-
-- do not use `scripts/train.py`
-- do not pass `--allow-failed-gates`
-- do not pass `--skip-controller-rollout-gate`
-- `--controller-rollout-steps 0` means full episode
-
-## Push Local Changes
-
-```bash
-cd ~/tokamak/tokamak-rl-v2
-git status
-git add README.md docs/architecture.md docs/artifacts-and-metrics.md docs/configuration.md docs/repository-layout.md docs/workflows.md
-git add tokamak_rl_v2 tests
-git commit -m "Update production contract"
-git push origin main
-```
-
-## Pull On The Server
-
-When you are already logged into the Slurm server:
+## Train The Final Policy
 
 ```bash
 cd /scratch/$USER/tokamak/tokamak-rl-v2
-git pull origin main
+mkdir -p slurm_logs
+
+TRAIN_JOB=$(sbatch --parsable jobs/train_t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_100m.sbatch)
+echo "TRAIN_JOB=$TRAIN_JOB"
+squeue -j "$TRAIN_JOB"
 ```
 
-## Launch The Production Slurm Job
+The job performs preflight checks for the trim50 machine config, reset library,
+oracle targets, action contract, observation schemas, and boundary extraction
+settings before training starts.
+
+## Monitor A Run
 
 ```bash
-cd /scratch/$USER/tokamak/tokamak-rl-v2
-sbatch jobs/train_t15_csv_segmented_profile_tcvdelta_t15boundary_12gpu_20m.sbatch
+squeue -u "$USER"
+sacct -j "$TRAIN_JOB" --format=JobID,JobName%42,State,ExitCode,Elapsed,NodeList,Reason -X
+tail -f slurm_logs/*"${TRAIN_JOB}"*.out
+tail -f slurm_logs/*"${TRAIN_JOB}"*.err
 ```
 
-That job:
-
-1. checks that processed reset, Ip-limit, and replay-boundary artifacts exist,
-2. writes a per-job generated config under the output folder,
-3. launches production training through `scripts/train_policy_pipeline.py`,
-4. uses a fresh W&B project name containing the Slurm job id,
-5. logs focused W&B metrics while keeping full disk CSV/JSON outputs.
-
-## Monitor A Slurm Run
-
-Queue state:
-
-```bash
-squeue -u $USER
-```
-
-Accounting:
-
-```bash
-sacct -j <jobid> --format=JobID,JobName,State,ExitCode,Elapsed,NodeList,Reason -X
-```
-
-Logs:
-
-```bash
-cd /scratch/$USER/tokamak/tokamak-rl-v2
-tail -f slurm_logs/*<jobid>*.out
-tail -f slurm_logs/*<jobid>*.err
-```
-
-## Inspect The Latest Run
+## Package A Run Without Checkpoints
 
 ```bash
 cd /scratch/$USER/tokamak/tokamak-rl-v2
 
-export OUT=$(ls -td outputs/t15_csv_initial_segmented_profile_boundary_mpo_1gpu_* outputs/t15_csv_initial_segmented_profile_boundary_mpo_* 2>/dev/null | head -n 1)
-echo "OUT=$OUT"
-
-python3 - <<'PY'
-import json, os, pathlib
-
-out = pathlib.Path(os.environ["OUT"])
-p = json.load(open(out / "policy_validation.json"))
-
-print("STATUS:", p.get("status"))
-print("CHECKPOINT:", p.get("checkpoint"))
-print("EXPORT_DIR:", p.get("export_dir"))
-print("ACTOR_EVAL:", p.get("actor_eval"))
-print("CONTROLLER:", p.get("controller_rollout"))
-print("GATES:")
-for gate in p.get("gates", []):
-    print(" ", gate.get("name"), gate.get("passed"), gate.get("value"))
-PY
+RUN=t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_100m_<jobid>
+python3 scripts/copy_run_without_checkpoints.py \
+  --run "outputs/${RUN}" \
+  --out "_server_outputs/${RUN}_no_checkpoints_for_codex"
 ```
 
-## Cancel A Job
+## Evaluate An Exported Actor
+
+Replay-window evaluation:
 
 ```bash
-scancel <jobid>
+cd /scratch/$USER/tokamak/tokamak-rl-v2
+
+python3 scripts/evaluate_replay_window_oracle_baselines.py \
+  --config outputs/<run>/generated_configs/<run>.json \
+  --export-dir outputs/<run>/exports/best_actor \
+  --output-dir outputs/<run>/oracle_eval_holdout \
+  --all-windows \
+  --steps 100 \
+  --split holdout \
+  --device cuda:0
 ```
+
+Hold-boundary diagnostic:
+
+```bash
+EVAL_JOB=$(sbatch --parsable jobs/eval_hold_boundary_cut900_seg300_8gpu_800x500.sbatch)
+python3 scripts/summarize_hold_boundary_eval.py \
+  "outputs/hold_boundary_eval_cut900_seg300_${EVAL_JOB}" \
+  --out-dir "outputs/hold_boundary_eval_cut900_seg300_${EVAL_JOB}/summary"
+```
+
+## Important Metrics
+
+Use physical metrics first:
+
+```text
+eval/shape_error_mean_m_late
+eval/shape_error_max_m_late
+eval/ip_error_a_late
+eval/mean_episode_completion
+eval/current_over_limit_*_late
+eval/action_saturation_fraction_late
+eval/action_rms_late
+```
+
+Training losses, Q values, and actor loss are diagnostics, not the primary
+acceptance criteria.

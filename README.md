@@ -1,53 +1,21 @@
 # tokamak-rl-v2
 
-`tokamak-rl-v2` is the reinforcement-learning training stack that sits on top
-of `tokamak-sim`.
+Reinforcement-learning training stack for `tokamak-sim`.
 
-The maintained production path is intentionally narrow:
-
-```text
-CSV initial-state resets
-+ aggregate CSV reference limits
-+ generated segmented_profile Ip targets
-+ T15 replay-derived segment-conditioned boundary targets
-+ TCV-derivative positive quality reward
-+ delta-Jdot actor contract
-+ feedforward actor + recurrent critic + MPO + replay
-+ deterministic actor export
-+ full-episode actor eval + full-episode exported-controller validation
-```
-
-This repository does not own the plant physics. It owns the RL environment,
-reference generation, reward, replay, learner, training pipeline, export, and
-validation logic.
-
-## Production Entry Point
-
-The production config is:
+The active supported path is the T15 trim50 replay-window policy:
 
 ```text
-configs/experiments/t15_csv_initial_segmented_profile_boundary_mpo.yaml
+6-PFC T15 trim50 data
++ plain GPU fixed-angle replay references with legacy_precision_index2=1e-6
++ 0.1 s real replay-window episodes
++ jdot_command actor contract
++ TCV-derivative reward
++ feed-forward actor, recurrent critic, MPO, replay
++ deterministic actor export for tokamak-sim
 ```
 
-The production entrypoint is:
-
-```text
-scripts/train_policy_pipeline.py
-```
-
-Production mode is strict:
-
-- it requires `sim.reset_source = csv_initial_states`
-- it requires `reference.ip.kind = segmented_profile`
-- it requires `reference.boundary.kind = t15_replay_segment_conditioned`
-- it requires `reward.kind = tcv_derivative`
-- it requires per-coil `delta_derivative_limits_aps`
-- it rejects `--allow-failed-gates`
-- it rejects controller-rollout bypasses
-- it evaluates and validates on the full configured episode horizon
-
-The plain trainer CLI is still available for non-production experiments, but it
-refuses `production_mode=true` configs.
+See [CURRENT_PIPELINE.md](CURRENT_PIPELINE.md) for the exact contract and file
+names.
 
 ## Setup
 
@@ -59,122 +27,120 @@ python3 -m pip install -e ".[dev]"
 python3 -m pip install -e ../tokamak-sim
 ```
 
-If you already use the simulator virtual environment, you can run tests through
-`../tokamak-sim/.venv/bin/python`.
+On the Slurm server, use the prepared container image:
 
-## Fast Local Checks
+```text
+/scratch/$USER/tokamak/tokamak-rl-v2.sqsh
+```
+
+## Active Config
+
+```text
+configs/experiments/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_mpo_balanced.yaml
+```
+
+This config is intentionally narrow:
+
+- `reference.ip.kind = replay_window`
+- `reference.boundary.kind = t15_replay_segment_conditioned`
+- `sim.action_contract = jdot_command`
+- `observation.actor_kind = controller_state_v6`
+- `observation.critic_kind = compact_training_state_v2`
+- `reward.kind = tcv_derivative`
+- `sim.max_episode_steps = 100`
+
+## Build Oracle Targets
+
+```bash
+cd /scratch/$USER/tokamak/tokamak-rl-v2
+mkdir -p slurm_logs
+sbatch jobs/build_t15_new_replay_window_oracle_targets_1gpu.sbatch
+```
+
+This writes:
+
+```text
+data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_initial_states.npz
+data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_targets/
+```
+
+## Train
+
+```bash
+cd /scratch/$USER/tokamak/tokamak-rl-v2
+mkdir -p slurm_logs
+sbatch jobs/train_t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_100m.sbatch
+```
+
+The job runs one 8-GPU local-replay training run for 100M global env steps and
+writes outputs under:
+
+```text
+outputs/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_100m_<jobid>/
+```
+
+## Export And Evaluate
+
+Typical outputs:
+
+```text
+config_snapshot.json
+eval_history.csv
+losses.csv
+metrics.json
+policy_validation.json
+exports/best_actor/
+checkpoints/
+```
+
+Manual export:
+
+```bash
+PYTHONPATH=.:../tokamak-sim python3 scripts/export_policy.py \
+  --checkpoint outputs/<run>/checkpoints/best.pt \
+  --out outputs/<run>/exports/manual_best_actor
+```
+
+Replay-window evaluation:
+
+```bash
+PYTHONPATH=.:../tokamak-sim python3 scripts/evaluate_replay_window_oracle_baselines.py \
+  --config outputs/<run>/generated_configs/<run>.json \
+  --export-dir outputs/<run>/exports/best_actor \
+  --output-dir outputs/<run>/oracle_eval_holdout \
+  --all-windows \
+  --steps 100 \
+  --split holdout \
+  --device cuda:0
+```
+
+Hold-boundary diagnostics:
+
+```bash
+sbatch jobs/eval_hold_boundary_cut900_seg300_8gpu_800x500.sbatch
+```
+
+## Tests
+
+Focused checks:
 
 ```bash
 cd ~/tokamak/tokamak-rl-v2
-PYTHONPATH=.:../tokamak-sim ../tokamak-sim/.venv/bin/python -m pytest -q \
+PYTHONPATH=.:../tokamak-sim python3 -m pytest -q \
   tests/test_production_cleanup.py \
-  tests/test_t15_csv_initial_states.py \
-  tests/test_t15_reference_limits.py
+  tests/test_replay_window_oracle_contracts.py \
+  tests/test_hold_boundary_eval.py
 ```
 
 Core contracts:
 
 ```bash
-cd ~/tokamak/tokamak-rl-v2
-PYTHONPATH=.:../tokamak-sim ../tokamak-sim/.venv/bin/python -m pytest -q tests/test_core_contracts.py
+PYTHONPATH=.:../tokamak-sim python3 -m pytest -q tests/test_core_contracts.py
 ```
 
-## Production Training
+## Notes
 
-Local launch:
-
-```bash
-cd ~/tokamak/tokamak-rl-v2
-
-PYTHONPATH=.:../tokamak-sim python3 scripts/train_policy_pipeline.py \
-  --config configs/experiments/t15_csv_initial_segmented_profile_boundary_mpo.yaml \
-  --output-dir outputs/t15_csv_initial_segmented_profile_boundary_mpo_local \
-  --steps 1000000 \
-  --num-envs 256 \
-  --device cuda:0 \
-  --sim-compute-backend gpu \
-  --sim-gpu-device cuda:0 \
-  --wandb \
-  --wandb-project tokamak-rl-v2-local \
-  --wandb-name t15_csv_initial_segmented_profile_boundary_mpo_local
-```
-
-Slurm launch:
-
-```bash
-cd /scratch/$USER/tokamak/tokamak-rl-v2
-sbatch jobs/train_t15_csv_segmented_profile_tcvdelta_t15boundary_12gpu_20m.sbatch
-```
-
-That job writes to:
-
-```text
-outputs/t15_csv_segmented_profile_tcvdelta_t15boundary_12gpu_20m_<jobid>
-slurm_logs/tokamak-rl-v2-tcvd-t15boundary-12gpu-20m-<jobid>.out
-slurm_logs/tokamak-rl-v2-tcvd-t15boundary-12gpu-20m-<jobid>.err
-```
-
-## Production Runtime Contract
-
-At runtime, training reads only processed artifacts:
-
-```text
-data/processed/t15_csv_initial_states.npz
-data/processed/t15_reference_limits.json
-../tokamak-sim/runs/t15md_limited_replay_dataset/
-```
-
-The environment does not read raw T15 CSV traces during rollout. Raw CSVs are
-used only by offline builders and replay runs that produce the processed reset,
-Ip-limit, and boundary-reference artifacts.
-
-Boundary targets come from smoothed T15 replay boundary segments matched by shot
-id and reset time, then shifted so step 0 equals the reset boundary. Ip targets
-are generated online as bounded `segmented_profile` programs that start at reset
-Ip, stay positive, stay inside aggregate limits, and obey signed ramp-rate
-limits.
-
-## Outputs
-
-A normal production run writes:
-
-```text
-config_snapshot.json
-losses.csv
-reward_components.csv
-eval_history.csv
-metrics.json
-policy_validation.json
-closed_loop_rollout_report.json
-exports/best_actor/
-exports/final_actor/
-checkpoints/                 optional
-```
-
-The final decision is in `policy_validation.json`. Physical success is based on
-full-episode actor behavior and full-episode exported-controller behavior, not
-on MPO diagnostic thresholds.
-
-## Manual Export
-
-Manual checkpoint export is supported through:
-
-```bash
-PYTHONPATH=.:../tokamak-sim python3 scripts/export_policy.py \
-  --checkpoint outputs/run/checkpoints/best.pt \
-  --out outputs/run/exports/manual_best_actor
-```
-
-Manual export accepts only checkpoints with the production actor schema:
-
-```text
-controller_state_v3
-```
-
-## More Detail
-
-- [Configuration](docs/configuration.md)
-- [Workflows](docs/workflows.md)
-- [Architecture](docs/architecture.md)
-- [Repository Layout](docs/repository-layout.md)
-- [Artifacts And Metrics](docs/artifacts-and-metrics.md)
+Old delta-Jdot learned-policy sweeps, static-boundary reward searches, 2 s
+T15-boundary jobs, 0.2 s antidrift jobs, and 4-PFC training/search launchers have
+been retired from the active repo. The 4-PFC data itself remains protected for
+future work.

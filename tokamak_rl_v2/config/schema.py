@@ -72,6 +72,7 @@ class IpReferenceConfig:
         "segmented_profile",
         "single_segment_profile",
         "replay_window",
+        "generated_segment_profile",
         "hold_boundary_eval_profile",
         "hold_boundary_eval_cut_profile",
     ] = "segmented"
@@ -101,9 +102,12 @@ class BoundaryReferenceConfig:
         "rate_limited_parameters",
         "hold_reset_boundary",
         "t15_replay_segment_conditioned",
+        "generated_parameter_profile",
     ] = "static_initial_parameters"
     rate_limits: dict[str, float] = field(default_factory=dict)
     replay_reference_dir: Path | None = None
+    envelope_path: Path | None = None
+    segment_min_steps: int = 30
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,7 +174,6 @@ class RandomizationConfig:
 @dataclass(frozen=True, slots=True)
 class SimConfig:
     config_path: Path
-    initial_currents_path: Path | None
     compute_backend: Literal["cpu", "gpu"] = "cpu"
     gpu_device: str = "cuda:0"
     angles: int = 32

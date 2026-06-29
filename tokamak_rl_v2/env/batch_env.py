@@ -59,7 +59,7 @@ class TokamakMagneticControlEnv:
         self.batch_size = int(batch_size)
         self.device = torch.device(device)
         self.rng = np.random.default_rng(int(seed))
-        self.cfg = load_config(config.sim.config_path, initial_currents_path=config.sim.initial_currents_path)
+        self.cfg = load_config(config.sim.config_path)
         if not math.isclose(float(config.reference.t_step), float(self.cfg.physics.t_step), rel_tol=0.0, abs_tol=1.0e-12):
             raise ValueError(
                 "reference.t_step must match tokamak-sim physics.t_step exactly for runtime consistency"
@@ -248,11 +248,19 @@ class TokamakMagneticControlEnv:
 
     def _reset_payload_from_csv_sample(self, reset: CsvInitialStateSample) -> ResetPayload:
         count = int(reset.ip0.shape[0])
+        boundary_cfg = getattr(getattr(self.config, "reference", None), "boundary", None)
+        boundary_kind = str(getattr(boundary_cfg, "kind", ""))
+        if boundary_kind == "generated_parameter_profile":
+            if reset.params0 is None:
+                raise ValueError("generated_parameter_profile requires csv initial-state library with params0")
+            params0 = reset.params0
+        else:
+            params0 = np.zeros((count, 5), dtype=float) if reset.params0 is None else reset.params0
         return ResetPayload(
             ip0=reset.ip0,
             pfc0=reset.pfc0,
             sol0=reset.sol0,
-            params0=np.zeros((count, 5), dtype=float),
+            params0=params0,
             reference_seed=int(self.rng.integers(0, 2**31 - 1)),
             shot_ids=reset.shot_ids,
             source_indices=reset.source_indices,
@@ -368,8 +376,7 @@ class TokamakMagneticControlEnv:
     def _new_cpu_model(self, *, ip: float, pfc_currents: np.ndarray, sol_currents: np.ndarray) -> PlasmaModel:
         pfc = self.cfg.pfc.__class__(name=self.cfg.pfc.name, coils=list(self.cfg.pfc.coils), currents=pfc_currents)
         sol = self.cfg.sol.__class__(name=self.cfg.sol.name, coils=list(self.cfg.sol.coils), currents=sol_currents)
-        physics = replace(self.cfg.physics, Ip0=float(ip))
-        return PlasmaModel.from_settings(grid=self.cfg.grid, pfc=pfc, sol=sol, settings=physics)
+        return PlasmaModel.from_settings(grid=self.cfg.grid, pfc=pfc, sol=sol, settings=self.cfg.physics, ip0=float(ip))
 
     def step(self, action: Tensor) -> BatchStep:
         action = torch.as_tensor(action, dtype=torch.float32, device=self.device).reshape(self.batch_size, self.action_dim)

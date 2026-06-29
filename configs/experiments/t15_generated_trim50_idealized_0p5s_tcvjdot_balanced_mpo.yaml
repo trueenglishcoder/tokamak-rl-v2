@@ -1,14 +1,13 @@
 {
-  "name": "t15_csv_initial_single_segment_0p1s_static_boundary_mpo",
+  "name": "t15_generated_trim50_idealized_0p5s_tcvjdot_balanced_mpo",
   "sim": {
-    "config_path": "../../../tokamak-sim/configs/T15MD_new_data.toml",
-    "initial_currents_path": null,
+    "config_path": "../../../tokamak-sim/runs/t15md_limited_replay_dataset_trim50_idealized_low_tau_gpu_plain_1e6_video/T15MD_new_data_legacy_contour_limited_replay.toml",
     "compute_backend": "gpu",
     "gpu_device": "cuda:0",
     "angles": 32,
-    "max_episode_steps": 100,
+    "max_episode_steps": 500,
     "reset_source": "csv_initial_states",
-    "csv_initial_state_library": "../../data/processed/t15_csv_initial_states.npz",
+    "csv_initial_state_library": "../../data/processed/t15_generated_trim50_idealized_initial_states.npz",
     "csv_initial_state_split": "train",
     "current_safety_limits": {
       "pfc_currents": {
@@ -37,31 +36,30 @@
     "current_saturation_fraction": 1.0
   },
   "reference": {
-    "duration_s": 0.1,
+    "duration_s": 0.5,
     "t_step": 0.001,
     "theta_count": 32,
-    "seed": 11,
+    "seed": 17,
     "ip": {
-      "kind": "single_segment_profile",
-      "limits_path": "../../data/processed/t15_reference_limits.json",
+      "kind": "generated_segment_profile",
+      "limits_path": "../../data/processed/t15_generated_trim50_idealized_envelope.json",
       "start_mode": "reset_ip",
-      "ramp_rate_reference": "robust_mean",
-      "ramp_up_rate_min_fraction": 0.3,
-      "ramp_up_rate_fraction": 0.55,
-      "ramp_down_rate_min_fraction": 0.3,
-      "ramp_down_rate_fraction": 0.55,
-      "smooth_ramps": false,
-      "max_delta_fraction": 0.60
+      "segment_min_steps": 150,
+      "smooth_ramps": true
     },
     "boundary": {
-      "kind": "hold_reset_boundary"
+      "kind": "generated_parameter_profile",
+      "envelope_path": "../../data/processed/t15_generated_trim50_idealized_envelope.json",
+      "segment_min_steps": 150
     }
   },
   "observation": {
-    "actor_kind": "controller_state_v4",
-    "critic_kind": "privileged_training_state_v1",
+    "actor_kind": "controller_state_v6",
+    "critic_kind": "compact_training_state_v2",
     "target_preview_steps": 10,
-    "target_preview_stride": 10
+    "target_preview_stride": 50,
+    "ip_rate_scale_aps": 500000.0,
+    "boundary_rate_scale_mps": 1.0
   },
   "reward": {
     "kind": "tcv_derivative",
@@ -83,7 +81,7 @@
     "current_bad_fraction": 1.0,
     "derivative_soft_fraction": 0.9,
     "derivative_bad_fraction": 1.1,
-    "terminal_reward": -5.0,
+    "terminal_reward": -20.0,
     "terminal_remaining_cost": 0.0,
     "actuator_saturation_weight": 0.1875,
     "reward_scale": 0.01,
@@ -99,36 +97,41 @@
     "actor_initial_std": 0.2
   },
   "learner": {
-    "discount": 0.9995,
-    "unroll_length": 64,
-    "batch_size": 256,
-    "replay_capacity_episodes": 288,
+    "discount": 0.99,
+    "unroll_length": 100,
+    "batch_size": 32,
+    "replay_capacity_episodes": 1024,
     "actor_lr": 0.0003,
     "critic_lr": 0.0003,
     "kl_lr": 0.0003,
-    "action_samples": 20,
-    "min_replay_sequence_length": 64,
+    "action_samples": 64,
+    "min_replay_sequence_length": 100,
     "actor_update_chunk_size": 2048,
     "temperature": 1.0,
     "mean_kl_epsilon": 0.01,
     "std_kl_epsilon": 0.0001,
     "target_update_tau": 0.005,
-    "rollout_chunk_length": 64,
-    "updates_per_rollout_chunk": 32
+    "rollout_chunk_length": 100,
+    "updates_per_rollout_chunk": 64
   },
   "training": {
-    "steps": 20000000,
-    "num_envs": 256,
+    "steps": 100000000,
+    "num_envs": 2048,
     "device": "auto",
     "seed": 1,
-    "output_dir": "../../outputs/t15_csv_initial_single_segment_0p1s_static_boundary_mpo",
+    "output_dir": "../../outputs/t15_generated_trim50_idealized_0p5s_tcvjdot_balanced",
     "save_checkpoints": true,
-    "checkpoint_interval_steps": 500000,
-    "eval_interval_steps": 100000,
+    "checkpoint_interval_steps": 1000000,
+    "eval_interval_steps": 500000,
     "eval_episodes": 128,
-    "eval_max_steps": 100,
+    "eval_max_steps": 500,
     "actor_workers": 1,
     "distributed_mode": "local_replay",
-    "production_mode": true
+    "production_mode": true,
+    "early_stop_patience_evals": 0,
+    "early_stop_min_delta": 0.0,
+    "milestone_checkpoint_interval_steps": 1000000,
+    "eval_checkpoint_top_k": 10,
+    "keep_latest_checkpoint": true
   }
 }

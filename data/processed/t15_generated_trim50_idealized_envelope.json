@@ -1,0 +1,47 @@
+{
+  "boundary": {
+    "A0": {
+      "abs_rate_max": 9.352908467497736,
+      "max": 0.6585471689773374,
+      "min": 0.43414684038215856
+    },
+    "R0": {
+      "raw_max": 1.4814988791467052,
+      "raw_min": 1.4188169494617584
+    },
+    "Z0": {
+      "raw_max": 0.009233644280502547,
+      "raw_min": -0.013171482063689387
+    },
+    "delta": {
+      "abs_rate_max": 7.561204903826113,
+      "max": 0.28205171039598476,
+      "min": 0.0
+    },
+    "elongation_excess": {
+      "abs_rate_max": 8.682840529589246,
+      "max": 0.4732542848639277,
+      "min": 0.0
+    }
+  },
+  "holdout_shots": [
+    "3863"
+  ],
+  "ip": {
+    "abs_rate_max_aps": 969677.3646181119,
+    "max_a": 511681.54135367385,
+    "min_a": 112228.39132076583,
+    "raw_max_a": 426401.2844613949,
+    "raw_min_a": 140285.4891509573
+  },
+  "schema": "t15_generated_trim50_idealized_envelope_v1",
+  "source_boundary_param_dir": "/home/mnsa/tokamak/tokamak-sim/output/t15_boundary_parameters_trim50_idealized_low_tau_gpu_plain_1e6",
+  "source_data_root": "/home/mnsa/tokamak/tokamak-sim/data/t15_data_new_trim50_idealized",
+  "train_shots": [
+    "3854",
+    "3855",
+    "3856",
+    "3859",
+    "3862"
+  ]
+}

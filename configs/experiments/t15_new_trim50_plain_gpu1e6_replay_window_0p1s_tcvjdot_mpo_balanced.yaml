@@ -1,14 +1,13 @@
 {
-  "name": "t15_new_replay_window_0p1s_tcvjdot_mpo",
+  "name": "t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle",
   "sim": {
-    "config_path": "../../../tokamak-sim/configs/T15MD_new_data.toml",
-    "initial_currents_path": null,
+    "config_path": "../../../tokamak-sim/runs/t15md_trim50_plain_gpu_1e6_setup/T15MD_new_data_trim50_plain_gpu_1e6_3856.toml",
     "compute_backend": "gpu",
     "gpu_device": "cuda:0",
     "angles": 32,
     "max_episode_steps": 100,
     "reset_source": "csv_initial_states",
-    "csv_initial_state_library": "../../data/processed/t15_new_replay_window_0p1s_oracle_initial_states.npz",
+    "csv_initial_state_library": "../../data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_initial_states.npz",
     "csv_initial_state_split": "train",
     "current_safety_limits": {
       "pfc_currents": {
@@ -46,7 +45,7 @@
     },
     "boundary": {
       "kind": "t15_replay_segment_conditioned",
-      "replay_reference_dir": "../../data/processed/t15_new_replay_window_0p1s_oracle_targets"
+      "replay_reference_dir": "../../data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_targets"
     }
   },
   "observation": {
@@ -61,12 +60,12 @@
     "kind": "tcv_derivative",
     "shape_mean_scale_m": 0.03,
     "shape_max_scale_m": 0.08,
-    "ip_scale_a": 15000.0,
+    "ip_scale_a": 25000.0,
     "boundary_missing_error_m": 1.0,
     "boundary_missing_weight": 20.0,
-    "shape_mean_weight": 2.4,
-    "shape_max_weight": 0.6,
-    "ip_weight": 3.0,
+    "shape_mean_weight": 3.2,
+    "shape_max_weight": 0.8,
+    "ip_weight": 1.8,
     "current_weight": 0.75,
     "derivative_weight": 0.1875,
     "current_usage_weight": 0.0,
@@ -81,7 +80,7 @@
     "terminal_remaining_cost": 0.0,
     "actuator_saturation_weight": 0.1875,
     "reward_scale": 0.01,
-    "smoothmax_alpha": -1.0
+    "smoothmax_alpha": -5.0
   },
   "randomization": {
     "enabled": false
@@ -111,18 +110,23 @@
     "updates_per_rollout_chunk": 64
   },
   "training": {
-    "steps": 10000000,
+    "steps": 100000000,
     "num_envs": 2048,
     "device": "auto",
     "seed": 1,
-    "output_dir": "../../outputs/t15_new_replay_window_0p1s_tcvjdot_t1q1a1_oracle_8gpu_10m",
+    "output_dir": "../../outputs/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle",
     "save_checkpoints": true,
-    "checkpoint_interval_steps": 500000,
-    "eval_interval_steps": 100000,
+    "checkpoint_interval_steps": 1000000,
+    "eval_interval_steps": 500000,
     "eval_episodes": 128,
     "eval_max_steps": 100,
     "actor_workers": 1,
     "distributed_mode": "local_replay",
-    "production_mode": true
+    "production_mode": true,
+    "early_stop_patience_evals": 0,
+    "early_stop_min_delta": 0.0,
+    "milestone_checkpoint_interval_steps": 1000000,
+    "eval_checkpoint_top_k": 10,
+    "keep_latest_checkpoint": true
   }
 }

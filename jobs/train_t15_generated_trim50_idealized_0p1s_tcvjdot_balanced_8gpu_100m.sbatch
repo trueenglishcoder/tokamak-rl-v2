@@ -1,28 +1,27 @@
 #!/bin/bash
-#SBATCH --job-name=tokamak-rl-v2-tcvj-trim50-gpu1e6
+#SBATCH --job-name=tokamak-rl-v2-tcvj-gen-trim50
 #SBATCH --partition=batch
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:8
 #SBATCH --cpus-per-task=16
-#SBATCH --output=slurm_logs/tokamak-rl-v2-tcvj-trim50-gpu1e6-8gpu-10m-%j.out
-#SBATCH --error=slurm_logs/tokamak-rl-v2-tcvj-trim50-gpu1e6-8gpu-10m-%j.err
+#SBATCH --output=slurm_logs/tokamak-rl-v2-tcvj-gen-trim50-8gpu-100m-%j.out
+#SBATCH --error=slurm_logs/tokamak-rl-v2-tcvj-gen-trim50-8gpu-100m-%j.err
 
 set -euo pipefail
 
 cd /scratch/$USER/tokamak/tokamak-rl-v2
 mkdir -p slurm_logs outputs
 
-export SOURCE_CONFIG=${SOURCE_CONFIG:-configs/experiments/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_mpo_balanced.yaml}
-export TRIM_MACHINE_CONFIG=${TRIM_MACHINE_CONFIG:-../tokamak-sim/runs/t15md_trim50_plain_gpu_1e6_setup/T15MD_new_data_trim50_plain_gpu_1e6_3856.toml}
-export RESET_LIBRARY=${RESET_LIBRARY:-data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_initial_states.npz}
-export ORACLE_TARGET_DIR=${ORACLE_TARGET_DIR:-data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_targets}
-export ORACLE_TARGETS=${ORACLE_TARGETS:-${ORACLE_TARGET_DIR}/t15_replay_window_oracle_targets.npz}
-export RUN_NAME=${RUN_NAME:-t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_10m_${SLURM_JOB_ID:-manual}}
+export SOURCE_CONFIG=${SOURCE_CONFIG:-configs/experiments/t15_generated_trim50_idealized_0p1s_tcvjdot_balanced_mpo.yaml}
+export GENERATED_MACHINE_CONFIG_SOURCE=${GENERATED_MACHINE_CONFIG_SOURCE:-../tokamak-sim/runs/t15md_limited_replay_dataset_trim50_idealized_low_tau_gpu_plain_1e6_video/T15MD_new_data_legacy_contour_limited_replay.toml}
+export RESET_LIBRARY=${RESET_LIBRARY:-data/processed/t15_generated_trim50_idealized_initial_states.npz}
+export ENVELOPE_JSON=${ENVELOPE_JSON:-data/processed/t15_generated_trim50_idealized_envelope.json}
+export RUN_NAME=${RUN_NAME:-t15_generated_trim50_idealized_0p1s_tcvjdot_balanced_8gpu_100m_${SLURM_JOB_ID:-manual}}
 export TRAIN_OUTPUT=${TRAIN_OUTPUT:-outputs/${RUN_NAME}}
 export GENERATED_CONFIG=${GENERATED_CONFIG:-${TRAIN_OUTPUT}/generated_configs/${RUN_NAME}.json}
-export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-tokamak-rl-v2-tcvjdot-trim50-gpu1e6-balanced-8gpu-10m-${SLURM_JOB_ID:-manual}}
-export TRAIN_ENV_STEPS=${TRAIN_ENV_STEPS:-10000000}
+export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-tokamak-rl-v2-tcvjdot-generated-trim50-8gpu-100m-${SLURM_JOB_ID:-manual}}
+export TRAIN_ENV_STEPS=${TRAIN_ENV_STEPS:-100000000}
 export EVAL_ENV_STEPS=${EVAL_ENV_STEPS:-500000}
 export CHECKPOINT_ENV_STEPS=${CHECKPOINT_ENV_STEPS:-1000000}
 export NUM_ENVS=${NUM_ENVS:-2048}
@@ -30,28 +29,24 @@ export GPUS_PER_NODE=8
 export WORLD_SIZE=8
 export WANDB_MODE=${WANDB_MODE:-online}
 export MASTER_ADDR=127.0.0.1
-export MASTER_PORT=${MASTER_PORT:-$(( 20000 + (${SLURM_JOB_ID:-1593} % 40000) ))}
-export HOLDOUT_EVAL_EPISODES=${HOLDOUT_EVAL_EPISODES:-1239}
+export MASTER_PORT=${MASTER_PORT:-$(( 20000 + (${SLURM_JOB_ID:-1731} % 40000) ))}
 
 if [[ ! -f "${SOURCE_CONFIG}" ]]; then
-  echo "missing trim50 training config: ${SOURCE_CONFIG}" >&2
-  echo "run the trim50 oracle target build job first" >&2
+  echo "missing generated training config: ${SOURCE_CONFIG}" >&2
   exit 2
 fi
-if [[ ! -f "${TRIM_MACHINE_CONFIG}" ]]; then
-  echo "missing trim50 machine config: ${TRIM_MACHINE_CONFIG}" >&2
+if [[ ! -f "${GENERATED_MACHINE_CONFIG_SOURCE}" ]]; then
+  echo "missing plain GPU 1e-6 machine config: ${GENERATED_MACHINE_CONFIG_SOURCE}" >&2
   exit 2
 fi
 if [[ ! -f "${RESET_LIBRARY}" ]]; then
-  echo "missing trim50 oracle reset library: ${RESET_LIBRARY}" >&2
+  echo "missing generated reset library: ${RESET_LIBRARY}" >&2
+  echo "run scripts/build_t15_generated_trim50_idealized_references.py first" >&2
   exit 2
 fi
-if [[ ! -f "${ORACLE_TARGETS}" ]]; then
-  echo "missing trim50 oracle targets: ${ORACLE_TARGETS}" >&2
-  exit 2
-fi
-if [[ ! -d "${ORACLE_TARGET_DIR}" ]]; then
-  echo "missing trim50 oracle target directory: ${ORACLE_TARGET_DIR}" >&2
+if [[ ! -f "${ENVELOPE_JSON}" ]]; then
+  echo "missing generated envelope: ${ENVELOPE_JSON}" >&2
+  echo "run scripts/build_t15_generated_trim50_idealized_references.py first" >&2
   exit 2
 fi
 if (( NUM_ENVS % WORLD_SIZE != 0 )); then
@@ -59,8 +54,16 @@ if (( NUM_ENVS % WORLD_SIZE != 0 )); then
   exit 2
 fi
 
+export HOLDOUT_EVAL_EPISODES=${HOLDOUT_EVAL_EPISODES:-$(python3 - <<PYCOUNT
+import numpy as np
+with np.load("${RESET_LIBRARY}", allow_pickle=False) as d:
+    split = d["split"].astype(str)
+print(int(np.count_nonzero(split == "holdout")))
+PYCOUNT
+)}
+
 mkdir -p "$(dirname "${GENERATED_CONFIG}")"
-cp "${TRIM_MACHINE_CONFIG}" "$(dirname "${GENERATED_CONFIG}")/T15MD_new_data.toml"
+cp "${GENERATED_MACHINE_CONFIG_SOURCE}" "$(dirname "${GENERATED_CONFIG}")/T15MD_new_data_trim50_idealized_gpu_plain_1e6.toml"
 python3 - <<PYCFG
 import json
 from pathlib import Path
@@ -69,10 +72,11 @@ source = Path("${SOURCE_CONFIG}")
 out = Path("${GENERATED_CONFIG}")
 cfg = json.loads(source.read_text(encoding="utf-8"))
 
-cfg["name"] = "t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_10m"
-cfg["sim"]["config_path"] = "/workspace/tokamak-rl-v2/${TRAIN_OUTPUT}/generated_configs/T15MD_new_data.toml"
+cfg["name"] = "t15_generated_trim50_idealized_0p1s_tcvjdot_balanced_8gpu_100m"
+cfg["sim"]["config_path"] = "/workspace/tokamak-rl-v2/${TRAIN_OUTPUT}/generated_configs/T15MD_new_data_trim50_idealized_gpu_plain_1e6.toml"
 cfg["sim"]["csv_initial_state_library"] = "/workspace/tokamak-rl-v2/${RESET_LIBRARY}"
-cfg["reference"]["boundary"]["replay_reference_dir"] = "/workspace/tokamak-rl-v2/${ORACLE_TARGET_DIR}"
+cfg["reference"]["ip"]["limits_path"] = "/workspace/tokamak-rl-v2/${ENVELOPE_JSON}"
+cfg["reference"]["boundary"]["envelope_path"] = "/workspace/tokamak-rl-v2/${ENVELOPE_JSON}"
 cfg["training"]["steps"] = int("${TRAIN_ENV_STEPS}")
 cfg["training"]["num_envs"] = int("${NUM_ENVS}")
 cfg["training"]["output_dir"] = "/workspace/tokamak-rl-v2/${TRAIN_OUTPUT}"
@@ -88,22 +92,13 @@ cfg["training"]["save_checkpoints"] = True
 cfg["training"]["early_stop_patience_evals"] = 0
 cfg["training"]["early_stop_min_delta"] = 0.0
 
-boundary_override_keys = sorted(
-    key for key in cfg["sim"]
-    if str(key).startswith("boundary_soft_level_") or str(key) == "boundary_smooth_selected_level"
-)
-if boundary_override_keys:
-    raise SystemExit(
-        "trim50 training config must not set RL-side boundary soft/smoothing overrides: "
-        + ", ".join(boundary_override_keys)
-    )
-
 checks = {
-    "trim50_config_copy": cfg["sim"]["config_path"].endswith("/generated_configs/T15MD_new_data.toml"),
-    "trim50_reset_library": "trim50_plain_gpu1e6" in str(cfg["sim"]["csv_initial_state_library"]),
-    "trim50_reference_dir": "trim50_plain_gpu1e6" in str(cfg["reference"]["boundary"]["replay_reference_dir"]),
-    "replay_window_ip": cfg["reference"]["ip"]["kind"] == "replay_window",
-    "replay_window_boundary": cfg["reference"]["boundary"]["kind"] == "t15_replay_segment_conditioned",
+    "generated_config_copy": cfg["sim"]["config_path"].endswith("/generated_configs/T15MD_new_data_trim50_idealized_gpu_plain_1e6.toml"),
+    "generated_reset_library": "t15_generated_trim50_idealized_initial_states" in str(cfg["sim"]["csv_initial_state_library"]),
+    "generated_envelope_ip": "t15_generated_trim50_idealized_envelope" in str(cfg["reference"]["ip"]["limits_path"]),
+    "generated_envelope_boundary": "t15_generated_trim50_idealized_envelope" in str(cfg["reference"]["boundary"]["envelope_path"]),
+    "generated_ip": cfg["reference"]["ip"]["kind"] == "generated_segment_profile",
+    "generated_boundary": cfg["reference"]["boundary"]["kind"] == "generated_parameter_profile",
     "jdot_command": cfg["sim"]["action_contract"] == "jdot_command",
     "episode_steps_100": int(cfg["sim"]["max_episode_steps"]) == 100,
     "duration_0p1": abs(float(cfg["reference"]["duration_s"]) - 0.1) < 1e-12,
@@ -113,7 +108,7 @@ checks = {
 }
 failed = [name for name, ok in checks.items() if not ok]
 if failed:
-    raise SystemExit(f"trim50 training config failed invariant checks: {failed}")
+    raise SystemExit(f"generated training config failed invariant checks: {failed}")
 
 out.parent.mkdir(parents=True, exist_ok=True)
 out.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
@@ -154,6 +149,7 @@ srun \
 from pathlib import Path
 from dataclasses import replace
 import math
+import numpy as np
 import torch
 from tokamak_rl_v2.config import load_experiment_config
 from tokamak_rl_v2.env import TokamakMagneticControlEnv
@@ -161,18 +157,15 @@ from tokamak_rl_v2.env import TokamakMagneticControlEnv
 cfg = load_experiment_config("/workspace/tokamak-rl-v2/${GENERATED_CONFIG}")
 print("preflight config_path", cfg.sim.config_path)
 print("preflight reset_library", cfg.sim.csv_initial_state_library)
-print("preflight replay_reference_dir", cfg.reference.boundary.replay_reference_dir)
-print("preflight action_contract", cfg.sim.action_contract)
-print("preflight steps", cfg.training.steps, "num_envs", cfg.training.num_envs)
-
-required = [
-    cfg.sim.config_path,
-    cfg.sim.csv_initial_state_library,
-    cfg.reference.boundary.replay_reference_dir,
-]
+print("preflight generated_envelope", cfg.reference.ip.limits_path, cfg.reference.boundary.envelope_path)
+with np.load(cfg.sim.csv_initial_state_library, allow_pickle=False) as d:
+    if "params0" not in d.files:
+        raise SystemExit("generated reset library is missing params0")
+    print("preflight rows", int(d["ip0"].shape[0]), "holdout", int(np.count_nonzero(d["split"].astype(str) == "holdout")))
+required = [cfg.sim.config_path, cfg.sim.csv_initial_state_library, cfg.reference.ip.limits_path, cfg.reference.boundary.envelope_path]
 missing = [str(p) for p in required if p is None or not Path(p).exists()]
 if missing:
-    raise SystemExit("generated trim50 training config has missing paths inside container: " + ", ".join(missing))
+    raise SystemExit("generated training config has missing paths inside container: " + ", ".join(missing))
 
 env_cfg = replace(cfg, sim=replace(cfg.sim, gpu_device="cuda:0"))
 env = TokamakMagneticControlEnv(env_cfg, batch_size=1, device="cuda:0", seed=int(cfg.training.seed))
@@ -182,16 +175,13 @@ print("preflight boundary_legacy_precision_index2", env.cfg.boundary_legacy_prec
 print("preflight boundary_smooth_selected_level", env.cfg.boundary_smooth_selected_level)
 print("preflight boundary_soft_level_selection", env.cfg.boundary_soft_level_selection)
 if not math.isclose(float(env.cfg.boundary_legacy_precision_index2), 1.0e-6, rel_tol=0.0, abs_tol=1.0e-12):
-    raise SystemExit(
-        "trim50 plain-gpu1e6 training must use boundary.legacy_precision_index2=1e-6; "
-        f"loaded {env.cfg.boundary_legacy_precision_index2}"
-    )
+    raise SystemExit("generated trim50 training must use boundary.legacy_precision_index2=1e-6")
 if str(env.cfg.boundary_mode) == "tracked_flux_contour":
-    raise SystemExit("trim50 plain-gpu1e6 training must not use tracked_flux_contour boundary mode")
+    raise SystemExit("generated trim50 training must not use tracked_flux_contour boundary mode")
 if bool(env.cfg.boundary_smooth_selected_level):
-    raise SystemExit("trim50 plain-gpu1e6 training must not use boundary.smooth_selected_level")
+    raise SystemExit("generated trim50 training must not use boundary.smooth_selected_level")
 if bool(env.cfg.boundary_soft_level_selection):
-    raise SystemExit("trim50 plain-gpu1e6 training must not use boundary.soft_level_selection")
+    raise SystemExit("generated trim50 training must not use boundary.soft_level_selection")
 obs = env.reset()
 critic_obs = env.critic_obs()
 print("preflight env_reset_ok", "obs_dim", tuple(obs.shape), "critic_obs_dim", tuple(critic_obs.shape), "action_dim", env.action_dim)
@@ -249,29 +239,3 @@ PYCUDA
         --wandb-optional \
         --wandb-metric-preset focused
   '
-
-if [[ -d "${TRAIN_OUTPUT}/exports/best_actor" ]]; then
-  srun \
-    --ntasks=1 \
-    --container-image /scratch/$USER/tokamak/tokamak-rl-v2.sqsh \
-    --container-mounts /scratch/$USER/tokamak:/workspace,/dev:/dev,/lib/x86_64-linux-gnu:/host-libs \
-    bash -lc '
-      set -euo pipefail
-      mkdir -p /tmp/nvidia-lib
-      ln -sf /host-libs/libcuda.so.1 /tmp/nvidia-lib/libcuda.so.1
-      ln -sf /tmp/nvidia-lib/libcuda.so.1 /tmp/nvidia-lib/libcuda.so
-      export LD_LIBRARY_PATH=/tmp/nvidia-lib:${LD_LIBRARY_PATH:-}
-      export PYTHONPATH=/workspace/tokamak-sim:/workspace/tokamak-rl-v2:${PYTHONPATH:-}
-      cd /workspace/tokamak-rl-v2
-      python3 scripts/evaluate_replay_window_oracle_baselines.py \
-        --config "/workspace/tokamak-rl-v2/${GENERATED_CONFIG}" \
-        --export-dir "/workspace/tokamak-rl-v2/${TRAIN_OUTPUT}/exports/best_actor" \
-        --output-dir "/workspace/tokamak-rl-v2/${TRAIN_OUTPUT}/oracle_baseline_eval_best_actor" \
-        --all-windows \
-        --steps 100 \
-        --split holdout \
-        --device cuda:0
-    ' || echo "post-training oracle best-actor diagnostic failed; training artifacts remain valid" >&2
-else
-  echo "best actor export not found, skipping oracle best-actor diagnostic: ${TRAIN_OUTPUT}/exports/best_actor" >&2
-fi

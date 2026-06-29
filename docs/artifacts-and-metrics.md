@@ -1,20 +1,21 @@
 # Artifacts And Metrics
 
-This document explains what the maintained production path writes and how to
-read the main outputs.
+This document explains outputs from the maintained trim50 replay-window
+training path.
 
 ## Output Directory
 
-A normal production run writes something like:
+The canonical 100M job writes:
 
 ```text
-outputs/t15_csv_initial_segmented_profile_boundary_mpo_1gpu_<jobid>
+outputs/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_100m_<jobid>/
 ```
 
 Typical contents:
 
 ```text
 config_snapshot.json
+generated_configs/
 losses.csv
 reward_components.csv
 eval_history.csv
@@ -24,168 +25,131 @@ policy_validation.json
 closed_loop_rollout_report.json
 exports/best_actor/
 exports/final_actor/
-checkpoints/                 optional
+checkpoints/
 ```
 
-## `config_snapshot.json`
+## Config Snapshots
 
-Resolved config after CLI overrides. Use this when comparing runs, because it is
-the exact configuration seen by the trainer.
+Use `config_snapshot.json` and `generated_configs/<run>.json` when comparing
+runs. They are the exact resolved configuration seen by the trainer.
 
-## `losses.csv`
-
-Written when learner updates happen.
-
-Important columns:
-
-- `critic_loss`
-- `actor_loss`
-- `mean_kl`
-- `std_kl`
-- `q_mean`
-- `target_q_mean`
-- `actor_mle_loss`
-- `actor_param_delta_norm`
-- `sampled_q_spread`
-- `policy_weight_max`
-- `policy_weight_entropy`
-- `mpo_temperature`
-- `mean_kl_penalty`
-- `std_kl_penalty`
-- replay-health fields
-
-Notes:
-
-- `actor_loss` may be negative; that is not automatically a bug.
-- Q-values may be negative because rewards are negative physical costs.
-- MPO diagnostics are logs, not production pass/fail gates.
-
-## `reward_components.csv`
-
-Per-logging-interval reward diagnostics.
-
-Common production columns:
-
-- `shape_error_mean_m`
-- `shape_error_max_m`
-- `ip_error_a`
-- `current_over_limit_a`
-- `current_usage_fraction`
-- `current_margin_fraction`
-- `derivative_usage`
-- `max_abs_action`
-- `action_rms`
-- `delta_action_rms`
-- `physical_cost`
-- `shape_mean_loss`
-- `shape_max_loss`
-- `ip_loss`
-- `current_loss`
-- `derivative_loss`
-- `action_loss`
-- `delta_action_loss`
-- `boundary_found`
-- termination flags
-
-These are the most direct view of what the controller is actually doing.
+The job also copies the active `tokamak-sim` trim50 machine config into the
+run-local `generated_configs/` directory for export/evaluation reproducibility.
 
 ## `eval_history.csv`
 
-Periodic deterministic actor evaluation on fixed seeds.
+Periodic deterministic actor evaluation. For the active config this evaluates
+100-step replay-window episodes.
 
-In production mode this always uses the full configured episode horizon:
+High-signal columns:
 
 ```text
-sim.max_episode_steps
+shape_error_mean_m_late
+shape_error_max_m_late
+ip_error_a_late
+mean_episode_completion
+full_episode_success
+boundary_found_late_min
+current_over_limit_*_late
+action_saturation_fraction_late
+action_rms_late
+selection_score
 ```
 
-Important fields:
+Physical metrics are the primary acceptance signal. Actor loss, critic loss, and
+Q values are diagnostics.
 
-- boundary retention
-- current-over-limit metrics
-- shape error
-- Ip error
-- mean and minimum episode completion
-- late-episode metrics
+## `reward_components.csv`
+
+Reward diagnostics written during training:
+
+```text
+shape_error_mean_m
+shape_error_max_m
+ip_error_a
+current_usage_fraction
+current_over_limit_a
+derivative_usage
+action_rms
+delta_action_rms
+physical_cost
+shape_mean_loss
+shape_max_loss
+ip_loss
+current_loss
+derivative_loss
+actuator_saturation_loss
+boundary_found
+terminal_* diagnostics
+```
+
+For `jdot_command`, derivative effort is based on the applied absolute Jdot
+command. Saturation loss measures requested normalized Jdot minus applied
+clipped normalized Jdot.
+
+## `losses.csv`
+
+Learner diagnostics:
+
+```text
+critic_loss
+actor_loss
+q_mean
+target_q_mean
+sampled_q_spread
+policy_weight_max
+policy_weight_entropy
+mpo_temperature
+mean_kl
+std_kl
+```
+
+Negative actor loss is not itself a failure. Rising physical metrics are what
+matter.
 
 ## `replay_health.csv`
 
-Replay and learner-readiness diagnostics:
+Replay readiness and episode-length diagnostics:
 
-- replay size
-- completed episode count
-- full-sequence eligible episode count
-- minimum-sequence eligible episode count
-- mean/min/max episode length
-- learner no-update warning
+```text
+replay_length
+completed_episodes
+eligible_sequences
+mean_episode_length
+min_episode_length
+max_episode_length
+```
 
-If replay never becomes ready, the pipeline should fail fast with
-`failed_replay_health`.
+The final pipeline uses 100-step episodes, so stable full-horizon completion is
+expected when the controller is healthy.
 
-## `metrics.json`
+## `metrics.json` And `policy_validation.json`
 
-Trainer summary written at the end of training or fail-fast exit.
+`metrics.json` is the training summary. `policy_validation.json` is the main
+decision file and records selected checkpoint/export paths plus validation
+results.
 
 Useful fields:
 
-- `status`
-- `steps`
-- `env_steps`
-- `updates`
-- `best_eval`
-- `best_eval_details`
-- `distributed_mode`
-- `total_training_envs`
-- `save_checkpoints`
+```text
+status
+steps/env_steps
+best_eval
+best_eval_details
+selected_checkpoint
+selected_export_dir
+closed_loop_rollout_report
+```
 
-## `policy_validation.json`
+## Exports
 
-This is the main decision file.
+The active learned-controller export is:
 
-It contains:
+```text
+exports/best_actor/
+```
 
-- final status
-- selected checkpoint
-- selected export directory
-- actor holdout evaluation
-- no-control baseline when applicable
-- tail training-loss summary
-- exported-controller rollout report
-- final gates
-
-For production, pass/fail is based on physical behavior:
-
-- episode completion
-- boundary retention
-- current-limit respect
-- shape accuracy
-- Ip accuracy and improvement
-- exported-controller full-episode rollout
-
-Not on MPO diagnostic thresholds.
-
-## `closed_loop_rollout_report.json`
-
-Full-episode validation of the exported controller through
-`tokamak-sim`’s learned-controller runtime.
-
-Important fields:
-
-- `mean_episode_completion`
-- `min_episode_completion`
-- `boundary_found_mean`
-- `boundary_found_late_min`
-- `shape_error_mean_m`
-- `shape_error_late_m`
-- `ip_error_a`
-- `ip_error_late_a`
-- `current_over_limit_a_max`
-- `current_over_limit_a_late_max`
-- `action_rms`
-
-## `exports/`
-
-Each export directory contains the deterministic actor bundle:
+Expected files:
 
 ```text
 actor.pt
@@ -195,21 +159,16 @@ normalization.json
 metadata.json
 ```
 
-The production actor schema is:
+The active schema is:
 
 ```text
-controller_state_v3
+observation_kind = controller_state_v6
+action_contract = absolute_jdot_command_v1
 ```
+
+Old delta-Jdot exports are intentionally rejected by `tokamak-sim`.
 
 ## Checkpoints
 
-When checkpoint saving is enabled:
-
-```text
-checkpoints/latest.pt
-checkpoints/best.pt
-checkpoints/final.pt
-```
-
-Manual export from a checkpoint is supported, but only for
-`controller_state_v3` checkpoints.
+Checkpoints are large and not needed for ordinary analysis if `exports/best_actor`
+exists. Keep them on the server unless continuing training or re-exporting.

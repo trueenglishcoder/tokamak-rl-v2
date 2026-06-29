@@ -44,11 +44,11 @@ def _valid(path: Path, summary_path: Path, reference_limits_path: Path) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate or rebuild the cheap processed T15 CSV reset-state artifact.")
-    parser.add_argument("--path", default="data/processed/t15_csv_initial_states.npz")
-    parser.add_argument("--summary", default="data/processed/t15_csv_initial_states.json")
-    parser.add_argument("--rejected", default="data/processed/t15_csv_initial_states_rejected.csv")
+    parser.add_argument("--path", default="data/processed/t15_new_trim50_plain_gpu1e6_csv_initial_states.npz")
+    parser.add_argument("--summary", default="data/processed/t15_new_trim50_plain_gpu1e6_csv_initial_states.json")
+    parser.add_argument("--rejected", default="data/processed/t15_new_trim50_plain_gpu1e6_csv_initial_states_rejected.csv")
     parser.add_argument("--reference-limits", default="data/processed/t15_reference_limits.json")
-    parser.add_argument("--experiment-config", default="configs/experiments/t15_csv_initial_segmented_profile_boundary_mpo.yaml")
+    parser.add_argument("--experiment-config", default="configs/experiments/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_mpo_balanced.yaml")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--max-rows-per-shot", type=int, default=600)
     parser.add_argument("--force", action="store_true")

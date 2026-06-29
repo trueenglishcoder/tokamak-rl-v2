@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -41,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
     from tokamak_rl_v2.env.t15_csv_initial_states import CsvInitialStateLibrary
 
     cfg = load_experiment_config(args.config)
-    sim_cfg = load_config(cfg.sim.config_path, initial_currents_path=cfg.sim.initial_currents_path)
+    sim_cfg = load_config(cfg.sim.config_path)
     library = CsvInitialStateLibrary(
         cfg.sim.csv_initial_state_library,
         n_pfc=sim_cfg.pfc.n_coils,
@@ -109,7 +108,7 @@ def main(argv: list[str] | None = None) -> int:
     stem = f"hold_boundary_eval_cut900_seg300_shot{shot_id}_row{int(args.library_index):04d}_seed{int(args.seed)}"
     ref_out = out_dir / f"{stem}.npz"
     config_out = out_dir / f"T15MD_new_data_{stem}.toml"
-    initial_out = out_dir / f"initial_currents_{stem}.toml"
+    initial_out = out_dir / f"initial_state_{stem}.toml"
     summary_out = out_dir / f"{stem}.json"
 
     radii0 = np.asarray(source_radii[source_index], dtype=float).reshape(source_angles.size)
@@ -148,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
         grid=sim_cfg.grid,
         pfc=pfc,
         sol=sol,
-        physics=replace(sim_cfg.physics, Ip0=ip0),
+        physics=sim_cfg.physics,
         compute=sim_cfg.compute,
         realism=sim_cfg.realism,
         limiter_name=sim_cfg.limiter_name,
@@ -171,12 +170,12 @@ def main(argv: list[str] | None = None) -> int:
         boundary_continuity_weight_area=sim_cfg.boundary_continuity_weight_area,
         boundary_continuity_weight_level=sim_cfg.boundary_continuity_weight_level,
     )
-    _write_initial_currents(initial_out, pfc0=pfc0, sol0=sol0)
+    _write_initial_state(initial_out, ip0=ip0, pfc0=pfc0, sol0=sol0)
 
     summary = {
         "reference_npz": str(ref_out),
         "config": str(config_out),
-        "initial_currents": str(initial_out),
+        "initial_state": str(initial_out),
         "shot": shot_id,
         "library_index": int(args.library_index),
         "source_index": source_index,
@@ -205,19 +204,19 @@ def _closed_poly(center: tuple[float, float], angles: np.ndarray, radii: np.ndar
     return np.vstack((poly, poly[0]))
 
 
-def _write_initial_currents(path: Path, *, pfc0: np.ndarray, sol0: np.ndarray) -> None:
+def _write_initial_state(path: Path, *, ip0: float, pfc0: np.ndarray, sol0: np.ndarray) -> None:
     def arr(values: np.ndarray) -> str:
         return "[\n" + "".join(f"    {float(v):.17g},\n" for v in np.asarray(values, dtype=float).reshape(-1)) + "]"
 
     text = (
         "version = 1\n\n"
+        "[plasma]\n"
+        f"Ip0 = {float(ip0):.17g}\n\n"
         "[coils.pfc]\n"
-        f"active = {[True for _ in range(int(np.asarray(pfc0).size))]}\n"
         f"currents = {arr(pfc0)}\n\n"
         "[coils.sol]\n"
-        f"active = {[True for _ in range(int(np.asarray(sol0).size))]}\n"
         f"currents = {arr(sol0)}\n"
-    ).replace("True", "true")
+    )
     path.write_text(text, encoding="utf-8")
 
 

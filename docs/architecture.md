@@ -1,55 +1,56 @@
 # Architecture
 
 This document describes the maintained runtime architecture of
-`tokamak-rl-v2`.
+`tokamak-rl-v2` after the trim50 cleanup.
 
 ## System Boundary
 
 `tokamak-sim` provides:
 
-- machine configuration loading
-- CPU `PlasmaModel`
-- GPU `BatchedGpuTokamakSimulator`
-- boundary finding from `psi`
-- limiter geometry
-- learned-controller runtime loading
+```text
+machine/config loading
+CPU and GPU plant stepping
+fixed-angle GPU boundary measurements for training
+learned-controller runtime loading
+presentation/replay artifact generation
+```
 
 `tokamak-rl-v2` provides:
 
-- batched RL environment
-- reset-state libraries and runtime wrappers
-- Ip and boundary reference generation
-- TCV-derivative quality reward
-- actor and critic networks
-- replay
-- MPO learner
-- training / evaluation / export pipeline
+```text
+batched RL environment
+reset/window libraries
+replay-window Ip and boundary references
+TCV-derivative reward
+actor and critic networks
+episode replay
+MPO learner
+training, export, and evaluation scripts
+```
 
 The exported bundle contains only the deterministic actor path plus schema and
 normalization metadata. The critic and learner stay on the training side.
 
 ## Maintained Production Path
 
-The production path is:
-
 ```text
-CSV reset row
--> reset tokamak-sim plant
--> read simulator-found boundary
--> generate segmented_profile Ip target
--> use matching-shot smoothed replay boundary segment anchored to reset boundary
--> actor samples requested normalized delta-Jdot
--> environment accumulates derivative command and sends absolute next currents
--> simulator advances plant
+real trim50 T15 CSVs
+-> replay exact coil currents through tokamak-sim
+-> record plain GPU fixed-angle boundary references at legacy_precision_index2=1e-6
+-> build 0.1 s replay-window oracle targets
+-> sample coherent reset/window from train shots
+-> reset batched GPU plant
+-> actor outputs normalized absolute Jdot command
+-> env clips Jdot and computes absolute next currents
+-> tokamak-sim advances plant
+-> env measures fixed-angle boundary on GPU
 -> TCV-derivative reward
--> sequence replay
--> recurrent critic + MPO update
+-> episode replay
+-> MPO update
 -> deterministic actor export
--> full-episode holdout actor evaluation
--> full-episode exported-controller validation
 ```
 
-Production starts at:
+The canonical production entry point is:
 
 ```text
 scripts/train_policy_pipeline.py
@@ -58,7 +59,7 @@ scripts/train_policy_pipeline.py
 with:
 
 ```text
-configs/experiments/t15_csv_initial_segmented_profile_boundary_mpo.yaml
+configs/experiments/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_mpo_balanced.yaml
 ```
 
 ## Environment
@@ -71,151 +72,110 @@ tokamak_rl_v2.env.batch_env.TokamakMagneticControlEnv
 
 The environment owns:
 
-- batched plant state
-- current reset metadata
-- reference batch
-- previous action
-- current-over-limit counters
-- reset-time `psi` normalization statistics
+```text
+batched plant state
+current reset/window metadata
+Ip and boundary target batch
+previous applied normalized Jdot action
+current-over-limit counters
+reward and termination state
+```
 
-Each lane is independent. The environment is batched only for throughput.
+Each lane is independent. Batching is for throughput only.
 
-### Reset Path
+## Reset And Reference Path
 
 For production:
 
-- sample one coherent row from `t15_csv_initial_states.npz`
-- reset the plant with that row’s `Ip0 + PFC0 + SOL0`
-- compute the physical boundary after reset
-- generate a shot-matched replay-boundary target through
-  `t15_replay_segment_conditioned`
-
-Runtime training does not read raw T15 CSVs directly.
-
-### Time-Base Invariants
-
-Two time-base checks are enforced:
-
 ```text
-reference.t_step == tokamak-sim physics.t_step
-reference.duration_s == sim.max_episode_steps * reference.t_step   (production)
+sample one row from t15_new_trim50_plain_gpu1e6 oracle initial-state library
+load matching replay-window target by shot/time
+reset plant with Ip0, PFC0, SOL0
+set Ip reference from the real window
+set boundary reference from the replayed boundary window
 ```
 
-That keeps the generated target horizon aligned with the simulator horizon.
+Runtime training does not synthesize Ip trajectories for the final path. Ip and
+boundary targets come from the same real shot/time window.
 
-## References
+## Action Contract
 
-Boundary target:
+Active learned-policy contract:
 
-- `t15_replay_segment_conditioned`
+```text
+sim.action_contract = jdot_command
+export action_contract = absolute_jdot_command_v1
+```
 
-Ip target:
+Actor output `a_t in [-1, 1]` means:
 
-- `segmented_profile`
+```text
+Jdot_cmd = a_t * derivative_limit
+J_next = J_now + dt * Jdot_cmd
+```
 
-`segmented_profile` generates bounded segment programs over:
+The plant API still receives absolute next currents via `step_currents`.
 
-- `hold`
-- `ramp_up`
-- `ramp_down`
-
-The generated target:
-
-- starts at reset Ip
-- stays strictly positive
-- stays inside aggregate real-data bounds
-- obeys signed ramp-rate limits
-- contains at least one hold
-- contains at least one nonzero ramp
-
-If `smooth_ramps=true`, ramp segments are cosine-eased while preserving rate
-limits through a safety factor.
+Zaitsev/LQR diagnostic controllers may still use delta-Jdot internally, but
+learned policies do not.
 
 ## Observations
 
-Actor observation kind:
+Actor schema:
 
 ```text
-controller_state_v3
+controller_state_v6
 ```
 
-Critic observation kind:
+Critic schema:
 
 ```text
-privileged_training_state_v1
+compact_training_state_v2
 ```
 
-Actor observations include only controller-available features, such as:
+The actor sees controller-available scalar/vector state: Ip, target preview,
+currents, current derivatives, boundary radii, boundary target, boundary error,
+previous applied action, and status features.
 
-- step fraction
-- Ip / Ip target / Ip error
-- active currents
-- active current derivatives
-- measured boundary radii
-- reference radii
-- boundary error
-- boundary-found flag
-- previous action
-- target preview
-
-Critic observations include the actor observation plus training-only privilege:
-
-- normalized `psi_flat`
-- current usage fraction
-- current margin fraction
-- derivative usage
+The final critic path is compact and does not require full `psi_flat`.
 
 ## Reward
 
-The maintained reward is `tcv_derivative`.
+The active reward is `tcv_derivative`.
 
 It combines:
 
-- TCV-style boundary quality
-- TCV-style Ip quality
-- current operational-limit quality
-- derivative/actuator quality
-- requested-vs-applied delta rejection quality
-- boundary-present quality
-- terminal reward replacement for operational failures
+```text
+boundary mean/max error quality
+Ip error quality
+current-limit quality
+Jdot/actuator quality
+requested-vs-applied clipping quality
+boundary-present quality
+terminal replacement on operational failure
+```
 
-Normal reward is `reward_scale * quality`. Terminal reward is the scaled
-source-style value `reward_scale * terminal_reward`.
+Normal reward is `reward_scale * quality`. Terminal reward is the configured
+scaled terminal value.
 
-## Learning Stack
+## Evaluation
 
-Networks:
+Production uses full configured episodes for:
 
-- feedforward Gaussian actor
-- recurrent Q critic
+```text
+periodic actor eval
+final holdout replay-window eval
+exported actor checks
+hold-boundary diagnostics
+```
 
-Replay:
+Use physical metrics first:
 
-- episode-aware sequence replay
-- actor observations
-- critic observations
-- action
-- reward
-- discount
-- next actor observations
-- next critic observations
-- terminal masks
-
-Learner:
-
-- Maximum a Posteriori Policy Optimisation (MPO)
-
-Production pass/fail does not depend on MPO diagnostic thresholds. Metrics such
-as `sampled_q_spread` and `policy_weight_max` are still logged for inspection.
-
-## Evaluation And Validation
-
-Production mode always uses the full configured episode horizon for:
-
-- periodic actor evaluation
-- final holdout actor evaluation
-- exported-controller validation
-
-Controller validation runs the exported bundle through
-`tokamak-sim`’s `LearnedMagneticController` path, not just the PyTorch actor in
-isolation.
+```text
+shape_error_mean_m_late
+shape_error_max_m_late
+ip_error_a_late
+mean_episode_completion
+current_over_limit_*_late
+action_saturation_fraction_late
+```

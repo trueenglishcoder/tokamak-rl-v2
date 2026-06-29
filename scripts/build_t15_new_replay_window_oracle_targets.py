@@ -38,12 +38,12 @@ def _repo_path(value: str | Path) -> Path:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build coherent 0.1s T15 replay-window oracle targets.")
-    parser.add_argument("--base-config", default="configs/experiments/t15_new_replay_window_0p1s_tcvjdot_mpo.yaml")
-    parser.add_argument("--data-root", default="../tokamak-sim/data/t15_data_new")
-    parser.add_argument("--machine-config", default="../tokamak-sim/configs/T15MD_new_data.toml")
-    parser.add_argument("--target-dir", default="data/processed/t15_new_replay_window_0p1s_oracle_targets")
-    parser.add_argument("--initial-library-out", default="data/processed/t15_new_replay_window_0p1s_oracle_initial_states.npz")
-    parser.add_argument("--config-out", default="configs/experiments/t15_new_replay_window_0p1s_tcvjdot_mpo.yaml")
+    parser.add_argument("--base-config", default="configs/experiments/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_mpo_balanced.yaml")
+    parser.add_argument("--data-root", default="../tokamak-sim/data/t15_data_new_trim50")
+    parser.add_argument("--machine-config", default="../tokamak-sim/runs/t15md_trim50_plain_gpu_1e6_setup/T15MD_new_data_trim50_plain_gpu_1e6_3856.toml")
+    parser.add_argument("--target-dir", default="data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_targets")
+    parser.add_argument("--initial-library-out", default="data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_initial_states.npz")
+    parser.add_argument("--config-out", default="configs/experiments/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_mpo.yaml")
     parser.add_argument("--train-shots", nargs="+", default=["3856", "3857", "3858", "3863"])
     parser.add_argument("--holdout-shots", nargs="+", default=["3864"])
     parser.add_argument("--window-steps", type=int, default=100)
@@ -156,7 +156,7 @@ def main(argv: list[str] | None = None) -> int:
         machine_config=machine_config,
         target_dir=target_dir,
         initial_library=initial_library_out,
-        train_output="outputs/t15_new_replay_window_0p1s_tcvjdot_t1q1a1_oracle_8gpu_10m",
+        train_output="outputs/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_oracle",
         balanced=False,
     )
     balanced_config_out = config_out.with_name(config_out.stem + "_balanced.yaml")
@@ -166,7 +166,7 @@ def main(argv: list[str] | None = None) -> int:
         machine_config=machine_config,
         target_dir=target_dir,
         initial_library=initial_library_out,
-        train_output="outputs/t15_new_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_10m",
+        train_output="outputs/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle",
         balanced=True,
     )
     _write_rejections(rejected_path, rejected)
@@ -418,8 +418,13 @@ def _simulate_cpu(
     for row, candidate in enumerate(candidates):
         pfc = sim_cfg.pfc.__class__(name=sim_cfg.pfc.name, coils=list(sim_cfg.pfc.coils), currents=candidate.currents[0, : sim_cfg.pfc.n_coils])
         sol = sim_cfg.sol.__class__(name=sim_cfg.sol.name, coils=list(sim_cfg.sol.coils), currents=candidate.currents[0, sim_cfg.pfc.n_coils :])
-        physics = replace(sim_cfg.physics, Ip0=float(candidate.ip_target[0]))
-        model = model_cls.from_settings(grid=sim_cfg.grid, pfc=pfc, sol=sol, settings=physics)
+        model = model_cls.from_settings(
+            grid=sim_cfg.grid,
+            pfc=pfc,
+            sol=sol,
+            settings=sim_cfg.physics,
+            ip0=float(candidate.ip_target[0]),
+        )
         prev_poly = None
         prev_level = None
         sim_ip: list[float] = []
@@ -568,13 +573,16 @@ def _write_config(
     balanced: bool,
 ) -> None:
     cfg = json.loads(json.dumps(base))
-    cfg["name"] = "t15_new_replay_window_0p1s_tcvjdot_balanced_oracle_mpo" if balanced else "t15_new_replay_window_0p1s_tcvjdot_mpo"
+    cfg["name"] = (
+        "t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_mpo"
+        if balanced
+        else "t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_mpo"
+    )
 
     def rel(path: Path) -> str:
         return str(Path(os.path.relpath(path.resolve(), config_out.parent.resolve())))
 
     cfg["sim"]["config_path"] = rel(machine_config)
-    cfg["sim"]["initial_currents_path"] = None
     cfg["sim"]["max_episode_steps"] = 100
     cfg["sim"]["reset_source"] = "csv_initial_states"
     cfg["sim"]["csv_initial_state_library"] = rel(initial_library)
@@ -612,25 +620,18 @@ def _write_config(
     cfg["training"]["eval_max_steps"] = 100
     cfg["training"]["distributed_mode"] = "local_replay"
     cfg["training"]["production_mode"] = True
-    cfg["training"]["early_stop_patience_evals"] = 5
+    cfg["training"]["early_stop_patience_evals"] = 0
     cfg["training"]["early_stop_min_delta"] = 0.0
     cfg["training"]["output_dir"] = "../../" + train_output
 
     cfg["reward"]["kind"] = "tcv_derivative"
     cfg["reward"]["terminal_reward"] = -20.0
     cfg["reward"]["reward_scale"] = 0.01
-    if balanced:
-        cfg["reward"]["shape_mean_weight"] = 2.4
-        cfg["reward"]["shape_max_weight"] = 0.6
-        cfg["reward"]["ip_weight"] = 3.0
-        cfg["reward"]["ip_scale_a"] = 15000.0
-        cfg["reward"]["smoothmax_alpha"] = -1.0
-    else:
-        cfg["reward"]["shape_mean_weight"] = 3.2
-        cfg["reward"]["shape_max_weight"] = 0.8
-        cfg["reward"]["ip_weight"] = 1.8
-        cfg["reward"]["ip_scale_a"] = 25000.0
-        cfg["reward"]["smoothmax_alpha"] = -5.0
+    cfg["reward"]["shape_mean_weight"] = 3.2
+    cfg["reward"]["shape_max_weight"] = 0.8
+    cfg["reward"]["ip_weight"] = 1.8
+    cfg["reward"]["ip_scale_a"] = 25000.0
+    cfg["reward"]["smoothmax_alpha"] = -5.0
 
     config_out.parent.mkdir(parents=True, exist_ok=True)
     config_out.write_text(json.dumps(cfg, indent=2), encoding="utf-8")

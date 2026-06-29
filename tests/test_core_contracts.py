@@ -26,12 +26,7 @@ from tokamak_rl_v2.training.cli import _device_list
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CONFIG = ROOT / "configs/experiments/t15_static_boundary.yaml"
-PRODUCTION_CONFIG = ROOT / "configs/experiments/t15_csv_initial_segmented_profile_boundary_mpo.yaml"
-SHORT_SINGLE_SEGMENT_CONFIG = ROOT / "configs/experiments/t15_csv_initial_single_segment_0p1s_static_boundary_mpo.yaml"
-REPLAY_WINDOW_0P2_CONFIG = ROOT / "configs/experiments/t15_new_replay_window_0p2s_tcvjdot_mpo.yaml"
-FIXED_HORIZON_HOLD_CONFIG = ROOT / "configs/experiments/t15_csv_hold_ip_fixed_horizon.yaml"
-FIXED_HORIZON_EASY_SEGMENTED_CONFIG = ROOT / "configs/experiments/t15_csv_easy_segmented_fixed_horizon.yaml"
+CONFIG = ROOT / "tests/fixtures/t15_static_boundary_test.json"
 
 
 def _small_config(tmp_path: Path):
@@ -149,6 +144,7 @@ def test_exact_csv_reset_sample_is_wrapped_as_reset_payload() -> None:
         ip0=np.asarray([1.0, 2.0], dtype=float),
         pfc0=np.zeros((2, 6), dtype=float),
         sol0=np.ones((2, 3), dtype=float),
+        params0=None,
         shot_ids=("3856", "3864"),
         source_indices=(10, 20),
         source_times_s=(0.1, 0.2),
@@ -843,11 +839,11 @@ def test_environment_reset_step_contract() -> None:
     cfg = replace(cfg, sim=replace(cfg.sim, compute_backend="cpu", max_episode_steps=4))
     env = TokamakMagneticControlEnv(cfg, batch_size=2, device="cpu", seed=1)
     schema = env.export_schema()
-    assert schema["observation_kind"] == "controller_state_v4"
-    assert schema["critic_observation_kind"] == "privileged_training_state_v1"
+    assert schema["observation_kind"] == "controller_state_v6"
+    assert schema["critic_observation_kind"] == "compact_training_state_v2"
     assert "diagnostics" not in schema
     assert "psi_flat" not in schema["feature_order"]
-    assert "psi_flat_normalized" in schema["critic_feature_order"]
+    assert "psi_flat_normalized" not in schema["critic_feature_order"]
     assert "previous_action" in schema["feature_order"]
     assert "previous_derivative_command" not in schema["feature_order"]
     assert "measured_boundary_radii" in schema["feature_order"]
@@ -867,10 +863,6 @@ def test_environment_reset_step_contract() -> None:
     obs = env.reset()
     assert obs.shape == (2, env.obs_dim)
     assert env.critic_obs().shape == (2, env.critic_obs_dim)
-    psi0, psi1 = schema["critic_feature_slices"]["psi_flat_normalized"]
-    psi = env.critic_obs()[:, int(psi0) : int(psi1)]
-    assert torch.allclose(torch.mean(psi, dim=1), torch.zeros((2,), dtype=torch.float32), atol=1.0e-5)
-    assert torch.allclose(torch.std(psi, dim=1, unbiased=False), torch.ones((2,), dtype=torch.float32), atol=1.0e-4)
     result = env.step(torch.zeros((2, env.action_dim)))
     assert result.obs.shape == (2, env.obs_dim)
     assert result.critic_obs.shape == (2, env.critic_obs_dim)
@@ -1427,109 +1419,6 @@ def test_ip_reference_segment_count_controls_generation() -> None:
     assert torch.allclose(batch.ip[:, 0], torch.tensor([250000.0, 300000.0], dtype=torch.float64))
 
 
-def test_production_segmented_profile_uses_2000_step_t15_scale_segments() -> None:
-    cfg = load_experiment_config(PRODUCTION_CONFIG)
-    assert int(cfg.sim.max_episode_steps) == 2000
-    assert cfg.reference.duration_s == pytest.approx(2.0)
-    assert cfg.reference.duration_s == pytest.approx(float(cfg.sim.max_episode_steps) * float(cfg.reference.t_step))
-    assert int(cfg.training.eval_max_steps) == 2000
-    assert cfg.reference.ip.ramp_rate_reference == "robust_mean"
-    assert cfg.reference.ip.ramp_up_rate_min_fraction == pytest.approx(0.3)
-    assert cfg.reference.ip.ramp_up_rate_fraction == pytest.approx(0.55)
-    assert cfg.reference.ip.ramp_down_rate_min_fraction == pytest.approx(0.3)
-    assert cfg.reference.ip.ramp_down_rate_fraction == pytest.approx(0.55)
-    assert int(cfg.reference.ip.segment_min_steps) == 300
-    assert int(cfg.reference.ip.segment_max_steps) == 800
-    assert int(cfg.reference.ip.segment_count_min) == 3
-    assert int(cfg.reference.ip.segment_count_max) == 5
-    assert int(cfg.reference.ip.hold_min_steps) == 300
-    assert int(cfg.reference.ip.hold_max_steps) == 800
-    assert int(cfg.reference.ip.final_hold_min_steps) == 0
-
-    lengths = _segment_lengths(cfg.reference.ip, int(cfg.sim.max_episode_steps), np.random.default_rng(123))
-    assert int(np.sum(lengths)) == 2000
-    assert 3 <= len(lengths) <= 5
-    assert int(np.min(lengths)) >= 300
-    assert int(np.max(lengths)) <= 800
-
-
-def test_short_single_segment_config_uses_100_step_static_boundary() -> None:
-    cfg = load_experiment_config(SHORT_SINGLE_SEGMENT_CONFIG)
-    assert int(cfg.sim.max_episode_steps) == 100
-    assert cfg.reference.duration_s == pytest.approx(0.1)
-    assert cfg.reference.duration_s == pytest.approx(float(cfg.sim.max_episode_steps) * float(cfg.reference.t_step))
-    assert int(cfg.training.eval_max_steps) == 100
-    assert cfg.reference.ip.kind == "single_segment_profile"
-    assert cfg.reference.boundary.kind == "hold_reset_boundary"
-    assert cfg.reference.ip.ramp_rate_reference == "robust_mean"
-    assert cfg.reference.ip.ramp_up_rate_min_fraction == pytest.approx(0.3)
-    assert cfg.reference.ip.ramp_up_rate_fraction == pytest.approx(0.55)
-    assert cfg.reference.ip.ramp_down_rate_min_fraction == pytest.approx(0.3)
-    assert cfg.reference.ip.ramp_down_rate_fraction == pytest.approx(0.55)
-    assert cfg.reference.ip.smooth_ramps is False
-    assert int(cfg.observation.target_preview_steps) == 10
-    assert int(cfg.observation.target_preview_stride) == 10
-    assert int(cfg.observation.target_preview_steps) * int(cfg.observation.target_preview_stride) <= int(cfg.sim.max_episode_steps)
-    assert cfg.training.production_mode is True
-
-
-def test_replay_window_0p2s_config_keeps_warm_start_observation_shape_and_antidrift() -> None:
-    old = load_experiment_config(ROOT / "configs/experiments/t15_new_replay_window_0p1s_tcvjdot_mpo.yaml")
-    cfg = load_experiment_config(REPLAY_WINDOW_0P2_CONFIG)
-    assert int(cfg.sim.max_episode_steps) == 200
-    assert cfg.reference.duration_s == pytest.approx(0.2)
-    assert cfg.reference.ip.kind == "replay_window"
-    assert cfg.reference.boundary.kind == "t15_replay_segment_conditioned"
-    assert cfg.sim.action_contract == "jdot_command"
-    assert int(cfg.observation.target_preview_steps) == int(old.observation.target_preview_steps)
-    assert int(cfg.observation.target_preview_stride) == int(old.observation.target_preview_stride)
-    assert cfg.reward.current_drift_weight == pytest.approx(1.5)
-    assert cfg.reward.mean_jdot_bias_weight == pytest.approx(1.0)
-    assert cfg.reward.terminal_remaining_cost == pytest.approx(2.0)
-
-
-def test_production_config_uses_absolute_jdot_contract() -> None:
-    cfg = load_experiment_config(PRODUCTION_CONFIG)
-    assert cfg.sim.action_contract == "jdot_command"
-    assert cfg.observation.actor_kind == "controller_state_v4"
-    assert cfg.sim.delta_derivative_limits_aps is None
-
-
-def test_production_reference_generates_t15_replay_conditioned_boundary() -> None:
-    cfg = load_experiment_config(PRODUCTION_CONFIG)
-    assert cfg.reference.boundary.kind == "t15_replay_segment_conditioned"
-    assert cfg.reference.boundary.replay_reference_dir is not None
-    library = T15ReplayBoundaryLibrary(cfg.reference.boundary.replay_reference_dir, theta_count=int(cfg.reference.theta_count))
-    with np.load(cfg.sim.csv_initial_state_library) as data:
-        split = np.asarray(data["split"]).astype(str)
-        keep = np.flatnonzero(split == "train")[:2]
-        initial_ip = np.asarray(data["ip0"], dtype=float)[keep]
-        shot_ids = np.asarray(data["shot_id"]).astype(str)[keep]
-        source_indices = np.asarray(data["source_index"], dtype=np.int64)[keep]
-        source_times_s = np.asarray(data["time_s"], dtype=float)[keep]
-    reset_boundary_radii = np.ones((2, int(cfg.reference.theta_count)), dtype=float)
-    reset_boundary_points = np.zeros((2, int(cfg.reference.theta_count), 2), dtype=float)
-    batch = generate_reference_batch(
-        config=cfg.reference,
-        initial_ip=initial_ip,
-        initial_parameters=np.zeros((2, 5), dtype=float),
-        initial_boundary_points=reset_boundary_points,
-        initial_boundary_radii=reset_boundary_radii,
-        shot_ids=shot_ids,
-        source_indices=source_indices,
-        source_times_s=source_times_s,
-        boundary_replay_library=library,
-        boundary_center=(1.5, 0.0),
-        steps=int(cfg.sim.max_episode_steps),
-        device="cpu",
-        seed=77,
-    )
-    assert batch.ip.shape == (2, 2001)
-    assert batch.radii.shape == (2, 2001, int(cfg.reference.theta_count))
-    assert batch.points.shape == (2, 2001, int(cfg.reference.theta_count), 2)
-    assert torch.all(torch.isfinite(batch.radii))
-
-
 def test_t15_replay_boundary_reference_uses_time_segment_not_ip_sort(tmp_path: Path) -> None:
     replay_dir = tmp_path / "replay"
     replay_dir.mkdir()
@@ -1641,46 +1530,6 @@ def test_actuator_legality_analysis_reports_delta_jdot_plus_twenty_percent(tmp_p
     limits = result["recommended_limits"]["delta_derivative_aps_plus_20pct"]
     assert limits["pfc"][0] == pytest.approx(24000.0)
     assert limits["sol"][1] == pytest.approx(36000.0)
-
-
-def test_fixed_horizon_diagnostic_configs_disable_training_terminations() -> None:
-    hold = load_experiment_config(FIXED_HORIZON_HOLD_CONFIG)
-    easy = load_experiment_config(FIXED_HORIZON_EASY_SEGMENTED_CONFIG)
-    for cfg in (hold, easy):
-        assert cfg.training.production_mode is False
-        assert cfg.sim.reset_source == "csv_initial_states"
-        assert cfg.reference.boundary.kind == "hold_reset_boundary"
-        assert int(cfg.sim.max_episode_steps) == 2000
-        assert cfg.reference.duration_s == pytest.approx(2.0)
-        assert cfg.sim.terminate_on_boundary_loss is False
-        assert cfg.sim.terminate_on_current_limit is False
-        assert cfg.reward.terminal_remaining_cost == pytest.approx(0.0)
-        assert cfg.learner.discount == pytest.approx(0.9995)
-    assert hold.reference.ip.kind == "hold_reset"
-    assert easy.reference.ip.kind == "segmented_profile"
-    assert easy.reference.ip.max_delta_fraction == pytest.approx(0.10)
-    assert int(easy.reference.ip.segment_min_steps) == 800
-    assert int(easy.reference.ip.segment_max_steps) == 1600
-
-
-def test_fixed_horizon_hold_reset_reference_uses_reset_ip() -> None:
-    cfg = load_experiment_config(FIXED_HORIZON_HOLD_CONFIG)
-    reset_ip = np.asarray([123456.0, 234567.0], dtype=float)
-    reset_boundary_points = np.zeros((2, int(cfg.reference.theta_count), 2), dtype=float)
-    reset_boundary_radii = np.ones((2, int(cfg.reference.theta_count)), dtype=float)
-    batch = generate_reference_batch(
-        config=cfg.reference,
-        initial_ip=reset_ip,
-        initial_parameters=np.zeros((2, 5), dtype=float),
-        initial_boundary_points=reset_boundary_points,
-        initial_boundary_radii=reset_boundary_radii,
-        steps=int(cfg.sim.max_episode_steps),
-        device="cpu",
-        seed=11,
-    )
-    assert batch.ip.shape == (2, int(cfg.sim.max_episode_steps) + 1)
-    assert torch.allclose(batch.ip[0], torch.full_like(batch.ip[0], reset_ip[0]))
-    assert torch.allclose(batch.ip[1], torch.full_like(batch.ip[1], reset_ip[1]))
 
 
 def test_hold_reset_ip_reference_uses_actual_reset_ip() -> None:
@@ -2350,7 +2199,7 @@ def test_export_cli_writes_policy_bundle_from_valid_checkpoint(tmp_path: Path) -
     assert (export_dir / "actor.pt").exists()
     assert (export_dir / "policy_weights.npz").exists()
     schema = json.loads((export_dir / "controller_schema.json").read_text())
-    assert schema["observation_kind"] == "controller_state_v4"
+    assert schema["observation_kind"] == "controller_state_v6"
 
 
 def test_distributed_resume_fails_clearly_because_worker_envs_are_not_checkpointed(tmp_path: Path) -> None:
