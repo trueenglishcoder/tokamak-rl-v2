@@ -73,13 +73,14 @@ if (( UPDATES_PER_ROLLOUT_CHUNK * 8 != 64 * WORLD_SIZE )); then
   exit 2
 fi
 
-export HOLDOUT_EVAL_EPISODES=${HOLDOUT_EVAL_EPISODES:-$(python3 - <<PYCOUNT
-import numpy as np
-with np.load("${RESET_LIBRARY}", allow_pickle=False) as d:
-    split = d["split"].astype(str)
-print(int(np.count_nonzero(split == "holdout")))
-PYCOUNT
-)}
+if [[ -z "${HOLDOUT_EVAL_EPISODES:-}" ]]; then
+  HOLDOUT_EVAL_EPISODES=$(python3 scripts/count_npz_string_value.py "${RESET_LIBRARY}" --array split --value holdout)
+  export HOLDOUT_EVAL_EPISODES
+fi
+if [[ ! "${HOLDOUT_EVAL_EPISODES}" =~ ^[0-9]+$ ]] || (( HOLDOUT_EVAL_EPISODES <= 0 )); then
+  echo "invalid HOLDOUT_EVAL_EPISODES=${HOLDOUT_EVAL_EPISODES}; expected a positive holdout count from ${RESET_LIBRARY}" >&2
+  exit 2
+fi
 
 mkdir -p "$(dirname "${GENERATED_CONFIG}")"
 cp "${GENERATED_MACHINE_CONFIG_SOURCE}" "$(dirname "${GENERATED_CONFIG}")/T15MD_new_data_trim50_idealized_gpu_plain_1e6.toml"
