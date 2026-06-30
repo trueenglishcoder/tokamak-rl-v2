@@ -172,13 +172,18 @@ srun \
 
     python3 - <<PYCHECK
 from pathlib import Path
+import json
 import math
 import numpy as np
 import torch
 from tokamak_rl_v2.config import load_experiment_config
 from tokamak_rl_v2.env import TokamakMagneticControlEnv
+from tokamak_rl_v2.training.policy_pipeline import _preflight_artifact_failure
 
 cfg = load_experiment_config("/workspace/tokamak-rl-v2/${GENERATED_CONFIG}")
+artifact_failure = _preflight_artifact_failure(cfg)
+if artifact_failure is not None:
+    raise SystemExit("trainer artifact preflight failed before distributed launch: " + json.dumps(artifact_failure, sort_keys=True))
 required = [
     cfg.sim.config_path,
     cfg.sim.csv_initial_state_library,

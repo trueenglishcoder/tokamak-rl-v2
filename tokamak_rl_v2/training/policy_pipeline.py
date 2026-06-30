@@ -43,13 +43,20 @@ def main(argv: list[str] | None = None) -> int:
     wandb_run = None
     gate_profile = _gate_profile_for_config(cfg)
     production_mode = bool(cfg.training.production_mode)
-    rank0 = _distributed_rank() == 0
+    rank = _distributed_rank()
+    rank0 = rank == 0
     runtime_device = _rank_runtime_device(args.device or cfg.training.device, cfg)
     runtime_cfg = _rank_runtime_config(cfg, runtime_device)
     previous_signal_handlers = _install_shutdown_signal_handlers()
     try:
         artifact_failure = _preflight_artifact_failure(runtime_cfg)
         if artifact_failure is not None:
+            print(
+                "artifact preflight failed "
+                f"rank={rank}: {json.dumps(artifact_failure, sort_keys=True, default=str)}",
+                file=sys.stderr,
+                flush=True,
+            )
             if rank0:
                 report = {
                     "status": artifact_failure["status"],
@@ -951,7 +958,7 @@ def _preflight_artifact_failure(cfg: ExperimentConfig) -> dict[str, object] | No
 
             with np.load(path, allow_pickle=False) as data:
                 expected_arrays = {"shot_id", "source_index", "time_s", "ip0", "pfc0", "sol0", "split"}
-                allowed_arrays = expected_arrays | {"difficulty_bin", "params0", "schema"}
+                allowed_arrays = expected_arrays | {"difficulty_bin", "params0", "schema", "mode"}
                 actual_arrays = set(data.files)
                 missing = sorted(expected_arrays - actual_arrays)
                 unexpected = sorted(actual_arrays - allowed_arrays)

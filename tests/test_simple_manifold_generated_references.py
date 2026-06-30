@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pytest
+
+from tokamak_rl_v2.config import load_experiment_config
+from tokamak_rl_v2.training.policy_pipeline import _preflight_artifact_failure
 
 
 def _load_builder_module():
@@ -62,3 +66,26 @@ def test_piecewise_linear_ramp_then_hold_does_not_overshoot_hold_value() -> None
     assert out[-1] == pytest.approx(398.5)
     assert np.min(out) == pytest.approx(398.5)
     assert out[-1] - out[-2] == pytest.approx(0.0)
+
+
+def test_simple_manifold_reset_library_mode_metadata_passes_artifact_preflight(tmp_path: Path) -> None:
+    reset_path = tmp_path / "simple_initial_states.npz"
+    np.savez_compressed(
+        reset_path,
+        schema=np.asarray("t15_simple_manifold_generated_trim50_idealized_initial_states_v1"),
+        shot_id=np.asarray(["3854", "3863"]),
+        source_index=np.asarray([0, 1], dtype=np.int64),
+        time_s=np.asarray([0.05, 0.06], dtype=float),
+        ip0=np.asarray([200000.0, 210000.0], dtype=float),
+        pfc0=np.zeros((2, 6), dtype=float),
+        sol0=np.zeros((2, 3), dtype=float),
+        params0=np.asarray([[1.5, 0.0, 0.5, 1.2, 0.1], [1.5, 0.0, 0.5, 1.2, 0.1]], dtype=float),
+        split=np.asarray(["train", "holdout"]),
+        difficulty_bin=np.asarray(["core", "core"]),
+        mode=np.asarray(["ramp", "hold_then_ramp"]),
+    )
+
+    cfg = load_experiment_config("configs/experiments/t15_simple_manifold_generated_trim50_idealized_0p1s_tcvjdot_balanced_mpo.yaml")
+    cfg = replace(cfg, sim=replace(cfg.sim, csv_initial_state_library=str(reset_path)))
+
+    assert _preflight_artifact_failure(cfg) is None
