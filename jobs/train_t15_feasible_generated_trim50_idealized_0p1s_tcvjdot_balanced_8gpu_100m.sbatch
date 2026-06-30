@@ -36,10 +36,9 @@ export WANDB_MODE=${WANDB_MODE:-online}
 export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
 export MASTER_PORT=${MASTER_PORT:-$(( 20000 + (${SLURM_JOB_ID:-1731} % 40000) ))}
 
-for path in "${SOURCE_CONFIG}" "${MACHINE_CONFIG_SOURCE}" "${RESET_LIBRARY}" "${TARGET_LIBRARY}"; do
+for path in "${SOURCE_CONFIG}" "${MACHINE_CONFIG_SOURCE}"; do
   if [[ ! -f "${path}" ]]; then
     echo "missing required feasible-generated training artifact: ${path}" >&2
-    echo "run scripts/build_t15_feasible_generated_trim50_idealized_0p1s.py before submitting this job" >&2
     exit 2
   fi
 done
@@ -51,6 +50,29 @@ if (( BATCH_SIZE * WORLD_SIZE != GLOBAL_LEARNER_BATCH )); then
   echo "BATCH_SIZE=${BATCH_SIZE} and WORLD_SIZE=${WORLD_SIZE} do not preserve global learner batch ${GLOBAL_LEARNER_BATCH}" >&2
   exit 2
 fi
+
+if [[ ! -f "${RESET_LIBRARY}" || ! -f "${TARGET_LIBRARY}" ]]; then
+  echo "feasible generated reset/target libraries are missing; building them inside the container"
+  srun --ntasks=1 \
+    --container-image /scratch/$USER/tokamak/tokamak-rl-v2.sqsh \
+    --container-mounts /scratch/$USER/tokamak:/workspace \
+    bash -lc '
+      set -euo pipefail
+      export PYTHONPATH=/workspace/tokamak-sim:/workspace/tokamak-rl-v2:${PYTHONPATH:-}
+      cd /workspace/tokamak-rl-v2
+      python3 scripts/build_t15_feasible_generated_trim50_idealized_0p1s.py \
+        --initial-states-out "${RESET_LIBRARY}" \
+        --targets-out "${TARGET_LIBRARY}" \
+        --out-dir "$(dirname "${TARGET_LIBRARY}")"
+    '
+fi
+
+for path in "${RESET_LIBRARY}" "${TARGET_LIBRARY}"; do
+  if [[ ! -f "${path}" ]]; then
+    echo "failed to create feasible-generated training artifact: ${path}" >&2
+    exit 2
+  fi
+done
 
 if [[ -z "${HOLDOUT_EVAL_EPISODES:-}" ]]; then
   HOLDOUT_EVAL_EPISODES=$(python3 scripts/count_npz_string_value.py "${RESET_LIBRARY}" --array split --value holdout)
