@@ -17,6 +17,7 @@ from tokamak_control.io.config_io import load_config
 
 from tokamak_rl_v2.config.schema import ExperimentConfig
 from tokamak_rl_v2.env.references import (
+    FeasibleGeneratedTargetLibrary,
     ReferenceBatch,
     T15ReplayBoundaryLibrary,
     generate_reference_batch,
@@ -110,6 +111,8 @@ class TokamakMagneticControlEnv:
             else None
         )
         self._boundary_replay_library = None
+        self._feasible_target_library = None
+        self._curriculum_progress = 0.0
         needs_replay_library = config.reference.boundary.kind == "t15_replay_segment_conditioned" or config.reference.ip.kind == "replay_window"
         if needs_replay_library:
             if config.reference.boundary.replay_reference_dir is None:
@@ -121,6 +124,19 @@ class TokamakMagneticControlEnv:
             if self._csv_initial_states is None:
                 raise ValueError("replay-window references require CSV initial states")
             self._boundary_replay_library.assert_shots_available(self._csv_initial_states.shot_id)
+        needs_feasible_library = config.reference.boundary.kind == "feasible_generated_window" or config.reference.ip.kind == "feasible_generated_window"
+        if needs_feasible_library:
+            if config.reference.ip.kind != "feasible_generated_window" or config.reference.boundary.kind != "feasible_generated_window":
+                raise ValueError("feasible_generated_window must be selected for both Ip and boundary")
+            feasible_dir = config.reference.ip.feasible_reference_dir
+            if feasible_dir is None:
+                raise ValueError("feasible_generated_window requires feasible_reference_dir")
+            self._feasible_target_library = FeasibleGeneratedTargetLibrary(
+                feasible_dir,
+                theta_count=int(config.reference.theta_count),
+            )
+            if self._csv_initial_states is None:
+                raise ValueError("feasible_generated_window references require CSV initial states")
         self.reset_metadata: list[dict[str, object]] = []
 
     @property
@@ -137,6 +153,12 @@ class TokamakMagneticControlEnv:
     def reset(self) -> Tensor:
         payload = self._sample_reset_payload(self.batch_size)
         return self._reset_from_payload(payload)
+
+    def set_curriculum_progress(self, progress: float) -> None:
+        value = float(progress)
+        if not np.isfinite(value):
+            value = 0.0
+        self._curriculum_progress = float(np.clip(value, 0.0, 1.0))
 
     def reset_to_csv_indices(self, indices: np.ndarray | list[int] | tuple[int, ...]) -> Tensor:
         """Reset the whole batch to explicit CSV-library rows."""
@@ -240,7 +262,8 @@ class TokamakMagneticControlEnv:
 
     def _sample_reset_payload(self, count: int) -> ResetPayload:
         if self._csv_initial_states is not None:
-            return self._reset_payload_from_csv_sample(self._csv_initial_states.sample(self.rng, count=int(count)))
+            weights = self._feasible_curriculum_weights() if self._feasible_target_library is not None else None
+            return self._reset_payload_from_csv_sample(self._csv_initial_states.sample(self.rng, count=int(count), difficulty_weights=weights))
         if self.config.sim.initial_ranges is None:
             raise ValueError("training config must provide replay-bounded initial_ranges")
         ip0, pfc0, sol0, params0 = sample_initial_conditions(self.rng, self.config.sim.initial_ranges, int(count))
@@ -250,9 +273,9 @@ class TokamakMagneticControlEnv:
         count = int(reset.ip0.shape[0])
         boundary_cfg = getattr(getattr(self.config, "reference", None), "boundary", None)
         boundary_kind = str(getattr(boundary_cfg, "kind", ""))
-        if boundary_kind == "generated_parameter_profile":
+        if boundary_kind in {"generated_parameter_profile", "feasible_generated_window"}:
             if reset.params0 is None:
-                raise ValueError("generated_parameter_profile requires csv initial-state library with params0")
+                raise ValueError(f"{boundary_kind} requires csv initial-state library with params0")
             params0 = reset.params0
         else:
             params0 = np.zeros((count, 5), dtype=float) if reset.params0 is None else reset.params0
@@ -293,6 +316,9 @@ class TokamakMagneticControlEnv:
             kwargs["source_indices"] = np.asarray(payload.source_indices)
             kwargs["source_times_s"] = np.asarray(payload.source_times_s, dtype=float)
             kwargs["boundary_replay_library"] = self._boundary_replay_library
+        if self.config.reference.boundary.kind == "feasible_generated_window" or self.config.reference.ip.kind == "feasible_generated_window":
+            kwargs["target_indices"] = np.asarray(payload.source_indices, dtype=np.int64)
+            kwargs["feasible_target_library"] = self._feasible_target_library
         if self.config.reference.boundary.kind == "t15_replay_segment_conditioned":
             kwargs["boundary_center"] = (float(self.cfg.physics.R0), float(self.cfg.physics.Z0))
         return generate_reference_batch(
@@ -304,6 +330,14 @@ class TokamakMagneticControlEnv:
             seed=int(payload.reference_seed),
             **kwargs,
         )
+
+    def _feasible_curriculum_weights(self) -> dict[str, float]:
+        progress = float(self._curriculum_progress)
+        if progress < 0.20:
+            return {"core": 0.80, "moderate": 0.20, "ambitious": 0.0}
+        if progress < 0.60:
+            return {"core": 0.55, "moderate": 0.35, "ambitious": 0.10}
+        return {"core": 0.40, "moderate": 0.40, "ambitious": 0.20}
 
     def _record_reset_metadata(self, payload: ResetPayload, *, indices: list[int] | None = None) -> None:
         if not payload.shot_ids:

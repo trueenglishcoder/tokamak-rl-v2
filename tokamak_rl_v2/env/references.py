@@ -413,6 +413,75 @@ class T15ReplayBoundaryLibrary:
         )
 
 
+class FeasibleGeneratedTargetLibrary:
+    """Prebuilt coupled Ip/boundary target windows for generated training."""
+
+    def __init__(self, root: str | Path, *, theta_count: int) -> None:
+        self.root = Path(root).expanduser().resolve()
+        self.theta_count = int(theta_count)
+        if self.theta_count <= 0:
+            raise ValueError("theta_count must be positive")
+        if self.root.is_dir():
+            path = self.root / "t15_feasible_generated_trim50_idealized_0p1s_targets.npz"
+        else:
+            path = self.root
+        if not path.exists():
+            raise FileNotFoundError(f"feasible generated target library does not exist: {path}")
+        self.path = path
+        with np.load(path, allow_pickle=False) as data:
+            required = {"ip_ref", "params_ref", "radii_ref", "zone", "shot_id", "source_index", "split"}
+            missing = sorted(required - set(data.files))
+            if missing:
+                raise ValueError(f"{path} missing feasible target arrays: {', '.join(missing)}")
+            self.ip_ref = np.asarray(data["ip_ref"], dtype=float)
+            self.params_ref = np.asarray(data["params_ref"], dtype=float)
+            self.radii_ref = np.asarray(data["radii_ref"], dtype=float)
+            self.zone = np.asarray(data["zone"]).astype(str).reshape(-1)
+            self.shot_id = np.asarray(data["shot_id"]).astype(str).reshape(-1)
+            self.source_index = np.asarray(data["source_index"], dtype=np.int64).reshape(-1)
+            self.split = np.asarray(data["split"]).astype(str).reshape(-1)
+        count = int(self.ip_ref.shape[0])
+        if count <= 0:
+            raise ValueError(f"{path} contains no feasible target windows")
+        if self.ip_ref.ndim != 2:
+            raise ValueError(f"{path} ip_ref must have shape [N, T+1]")
+        if self.params_ref.ndim != 3 or self.params_ref.shape[0] != count or self.params_ref.shape[2] != 5:
+            raise ValueError(f"{path} params_ref must have shape [N, T+1, 5]")
+        if self.radii_ref.ndim != 3 or self.radii_ref.shape[0] != count or self.radii_ref.shape[2] < self.theta_count:
+            raise ValueError(f"{path} radii_ref must have shape [N, T+1, >=theta_count]")
+        if self.params_ref.shape[1] != self.ip_ref.shape[1] or self.radii_ref.shape[1] != self.ip_ref.shape[1]:
+            raise ValueError(f"{path} ip_ref, params_ref, and radii_ref must have matching time dimension")
+        for name, arr in (("ip_ref", self.ip_ref), ("params_ref", self.params_ref), ("radii_ref", self.radii_ref)):
+            if not np.all(np.isfinite(arr)):
+                raise ValueError(f"{path} contains non-finite {name}")
+        if not np.all(self.radii_ref[:, :, : self.theta_count] > 0.0):
+            raise ValueError(f"{path} contains non-positive radii_ref values")
+        for name, arr in (("zone", self.zone), ("shot_id", self.shot_id), ("source_index", self.source_index), ("split", self.split)):
+            if arr.shape != (count,):
+                raise ValueError(f"{path} {name} must have one value per row")
+
+    def __len__(self) -> int:
+        return int(self.ip_ref.shape[0])
+
+    def rows(self, indices: np.ndarray | list[int] | tuple[int, ...], *, steps: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        idx = np.asarray(indices, dtype=np.int64).reshape(-1)
+        if idx.size == 0:
+            raise ValueError("feasible target row lookup requires at least one index")
+        if np.any((idx < 0) | (idx >= len(self))):
+            raise IndexError("feasible generated target row index out of range")
+        wanted = int(steps) + 1
+        if self.ip_ref.shape[1] != wanted:
+            raise ValueError(
+                f"feasible generated targets have {self.ip_ref.shape[1] - 1} steps, "
+                f"but environment requested {int(steps)}"
+            )
+        return (
+            self.ip_ref[idx].astype(float, copy=True),
+            self.params_ref[idx].astype(float, copy=True),
+            self.radii_ref[idx, :, : self.theta_count].astype(float, copy=True),
+        )
+
+
 def boundary_points_from_parameters(parameters: Tensor, theta: Tensor) -> Tensor:
     R0 = parameters[..., 0][..., None]
     Z0 = parameters[..., 1][..., None]
@@ -451,6 +520,8 @@ def generate_reference_batch(
     source_indices: np.ndarray | None = None,
     source_times_s: np.ndarray | None = None,
     boundary_replay_library: T15ReplayBoundaryLibrary | None = None,
+    feasible_target_library: FeasibleGeneratedTargetLibrary | None = None,
+    target_indices: np.ndarray | None = None,
     boundary_center: tuple[float, float] | np.ndarray | None = None,
 ) -> ReferenceBatch:
     dev = torch.device(device)
@@ -464,6 +535,7 @@ def generate_reference_batch(
     shot_id_arr = None if shot_ids is None else np.asarray(shot_ids).reshape(-1)
     source_index_arr = None if source_indices is None else np.asarray(source_indices).reshape(-1)
     source_time_arr = None if source_times_s is None else np.asarray(source_times_s, dtype=float).reshape(-1)
+    target_index_arr = None if target_indices is None else np.asarray(target_indices, dtype=np.int64).reshape(-1)
     if config.boundary.kind == "t15_replay_segment_conditioned":
         if shot_id_arr is None or shot_id_arr.shape[0] != B:
             raise ValueError("t15_replay_segment_conditioned requires one shot id per reset")
@@ -482,6 +554,27 @@ def generate_reference_batch(
             raise ValueError("replay_window Ip requires one shot id per reset")
         if boundary_replay_library is None:
             raise ValueError("replay_window Ip requires a T15ReplayBoundaryLibrary")
+    if config.ip.kind == "feasible_generated_window" or config.boundary.kind == "feasible_generated_window":
+        if config.ip.kind != "feasible_generated_window" or config.boundary.kind != "feasible_generated_window":
+            raise ValueError("feasible_generated_window must be used for both Ip and boundary")
+        if feasible_target_library is None:
+            raise ValueError("feasible_generated_window requires a FeasibleGeneratedTargetLibrary")
+        if target_index_arr is None or target_index_arr.shape[0] != B:
+            raise ValueError("feasible_generated_window requires one target index per reset")
+        ip_np, params_np, radii_np = feasible_target_library.rows(target_index_arr, steps=int(steps))
+        params_t = torch.as_tensor(params_np, dtype=torch.float64, device=dev)
+        radii = torch.as_tensor(radii_np, dtype=torch.float64, device=dev)
+        points = boundary_points_from_parameters(params_t, theta)
+        computed_radii = radii_from_points(points, params_t[..., 0:2])
+        if not torch.allclose(radii, computed_radii, rtol=1.0e-4, atol=1.0e-5):
+            radii = computed_radii
+        return ReferenceBatch(
+            ip=torch.as_tensor(ip_np, dtype=torch.float64, device=dev),
+            parameters=params_t,
+            points=points,
+            radii=radii,
+            theta=theta,
+        )
 
     for b in range(B):
         if config.ip.kind == "hold_reset":

@@ -111,12 +111,25 @@ class CsvInitialStateLibrary:
     def __len__(self) -> int:
         return int(self.ip0.shape[0])
 
-    def sample(self, rng: np.random.Generator, count: int) -> CsvInitialStateSample:
+    def sample(
+        self,
+        rng: np.random.Generator,
+        count: int,
+        *,
+        difficulty_weights: dict[str, float] | None = None,
+    ) -> CsvInitialStateSample:
         if self.difficulty_bin is not None and self._bin_shot_indices:
             bins = np.asarray(sorted(self._bin_shot_indices), dtype=object)
-            reps = int(np.ceil(int(count) / max(int(bins.size), 1)))
-            chosen_bins = np.tile(bins, reps)[: int(count)]
-            rng.shuffle(chosen_bins)
+            if difficulty_weights is None:
+                reps = int(np.ceil(int(count) / max(int(bins.size), 1)))
+                chosen_bins = np.tile(bins, reps)[: int(count)]
+                rng.shuffle(chosen_bins)
+            else:
+                weights = np.asarray([max(float(difficulty_weights.get(str(name), 0.0)), 0.0) for name in bins.tolist()], dtype=float)
+                if not np.any(weights > 0.0):
+                    raise ValueError("difficulty_weights must contain at least one positive available bin weight")
+                weights = weights / float(np.sum(weights))
+                chosen_bins = rng.choice(bins, size=int(count), replace=True, p=weights)
             idx = np.empty((int(count),), dtype=np.int64)
             for row, bin_name in enumerate(chosen_bins.tolist()):
                 by_shot = self._bin_shot_indices[str(bin_name)]

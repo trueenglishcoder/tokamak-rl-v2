@@ -548,6 +548,7 @@ class Trainer:
             health_writer.writeheader()
             if self.resume_checkpoint is None and self.replay.size > 0:
                 self.replay.start_new_episodes()
+            self.env.set_curriculum_progress(float(self.start_step) / max(float(self.steps), 1.0))
             obs = self.env.reset()
             critic_obs = self.env.critic_obs()
             if self.resume_checkpoint is not None:
@@ -563,6 +564,7 @@ class Trainer:
             early_stop_step: int | None = None
             progress = tqdm(total=max(self.steps - self.start_step, 0), desc="train", unit="step", dynamic_ncols=True)
             for step in range(self.start_step + 1, self.steps + 1):
+                self.env.set_curriculum_progress(float(step - 1) / max(float(self.steps), 1.0))
                 with torch.no_grad():
                     action, _logp, _mean = self.actor.sample(obs)
                 batch_step = self.env.step(action)
@@ -695,6 +697,7 @@ class Trainer:
                 if reward_header:
                     reward_writer = csv.DictWriter(reward_f, fieldnames=reward_header)
 
+        self.env.set_curriculum_progress(float(self.start_step) / max(float(self.steps), 1.0))
         obs = self.env.reset()
         critic_obs = self.env.critic_obs()
         if self.resume_checkpoint is not None:
@@ -735,6 +738,7 @@ class Trainer:
 
         try:
             while env_steps < self.steps:
+                self.env.set_curriculum_progress(float(env_steps) / max(float(self.steps), 1.0))
                 assert obs is not None
                 assert critic_obs is not None
                 with torch.no_grad():
