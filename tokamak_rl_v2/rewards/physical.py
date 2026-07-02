@@ -15,6 +15,20 @@ class RewardBatch:
     components: dict[str, Tensor]
 
 
+def _jdot_switching_loss(delta_action: Tensor, *, scale: float, cap: float) -> Tensor:
+    """Capped log total variation on normalized Jdot commands.
+
+    This favors piecewise-constant "stair" Jdot trajectories without making
+    one deliberate jump arbitrarily expensive.
+    """
+
+    scale_t = max(float(scale), 1.0e-12)
+    cap_t = max(float(cap), 1.0e-12)
+    clipped = torch.clamp(torch.abs(delta_action), max=cap_t)
+    denom = math.log1p(cap_t / scale_t)
+    return torch.mean(torch.log1p(clipped / scale_t) / max(denom, 1.0e-12), dim=-1)
+
+
 class T15PhysicalReward:
     """Dense negative physical-cost reward for simulator-only T15 RL."""
 
@@ -117,6 +131,11 @@ class T15PhysicalReward:
         )
         action_loss = torch.mean(action.pow(2), dim=-1)
         delta_action_loss = torch.mean(delta_action.pow(2), dim=-1)
+        jdot_switching_loss = _jdot_switching_loss(
+            delta_action,
+            scale=float(c.jdot_switching_scale),
+            cap=float(c.jdot_switching_cap),
+        )
         actuator_saturation_loss = torch.mean(saturation_delta.pow(2), dim=-1)
 
         physical_cost = (
@@ -130,6 +149,7 @@ class T15PhysicalReward:
             + float(c.derivative_usage_weight) * derivative_usage_cost
             + float(c.action_weight) * action_loss
             + float(c.delta_action_weight) * delta_action_loss
+            + float(c.jdot_switching_weight) * jdot_switching_loss
             + float(c.actuator_saturation_weight) * actuator_saturation_loss
         )
         if episode_progress is None:
@@ -189,6 +209,7 @@ class T15PhysicalReward:
                 "mean_jdot_bias_loss": torch.zeros_like(mean_jdot_bias),
                 "action_loss": action_loss,
                 "delta_action_loss": delta_action_loss,
+                "jdot_switching_loss": jdot_switching_loss,
                 "actuator_saturation_loss": actuator_saturation_loss,
                 "terminal_remaining_loss": terminal_remaining_loss,
                 "terminal_total_penalty": terminal_total_penalty,
@@ -302,6 +323,11 @@ class T15TCVQualityReward:
         )
         action_loss = torch.mean(action.pow(2), dim=-1)
         delta_action_loss = torch.mean(delta_action.pow(2), dim=-1)
+        jdot_switching_loss = _jdot_switching_loss(
+            delta_action,
+            scale=float(c.jdot_switching_scale),
+            cap=float(c.jdot_switching_cap),
+        )
         actuator_saturation_loss = torch.mean(saturation_delta.pow(2), dim=-1)
 
         component_losses = torch.stack(
@@ -317,6 +343,7 @@ class T15TCVQualityReward:
                 float(c.derivative_usage_weight) * derivative_usage_cost,
                 float(c.action_weight) * action_loss,
                 float(c.delta_action_weight) * delta_action_loss,
+                float(c.jdot_switching_weight) * jdot_switching_loss,
                 float(c.actuator_saturation_weight) * actuator_saturation_loss,
                 float(c.boundary_missing_weight) * boundary_missing_loss,
             ],
@@ -382,6 +409,7 @@ class T15TCVQualityReward:
                 "mean_jdot_bias_loss": mean_jdot_bias,
                 "action_loss": action_loss,
                 "delta_action_loss": delta_action_loss,
+                "jdot_switching_loss": jdot_switching_loss,
                 "actuator_saturation_loss": actuator_saturation_loss,
                 "terminal_remaining_loss": terminal_remaining_loss,
                 "terminal_total_penalty": terminal_total_penalty,
@@ -446,6 +474,11 @@ class T15TCVDerivativeReward:
             if applied_delta_action is None
             else applied_delta_action.to(dtype=action.dtype, device=action.device)
         )
+        jdot_switching_loss = _jdot_switching_loss(
+            delta_action,
+            scale=float(c.jdot_switching_scale),
+            cap=float(c.jdot_switching_cap),
+        )
         action_rms = torch.sqrt(torch.mean(action.pow(2), dim=-1))
         delta_action_rms = torch.sqrt(torch.mean(delta_action.pow(2), dim=-1))
         max_abs_action = torch.max(torch.abs(action), dim=-1).values
@@ -492,6 +525,7 @@ class T15TCVDerivativeReward:
             bad=1.0,
             good=0.0,
         )
+        jdot_switching_reward = torch.clamp(1.0 - jdot_switching_loss, 0.0, 1.0)
         boundary_reward = torch.where(
             found.reshape(-1),
             torch.ones_like(ip_reward),
@@ -508,6 +542,7 @@ class T15TCVDerivativeReward:
                 current_drift_reward,
                 mean_jdot_bias_reward,
                 saturation_reward,
+                jdot_switching_reward,
                 boundary_reward,
             ],
             dim=-1,
@@ -522,6 +557,7 @@ class T15TCVDerivativeReward:
                 float(c.current_drift_weight),
                 float(c.mean_jdot_bias_weight),
                 float(c.actuator_saturation_weight),
+                float(c.jdot_switching_weight),
                 float(c.boundary_missing_weight),
             ],
             dtype=component_rewards.dtype,
@@ -557,6 +593,7 @@ class T15TCVDerivativeReward:
         current_drift_loss = 1.0 - current_drift_reward
         mean_jdot_bias_loss = 1.0 - mean_jdot_bias_reward
         saturation_component_loss = 1.0 - saturation_reward
+        jdot_switching_component_loss = 1.0 - jdot_switching_reward
         current_usage_mean = (
             torch.clamp(current_usage_fraction, min=0.0)
             if current_usage_mean_fraction is None
@@ -606,6 +643,9 @@ class T15TCVDerivativeReward:
                 "derivative_usage_loss": derivative_loss,
                 "action_loss": torch.zeros_like(quality),
                 "delta_action_loss": torch.zeros_like(quality),
+                "jdot_switching_loss": jdot_switching_loss,
+                "jdot_switching_component_loss": jdot_switching_component_loss,
+                "jdot_switching_reward": jdot_switching_reward,
                 "actuator_saturation_loss": actuator_saturation_loss,
                 "tcv_saturation_component_loss": saturation_component_loss,
                 "terminal_remaining_loss": terminal_remaining_loss,

@@ -155,6 +155,9 @@ class RewardConfig:
     derivative_usage_weight: float = 0.0
     action_weight: float = 0.02
     delta_action_weight: float = 0.05
+    jdot_switching_weight: float = 0.0
+    jdot_switching_scale: float = 0.05
+    jdot_switching_cap: float = 1.0
     current_soft_fraction: float = 0.90
     current_bad_fraction: float = 1.40
     derivative_soft_fraction: float = 0.90

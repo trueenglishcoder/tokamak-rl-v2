@@ -27,6 +27,7 @@ export WORLD_SIZE=8
 export BATCH_SIZE=32
 export UPDATES_PER_ROLLOUT_CHUNK=64
 export RUN_LABEL=${RUN_LABEL:-t15_simple_manifold_generated_trim50_idealized_0p1s_tcvjdot_balanced}
+export TRAINING_FAMILY_TOKEN=${TRAINING_FAMILY_TOKEN:-simple_manifold_generated}
 export RUN_NAME=${RUN_NAME:-${RUN_LABEL}_8gpu_100m_${SLURM_JOB_ID:-manual}}
 export TRAIN_OUTPUT=${TRAIN_OUTPUT:-outputs/${RUN_NAME}}
 export GENERATED_CONFIG=${GENERATED_CONFIG:-${TRAIN_OUTPUT}/generated_configs/${RUN_NAME}.json}
@@ -109,10 +110,11 @@ cfg["training"]["save_checkpoints"] = True
 cfg["training"]["early_stop_patience_evals"] = 0
 cfg["training"]["early_stop_min_delta"] = 0.0
 
+family_token = "${TRAINING_FAMILY_TOKEN}"
 checks = {
-    "simple_config_copy": cfg["sim"]["config_path"].endswith("/generated_configs/T15MD_new_data.toml"),
-    "simple_reset_library": "simple_manifold_generated" in str(cfg["sim"]["csv_initial_state_library"]),
-    "simple_reference_dir": "simple_manifold_generated" in str(cfg["reference"]["boundary"]["feasible_reference_dir"]),
+    "generated_config_copy": cfg["sim"]["config_path"].endswith("/generated_configs/T15MD_new_data.toml"),
+    "generated_reset_library": family_token in str(cfg["sim"]["csv_initial_state_library"]),
+    "generated_reference_dir": family_token in str(cfg["reference"]["boundary"]["feasible_reference_dir"]),
     "feasible_window_ip": cfg["reference"]["ip"]["kind"] == "feasible_generated_window",
     "feasible_window_boundary": cfg["reference"]["boundary"]["kind"] == "feasible_generated_window",
     "same_generated_reference_dir": cfg["reference"]["ip"]["feasible_reference_dir"] == cfg["reference"]["boundary"]["feasible_reference_dir"],

@@ -392,6 +392,56 @@ def test_tcv_derivative_current_and_saturation_rewards_are_not_inverted() -> Non
     assert float(rb.components["tcv_quality"][0]) > float(rb.components["tcv_quality"][1])
 
 
+def test_tcv_derivative_jdot_switching_penalizes_repeated_command_changes() -> None:
+    reward_fn = T15TCVDerivativeReward(
+        RewardConfig(
+            kind="tcv_derivative",
+            reward_scale=1.0,
+            smoothmax_alpha=-5.0,
+            shape_mean_weight=0.0,
+            shape_max_weight=0.0,
+            ip_weight=0.0,
+            current_weight=0.0,
+            derivative_weight=0.0,
+            current_drift_weight=0.0,
+            mean_jdot_bias_weight=0.0,
+            actuator_saturation_weight=0.0,
+            boundary_missing_weight=0.0,
+            jdot_switching_weight=1.0,
+            jdot_switching_scale=0.1,
+            jdot_switching_cap=1.0,
+        ),
+        control_rate_hz=1000.0,
+    )
+    ref = torch.zeros((2, 32, 2), dtype=torch.float32)
+    action = torch.zeros((2, 9), dtype=torch.float32)
+    applied_delta_action = torch.stack(
+        [torch.zeros((9,), dtype=torch.float32), torch.ones((9,), dtype=torch.float32)]
+    )
+    rb = reward_fn(
+        ip=torch.full((2,), 200000.0),
+        ip_ref=torch.full((2,), 200000.0),
+        boundary_points=ref,
+        reference_points=ref,
+        action=action,
+        previous_action=action,
+        requested_action=action,
+        applied_delta_action=applied_delta_action,
+        current_over_limit_a=torch.zeros((2,), dtype=torch.float32),
+        current_usage_fraction=torch.full((2,), 0.5, dtype=torch.float32),
+        current_margin_fraction=torch.full((2,), 0.5, dtype=torch.float32),
+        derivative_usage=torch.zeros((2,), dtype=torch.float32),
+        boundary_found=torch.ones((2,), dtype=torch.bool),
+        terminated=torch.zeros((2,), dtype=torch.bool),
+    )
+    assert float(rb.components["jdot_switching_loss"][0]) == pytest.approx(0.0)
+    assert float(rb.components["jdot_switching_loss"][1]) == pytest.approx(1.0)
+    assert float(rb.components["jdot_switching_reward"][0]) == pytest.approx(1.0)
+    assert float(rb.components["jdot_switching_reward"][1]) == pytest.approx(0.0)
+    assert float(rb.reward[0]) > float(rb.reward[1])
+    assert float(rb.components["tcv_quality"][0]) > float(rb.components["tcv_quality"][1])
+
+
 def test_tcv_derivative_can_penalize_current_drift_and_mean_jdot_bias() -> None:
     reward_fn = T15TCVDerivativeReward(
         RewardConfig(

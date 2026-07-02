@@ -650,11 +650,16 @@ def _validate_reward_config(reward: RewardConfig, *, prefix: str) -> None:
         "derivative_usage_weight",
         "action_weight",
         "delta_action_weight",
+        "jdot_switching_weight",
         "actuator_saturation_weight",
     ):
         value = float(getattr(reward, name))
         if not math.isfinite(value) or value < 0.0:
             raise ValueError(f"{prefix}.{name} must be finite and non-negative")
+    for name in ("jdot_switching_scale", "jdot_switching_cap"):
+        value = float(getattr(reward, name))
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{prefix}.{name} must be finite and positive")
     for name in ("current_soft_fraction", "derivative_soft_fraction"):
         value = float(getattr(reward, name))
         if not math.isfinite(value) or not 0.0 <= value <= 1.0:
