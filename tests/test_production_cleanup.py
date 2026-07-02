@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
@@ -13,6 +15,16 @@ from tokamak_rl_v2.training.policy_pipeline import evaluate_policy_gates
 
 ROOT = Path(__file__).resolve().parents[1]
 ACTIVE_CONFIG = ROOT / "configs/experiments/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_mpo_balanced.yaml"
+
+
+def _load_trim50_machine_writer():
+    path = ROOT / "scripts/write_trim50_plain_gpu1e6_machine_config.py"
+    spec = importlib.util.spec_from_file_location("write_trim50_plain_gpu1e6_machine_config", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def _write_loadable_active_config(tmp_path: Path, mutate=None) -> Path:
@@ -56,6 +68,42 @@ def test_active_trim50_config_uses_final_pipeline(tmp_path: Path) -> None:
     assert cfg.reward.ip_weight == pytest.approx(1.8)
     assert cfg.reward.ip_scale_a == pytest.approx(25_000.0)
     assert cfg.reward.smoothmax_alpha == pytest.approx(-5.0)
+
+
+def test_trim50_plain_gpu1e6_machine_writer_removes_initial_conditions(tmp_path: Path) -> None:
+    writer = _load_trim50_machine_writer()
+    source = tmp_path / "source.toml"
+    source.write_text(
+        """
+version = 1
+
+[physics]
+sigma = 1.0
+inductance_L = 2.0
+Ip0 = 123.0
+
+[boundary]
+mode = "tracked_flux_contour"
+base_mode = "legacy_contour_limited"
+legacy_precision_index2 = 0.001
+level_smoothing_alpha = 0.6
+soft_level_candidates = 64
+""".lstrip(),
+        encoding="utf-8",
+    )
+    out = tmp_path / "out.toml"
+
+    writer.main(["--source", str(source), "--out", str(out)])
+
+    text = out.read_text(encoding="utf-8")
+    assert "Ip0" not in text
+    assert "sigma = 3548133.8923357604" in text
+    assert "inductance_L = 4.466835921509635e-07" in text
+    assert 'mode = "legacy_contour_limited"' in text
+    assert "legacy_precision_index2 = 1e-06" in text
+    assert "smooth_selected_level = false" in text
+    assert "soft_level_selection = false" in text
+    assert "soft_level_candidates" not in text
 
 
 def test_active_config_rejects_old_boundary_and_action_contract(tmp_path: Path) -> None:

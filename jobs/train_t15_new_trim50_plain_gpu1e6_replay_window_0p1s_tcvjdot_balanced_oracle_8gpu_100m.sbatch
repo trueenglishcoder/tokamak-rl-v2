@@ -14,7 +14,7 @@ cd /scratch/$USER/tokamak/tokamak-rl-v2
 mkdir -p slurm_logs outputs
 
 export SOURCE_CONFIG=${SOURCE_CONFIG:-configs/experiments/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_mpo_balanced.yaml}
-export TRIM_MACHINE_CONFIG=${TRIM_MACHINE_CONFIG:-../tokamak-sim/runs/t15md_trim50_plain_gpu_1e6_setup/T15MD_new_data_trim50_plain_gpu_1e6_3856.toml}
+export TRIM_MACHINE_CONFIG_SOURCE=${TRIM_MACHINE_CONFIG_SOURCE:-../tokamak-sim/configs/T15MD_new_data.toml}
 export RESET_LIBRARY=${RESET_LIBRARY:-data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_initial_states.npz}
 export ORACLE_TARGET_DIR=${ORACLE_TARGET_DIR:-data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_targets}
 export ORACLE_TARGETS=${ORACLE_TARGETS:-${ORACLE_TARGET_DIR}/t15_replay_window_oracle_targets.npz}
@@ -38,8 +38,8 @@ if [[ ! -f "${SOURCE_CONFIG}" ]]; then
   echo "run the trim50 oracle target build job first" >&2
   exit 2
 fi
-if [[ ! -f "${TRIM_MACHINE_CONFIG}" ]]; then
-  echo "missing trim50 machine config: ${TRIM_MACHINE_CONFIG}" >&2
+if [[ ! -f "${TRIM_MACHINE_CONFIG_SOURCE}" ]]; then
+  echo "missing trim50 machine config source: ${TRIM_MACHINE_CONFIG_SOURCE}" >&2
   exit 2
 fi
 if [[ ! -f "${RESET_LIBRARY}" ]]; then
@@ -60,7 +60,9 @@ if (( NUM_ENVS % WORLD_SIZE != 0 )); then
 fi
 
 mkdir -p "$(dirname "${GENERATED_CONFIG}")"
-cp "${TRIM_MACHINE_CONFIG}" "$(dirname "${GENERATED_CONFIG}")/T15MD_new_data.toml"
+python3 scripts/write_trim50_plain_gpu1e6_machine_config.py \
+  --source "${TRIM_MACHINE_CONFIG_SOURCE}" \
+  --out "$(dirname "${GENERATED_CONFIG}")/T15MD_new_data.toml"
 python3 - <<PYCFG
 import json
 from pathlib import Path
