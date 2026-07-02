@@ -16,6 +16,7 @@ from tokamak_rl_v2.training.policy_pipeline import evaluate_policy_gates
 ROOT = Path(__file__).resolve().parents[1]
 ACTIVE_CONFIG = ROOT / "configs/experiments/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_mpo_balanced.yaml"
 IDEALIZED_ORACLE_JOB = ROOT / "jobs/train_t15_idealized_matched_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_100m.sbatch"
+GENERATED_ORACLE_JOB = ROOT / "jobs/train_t15_simple_manifold_generated_trim50_plain_gpu1e6_oracle_window_0p1s_tcvjdot_balanced_8gpu_100m.sbatch"
 
 
 def _load_trim50_machine_writer():
@@ -80,6 +81,19 @@ def test_idealized_oracle_job_uses_working_replay_window_path() -> None:
     assert "t15_replay_window_perturbed" not in text
     assert "feasible_generated_window" not in text
     assert "jdot_switching" not in text
+
+
+def test_generated_oracle_job_uses_working_replay_window_path() -> None:
+    text = GENERATED_ORACLE_JOB.read_text(encoding="utf-8")
+
+    assert "build_t15_simple_manifold_generated_trim50_idealized_0p1s.py" in text
+    assert "t15_simple_manifold_generated_trim50_plain_gpu1e6_oracle_window_0p1s" in text
+    assert "t15_replay_window_oracle_targets.npz" in text
+    assert "train_t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_100m.sbatch" in text
+    assert "replay_window" in text
+    assert "t15_replay_segment_conditioned" in text
+    assert "feasible_generated_window" not in text
+    assert 'source["reward"].get("jdot_switching_weight", 0.0) != 0.0' in text
 
 
 def test_idealized_generated_diagnostic_configs_do_not_change_reward_center() -> None:

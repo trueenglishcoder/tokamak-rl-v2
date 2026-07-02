@@ -23,6 +23,7 @@ DEFAULT_MACHINE_CONFIG = Path("../tokamak-sim/runs/t15md_limited_replay_dataset_
 DEFAULT_OUT_DIR = Path("data/processed/t15_simple_manifold_generated_trim50_idealized_matched_0p1s")
 DEFAULT_INITIAL_STATES_OUT = Path("data/processed/t15_simple_manifold_generated_trim50_idealized_matched_0p1s_initial_states.npz")
 DEFAULT_TARGETS_OUT = DEFAULT_OUT_DIR / "t15_feasible_generated_trim50_idealized_0p1s_targets.npz"
+DEFAULT_ORACLE_TARGETS_OUT = DEFAULT_OUT_DIR / "t15_replay_window_oracle_targets.npz"
 DEFAULT_TRAIN_SHOTS = ("3856", "3857", "3858", "3863")
 DEFAULT_HOLDOUT_SHOTS = ("3864",)
 
@@ -78,6 +79,16 @@ def main() -> int:
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     parser.add_argument("--initial-states-out", type=Path, default=DEFAULT_INITIAL_STATES_OUT)
     parser.add_argument("--targets-out", type=Path, default=DEFAULT_TARGETS_OUT)
+    parser.add_argument(
+        "--oracle-targets-out",
+        type=Path,
+        default=DEFAULT_ORACLE_TARGETS_OUT,
+        help=(
+            "Optional replay-window/oracle target NPZ. This writes the exact "
+            "t15_replay_window_oracle_targets.npz schema consumed by the "
+            "successful replay-window training path."
+        ),
+    )
     parser.add_argument("--train-shots", nargs="+", default=list(DEFAULT_TRAIN_SHOTS))
     parser.add_argument("--holdout-shots", nargs="+", default=list(DEFAULT_HOLDOUT_SHOTS))
     parser.add_argument("--steps", type=int, default=100)
@@ -161,6 +172,8 @@ def main() -> int:
         candidates,
         args.initial_states_out,
         args.targets_out,
+        args.oracle_targets_out,
+        limits=limits,
         train_shots=train_shots,
         holdout_shots=holdout_shots,
     )
@@ -638,55 +651,114 @@ def _write_libraries(
     candidates: list[Candidate],
     initial_states_out: Path,
     targets_out: Path,
+    oracle_targets_out: Path,
     *,
+    limits: Limits,
     train_shots: tuple[str, ...],
     holdout_shots: tuple[str, ...],
 ) -> None:
     initial_states_out.parent.mkdir(parents=True, exist_ok=True)
     targets_out.parent.mkdir(parents=True, exist_ok=True)
+    oracle_targets_out.parent.mkdir(parents=True, exist_ok=True)
     row_count = len(candidates)
     source_index = np.arange(row_count, dtype=np.int64)
     shot_id = np.asarray([c.window.shot for c in candidates], dtype="<U8")
     split = np.asarray([c.window.split for c in candidates], dtype="<U8")
-    # Keep all rows in the old feasible-generated "core" curriculum bucket.
-    # The actual mode is stored separately in the target library.
-    difficulty_bin = np.full((row_count,), "core", dtype="<U16")
+    zone = np.full((row_count,), "core", dtype="<U16")
+    difficulty_bin = np.asarray([_difficulty_bin(c.ip_ref) for c in candidates], dtype="<U16")
     mode = np.asarray([c.mode for c in candidates], dtype="<U32")
     params0 = np.asarray([c.params_ref[0] for c in candidates], dtype=np.float32)
+    ip0 = np.asarray([c.ip_ref[0] for c in candidates], dtype=np.float32)
+    pfc0 = np.asarray([c.coil_witness[0, 3:] for c in candidates], dtype=np.float32)
+    sol0 = np.asarray([c.coil_witness[0, :3] for c in candidates], dtype=np.float32)
+    time_s = np.asarray([c.window.time_s for c in candidates], dtype=np.float64)
     np.savez_compressed(
         initial_states_out,
         schema=np.asarray("t15_simple_manifold_generated_trim50_idealized_matched_initial_states_v1"),
         shot_id=shot_id,
         source_index=source_index,
-        time_s=np.asarray([c.window.time_s for c in candidates], dtype=np.float64),
-        ip0=np.asarray([c.ip_ref[0] for c in candidates], dtype=np.float32),
-        pfc0=np.asarray([c.coil_witness[0, 3:] for c in candidates], dtype=np.float32),
-        sol0=np.asarray([c.coil_witness[0, :3] for c in candidates], dtype=np.float32),
+        time_s=time_s,
+        ip0=ip0,
+        pfc0=pfc0,
+        sol0=sol0,
         params0=params0,
         split=split,
-        difficulty_bin=difficulty_bin,
+        difficulty_bin=zone,
         mode=mode,
     )
+    ip_ref = np.asarray([c.ip_ref for c in candidates], dtype=np.float32)
+    radii_ref = np.asarray([c.radii_ref for c in candidates], dtype=np.float32)
+    coil_witness = np.asarray([c.coil_witness for c in candidates], dtype=np.float32)
     np.savez_compressed(
         targets_out,
         schema=np.asarray("t15_simple_manifold_generated_trim50_idealized_matched_targets_v1"),
-        ip_ref=np.asarray([c.ip_ref for c in candidates], dtype=np.float32),
+        ip_ref=ip_ref,
         params_ref=np.asarray([c.params_ref for c in candidates], dtype=np.float32),
-        radii_ref=np.asarray([c.radii_ref for c in candidates], dtype=np.float32),
-        coil_witness=np.asarray([c.coil_witness for c in candidates], dtype=np.float32),
-        zone=difficulty_bin,
+        radii_ref=radii_ref,
+        coil_witness=coil_witness,
+        zone=zone,
         mode=mode,
         shot_id=shot_id,
         source_index=source_index,
         replay_source_index=np.asarray([c.window.source_index for c in candidates], dtype=np.int64),
         replay_start_row=np.asarray([c.window.start_row for c in candidates], dtype=np.int64),
-        time_s=np.asarray([c.window.time_s for c in candidates], dtype=np.float64),
+        time_s=time_s,
         split=split,
         state_distance_max=np.asarray([c.state_distance_max for c in candidates], dtype=np.float32),
         move_distance=np.asarray([c.move_distance for c in candidates], dtype=np.float32),
         train_shots=np.asarray(train_shots, dtype="<U8"),
         holdout_shots=np.asarray(holdout_shots, dtype="<U8"),
     )
+    np.savez_compressed(
+        oracle_targets_out,
+        schema=np.asarray("t15_replay_window_oracle_targets_v1"),
+        shot_id=shot_id,
+        split=split,
+        source_index=source_index,
+        time_s=time_s,
+        difficulty_bin=difficulty_bin,
+        mode=mode,
+        ip0=ip0,
+        pfc0=pfc0,
+        sol0=sol0,
+        params0=params0,
+        ip_target=ip_ref,
+        boundary_radii=radii_ref,
+        real_jdot_action=_normalized_jdot_action(coil_witness, limits=limits).astype(np.float32),
+        oracle_ip_mean_error_a=np.zeros((row_count,), dtype=np.float32),
+        oracle_ip_max_error_a=np.zeros((row_count,), dtype=np.float32),
+        current_limits=np.asarray([limits.pfc_current] * 6 + [limits.sol_current] * 3, dtype=np.float32),
+        derivative_limits=np.asarray([limits.pfc_deriv] * 6 + [limits.sol_deriv] * 3, dtype=np.float32),
+        train_shots=np.asarray(train_shots, dtype="<U8"),
+        holdout_shots=np.asarray(holdout_shots, dtype="<U8"),
+    )
+
+
+def _difficulty_bin(ip_ref: np.ndarray) -> str:
+    delta = float(np.asarray(ip_ref, dtype=float)[-1] - np.asarray(ip_ref, dtype=float)[0])
+    mag = abs(delta)
+    if mag < 10_000.0:
+        return "flat"
+    prefix = "fast" if mag >= 40_000.0 else "medium"
+    suffix = "up" if delta > 0.0 else "down"
+    return f"{prefix}_{suffix}"
+
+
+def _normalized_jdot_action(coil_witness: np.ndarray, *, limits: Limits) -> np.ndarray:
+    """Convert SOL/PFC coil witness currents to normalized PFC/SOL Jdot actions."""
+    coils = np.asarray(coil_witness, dtype=float)
+    if coils.ndim != 3 or coils.shape[2] != 9:
+        raise ValueError(f"coil_witness must have shape [N, T+1, 9], got {coils.shape}")
+    ordered = np.concatenate([coils[:, :, 3:], coils[:, :, :3]], axis=2)
+    jdot = np.diff(ordered, axis=1) / 0.001
+    denom = np.asarray([limits.pfc_deriv] * 6 + [limits.sol_deriv] * 3, dtype=float).reshape(1, 1, 9)
+    action = jdot / denom
+    max_abs = float(np.nanmax(np.abs(action))) if action.size else 0.0
+    if not np.isfinite(max_abs):
+        raise ValueError("non-finite normalized witness action")
+    if max_abs > 1.0001:
+        raise ValueError(f"normalized witness action exceeds derivative limits: max_abs={max_abs:.6g}")
+    return np.clip(action, -1.0, 1.0)
 
 
 def _summary(candidates: list[Candidate], *, rejection: Counter, windows: list[ReplayWindow], args: argparse.Namespace, limits: Limits) -> dict[str, object]:
@@ -697,6 +769,7 @@ def _summary(candidates: list[Candidate], *, rejection: Counter, windows: list[R
         "machine_config": str(args.machine_config),
         "initial_states": str(args.initial_states_out),
         "targets": str(args.targets_out),
+        "oracle_targets": str(args.oracle_targets_out),
         "source_replay_windows": len(windows),
         "accepted_targets": len(candidates),
         "accepted_by_mode": dict(sorted(Counter(c.mode for c in candidates).items())),

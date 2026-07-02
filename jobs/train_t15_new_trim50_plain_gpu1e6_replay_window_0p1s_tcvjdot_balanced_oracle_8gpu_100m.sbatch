@@ -21,6 +21,7 @@ export ORACLE_TARGET_DIR=${ORACLE_TARGET_DIR:-data/processed/t15_new_trim50_plai
 export ORACLE_TARGETS=${ORACLE_TARGETS:-${ORACLE_TARGET_DIR}/t15_replay_window_oracle_targets.npz}
 export ORACLE_MACHINE_CONFIG=${ORACLE_MACHINE_CONFIG:-data/processed/t15_new_trim50_plain_gpu1e6_machine_config.toml}
 export ORACLE_CONFIG_OUT=${ORACLE_CONFIG_OUT:-data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_config.yaml}
+export CONFIG_NAME=${CONFIG_NAME:-t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_100m}
 export RUN_NAME=${RUN_NAME:-t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_100m_${SLURM_JOB_ID:-manual}}
 export TRAIN_OUTPUT=${TRAIN_OUTPUT:-outputs/${RUN_NAME}}
 export GENERATED_CONFIG=${GENERATED_CONFIG:-${TRAIN_OUTPUT}/generated_configs/${RUN_NAME}.json}
@@ -117,7 +118,7 @@ source = Path("${SOURCE_CONFIG}")
 out = Path("${GENERATED_CONFIG}")
 cfg = json.loads(source.read_text(encoding="utf-8"))
 
-cfg["name"] = "t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_100m"
+cfg["name"] = "${CONFIG_NAME}"
 cfg["sim"]["config_path"] = "/workspace/tokamak-rl-v2/${TRAIN_OUTPUT}/generated_configs/T15MD_new_data.toml"
 cfg["sim"]["csv_initial_state_library"] = "/workspace/tokamak-rl-v2/${RESET_LIBRARY}"
 cfg["reference"]["boundary"]["replay_reference_dir"] = "/workspace/tokamak-rl-v2/${ORACLE_TARGET_DIR}"

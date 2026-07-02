@@ -89,3 +89,69 @@ def test_simple_manifold_reset_library_mode_metadata_passes_artifact_preflight(t
     cfg = replace(cfg, sim=replace(cfg.sim, csv_initial_state_library=str(reset_path)))
 
     assert _preflight_artifact_failure(cfg) is None
+
+
+def test_simple_manifold_builder_writes_replay_window_oracle_schema(tmp_path: Path) -> None:
+    builder = _load_builder_module()
+    steps = 100
+    t = np.arange(steps + 1, dtype=float)
+    coils = np.zeros((steps + 1, 9), dtype=float)
+    coils[:, :3] = 100.0 * t[:, None]  # SOL witness currents.
+    coils[:, 3:] = 200.0 * t[:, None]  # PFC witness currents.
+    window = builder.ReplayWindow(
+        shot="3856",
+        start_row=0,
+        source_index=17,
+        time_s=0.05,
+        split="train",
+        x=np.zeros((steps + 1, 4), dtype=float),
+        params=np.zeros((steps + 1, 5), dtype=float),
+        coils=coils,
+    )
+    params = np.column_stack(
+        [
+            np.full(steps + 1, 1.5),
+            np.zeros(steps + 1),
+            np.full(steps + 1, 0.5),
+            np.full(steps + 1, 1.2),
+            np.full(steps + 1, 0.1),
+        ]
+    )
+    candidate = builder.Candidate(
+        window=window,
+        mode="ramp",
+        ip_ref=np.linspace(200_000.0, 220_000.0, steps + 1, dtype=np.float32),
+        params_ref=params.astype(np.float32),
+        radii_ref=np.ones((steps + 1, 32), dtype=np.float32),
+        coil_witness=coils.astype(np.float32),
+        state_distance_max=0.0,
+        move_distance=0.0,
+    )
+    limits = builder.Limits(
+        pfc_current=1.0e7,
+        sol_current=1.0e7,
+        pfc_deriv=1.0e6,
+        sol_deriv=2.0e6,
+    )
+    initial = tmp_path / "initial.npz"
+    targets = tmp_path / "targets.npz"
+    oracle = tmp_path / "t15_replay_window_oracle_targets.npz"
+
+    builder._write_libraries(
+        [candidate],
+        initial,
+        targets,
+        oracle,
+        limits=limits,
+        train_shots=("3856",),
+        holdout_shots=("3864",),
+    )
+
+    with np.load(oracle, allow_pickle=False) as data:
+        assert {"ip_target", "boundary_radii", "real_jdot_action", "difficulty_bin"} <= set(data.files)
+        assert data["ip_target"].shape == (1, 101)
+        assert data["boundary_radii"].shape == (1, 101, 32)
+        assert data["real_jdot_action"].shape == (1, 100, 9)
+        # Oracle action order is PFC0..PFC5, SOL0..SOL2.
+        assert float(data["real_jdot_action"][0, 0, 0]) == pytest.approx(0.2)
+        assert float(data["real_jdot_action"][0, 0, 6]) == pytest.approx(0.05)
