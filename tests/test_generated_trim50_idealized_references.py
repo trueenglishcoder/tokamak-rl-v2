@@ -44,8 +44,8 @@ def test_generated_preprocessing_writes_exact_current_envelope(tmp_path: Path, m
     assert build_generated_main() == 0
 
     envelope = json.loads(envelope_out.read_text(encoding="utf-8"))
-    assert envelope["holdout_shots"] == ["3863"]
-    assert envelope["train_shots"] == ["3854", "3855", "3856", "3859", "3862"]
+    assert envelope["holdout_shots"] == ["3864"]
+    assert envelope["train_shots"] == ["3856", "3857", "3858", "3863"]
     assert envelope["ip"]["min_a"] == pytest.approx(112228.39132076583)
     assert envelope["ip"]["max_a"] == pytest.approx(511681.54135367385)
     assert envelope["ip"]["abs_rate_max_aps"] == pytest.approx(969677.3646181119)
@@ -64,11 +64,11 @@ def test_generated_preprocessing_writes_exact_current_envelope(tmp_path: Path, m
         assert data["pfc0"].shape[1] == 6
         assert data["sol0"].shape[1] == 3
         assert data["params0"].shape == (data["ip0"].shape[0], 5)
-        assert set(data["shot_id"][data["split"].astype(str) == "holdout"].astype(str).tolist()) == {"3863"}
+        assert set(data["shot_id"][data["split"].astype(str) == "holdout"].astype(str).tolist()) == {"3864"}
 
 
 def test_generated_ip_modes_are_bounded_and_rate_limited() -> None:
-    cfg = load_experiment_config("configs/experiments/t15_generated_trim50_idealized_0p1s_tcvjdot_balanced_mpo.yaml")
+    cfg = load_experiment_config("configs/experiments/t15_generated_trim50_idealized_matched_0p1s_tcvjdot_balanced_mpo.yaml")
     envelope = load_generated_envelope(cfg.reference.ip.limits_path)
     start = 250000.0
     seen = set()
@@ -100,7 +100,7 @@ def test_generated_ip_modes_are_bounded_and_rate_limited() -> None:
 
 
 def test_generated_boundary_modes_keep_center_and_obey_bounds() -> None:
-    cfg = load_experiment_config("configs/experiments/t15_generated_trim50_idealized_0p1s_tcvjdot_balanced_mpo.yaml")
+    cfg = load_experiment_config("configs/experiments/t15_generated_trim50_idealized_matched_0p1s_tcvjdot_balanced_mpo.yaml")
     envelope = load_generated_envelope(cfg.reference.boundary.envelope_path)
     start = np.asarray([1.45, -0.01, 0.55, 1.15, 0.10], dtype=float)
     seen = set()
@@ -133,7 +133,7 @@ def test_generated_boundary_modes_keep_center_and_obey_bounds() -> None:
 
 
 def test_generated_boundary_parameter_modes_match_ip_mode_shapes() -> None:
-    cfg = load_experiment_config("configs/experiments/t15_generated_trim50_idealized_0p1s_tcvjdot_balanced_mpo.yaml")
+    cfg = load_experiment_config("configs/experiments/t15_generated_trim50_idealized_matched_0p1s_tcvjdot_balanced_mpo.yaml")
     start = np.asarray([1.45, -0.01, 0.55, 1.15, 0.10], dtype=float)
     for i, key in enumerate(GENERATED_BOUNDARY_KEYS):
         col = {"A0": 2, "elongation_excess": 3, "delta": 4}[key]
@@ -158,7 +158,7 @@ def test_generated_boundary_parameter_modes_match_ip_mode_shapes() -> None:
 
 
 def test_generated_reference_batch_has_expected_shapes() -> None:
-    cfg = load_experiment_config("configs/experiments/t15_generated_trim50_idealized_0p1s_tcvjdot_balanced_mpo.yaml")
+    cfg = load_experiment_config("configs/experiments/t15_generated_trim50_idealized_matched_0p1s_tcvjdot_balanced_mpo.yaml")
     ip0 = np.asarray([180000.0, 260000.0], dtype=float)
     params0 = np.asarray([[1.44, 0.0, 0.55, 1.12, 0.08], [1.46, -0.01, 0.60, 1.18, 0.12]], dtype=float)
     ref = generate_reference_batch(
@@ -180,7 +180,7 @@ def test_generated_reference_batch_has_expected_shapes() -> None:
 
 
 def test_generated_0p5s_config_loads_and_samples_500_step_references() -> None:
-    cfg = load_experiment_config("configs/experiments/t15_generated_trim50_idealized_0p5s_tcvjdot_balanced_mpo.yaml")
+    cfg = load_experiment_config("configs/experiments/t15_generated_trim50_idealized_matched_0p5s_tcvjdot_balanced_mpo.yaml")
     assert cfg.sim.max_episode_steps == 500
     assert cfg.reference.duration_s == pytest.approx(0.5)
     assert cfg.reference.t_step == pytest.approx(0.001)
@@ -212,7 +212,7 @@ def test_generated_0p5s_config_loads_and_samples_500_step_references() -> None:
 
 
 def test_generated_config_loads_and_env_uses_params0() -> None:
-    cfg = load_experiment_config("configs/experiments/t15_generated_trim50_idealized_0p1s_tcvjdot_balanced_mpo.yaml")
+    cfg = load_experiment_config("configs/experiments/t15_generated_trim50_idealized_matched_0p1s_tcvjdot_balanced_mpo.yaml")
     assert cfg.reference.ip.kind == "generated_segment_profile"
     assert cfg.reference.boundary.kind == "generated_parameter_profile"
     lib = CsvInitialStateLibrary(cfg.sim.csv_initial_state_library, n_pfc=6, n_sol=3, split="train")
@@ -225,6 +225,6 @@ def test_generated_config_loads_and_env_uses_params0() -> None:
 
 
 def test_generated_config_artifact_preflight_allows_params0() -> None:
-    cfg = load_experiment_config("configs/experiments/t15_generated_trim50_idealized_0p5s_tcvjdot_balanced_mpo.yaml")
+    cfg = load_experiment_config("configs/experiments/t15_generated_trim50_idealized_matched_0p5s_tcvjdot_balanced_mpo.yaml")
 
     assert _preflight_artifact_failure(cfg) is None

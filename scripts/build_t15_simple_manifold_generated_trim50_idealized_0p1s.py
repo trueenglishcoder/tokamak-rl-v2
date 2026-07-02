@@ -17,14 +17,14 @@ except Exception:  # pragma: no cover - fallback for minimal environments
     cKDTree = None
 
 
-DEFAULT_BOUNDARY_PARAM_DIR = Path("../tokamak-sim/output/t15_boundary_parameters_trim50_idealized_low_tau_gpu_plain_1e6")
-DEFAULT_DATA_ROOT = Path("../tokamak-sim/data/t15_data_new_trim50_idealized")
-DEFAULT_MACHINE_CONFIG = Path("../tokamak-sim/runs/t15md_limited_replay_dataset_trim50_idealized_low_tau_gpu_plain_1e6_video/T15MD_new_data_legacy_contour_limited_replay.toml")
-DEFAULT_OUT_DIR = Path("data/processed/t15_simple_manifold_generated_trim50_idealized_0p1s")
-DEFAULT_INITIAL_STATES_OUT = Path("data/processed/t15_simple_manifold_generated_trim50_idealized_0p1s_initial_states.npz")
+DEFAULT_BOUNDARY_PARAM_DIR = Path("../tokamak-sim/output/t15_boundary_parameters_trim50_idealized_matched_gpu_plain_1e6")
+DEFAULT_DATA_ROOT = Path("../tokamak-sim/data/t15_data_new_trim50_idealized_matched")
+DEFAULT_MACHINE_CONFIG = Path("../tokamak-sim/runs/t15md_limited_replay_dataset_trim50_idealized_matched_gpu_plain_1e6/T15MD_new_data_legacy_contour_limited_replay.toml")
+DEFAULT_OUT_DIR = Path("data/processed/t15_simple_manifold_generated_trim50_idealized_matched_0p1s")
+DEFAULT_INITIAL_STATES_OUT = Path("data/processed/t15_simple_manifold_generated_trim50_idealized_matched_0p1s_initial_states.npz")
 DEFAULT_TARGETS_OUT = DEFAULT_OUT_DIR / "t15_feasible_generated_trim50_idealized_0p1s_targets.npz"
-DEFAULT_TRAIN_SHOTS = ("3854", "3855", "3856", "3859", "3862")
-DEFAULT_HOLDOUT_SHOTS = ("3863",)
+DEFAULT_TRAIN_SHOTS = ("3856", "3857", "3858", "3863")
+DEFAULT_HOLDOUT_SHOTS = ("3864",)
 
 PARAM_COLUMNS = ("R0", "Z0", "A0", "kappa", "delta")
 X_NAMES = ("Ip", "A0", "e", "delta")
@@ -655,7 +655,7 @@ def _write_libraries(
     params0 = np.asarray([c.params_ref[0] for c in candidates], dtype=np.float32)
     np.savez_compressed(
         initial_states_out,
-        schema=np.asarray("t15_simple_manifold_generated_trim50_idealized_initial_states_v1"),
+        schema=np.asarray("t15_simple_manifold_generated_trim50_idealized_matched_initial_states_v1"),
         shot_id=shot_id,
         source_index=source_index,
         time_s=np.asarray([c.window.time_s for c in candidates], dtype=np.float64),
@@ -669,7 +669,7 @@ def _write_libraries(
     )
     np.savez_compressed(
         targets_out,
-        schema=np.asarray("t15_simple_manifold_generated_trim50_idealized_targets_v1"),
+        schema=np.asarray("t15_simple_manifold_generated_trim50_idealized_matched_targets_v1"),
         ip_ref=np.asarray([c.ip_ref for c in candidates], dtype=np.float32),
         params_ref=np.asarray([c.params_ref for c in candidates], dtype=np.float32),
         radii_ref=np.asarray([c.radii_ref for c in candidates], dtype=np.float32),
@@ -691,7 +691,7 @@ def _write_libraries(
 
 def _summary(candidates: list[Candidate], *, rejection: Counter, windows: list[ReplayWindow], args: argparse.Namespace, limits: Limits) -> dict[str, object]:
     return {
-        "schema": "t15_simple_manifold_generated_trim50_idealized_summary_v1",
+        "schema": "t15_simple_manifold_generated_trim50_idealized_matched_summary_v1",
         "boundary_param_dir": str(args.boundary_param_dir),
         "data_root": str(args.data_root),
         "machine_config": str(args.machine_config),

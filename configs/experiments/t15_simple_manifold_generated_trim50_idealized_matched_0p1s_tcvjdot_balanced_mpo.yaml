@@ -1,13 +1,13 @@
 {
-  "name": "t15_generated_trim50_idealized_0p1s_tcvjdot_balanced_mpo",
+  "name": "t15_simple_manifold_generated_trim50_idealized_matched_0p1s_tcvjdot_balanced_mpo",
   "sim": {
-    "config_path": "../../../tokamak-sim/runs/t15md_limited_replay_dataset_trim50_idealized_low_tau_gpu_plain_1e6_video/T15MD_new_data_legacy_contour_limited_replay.toml",
+    "config_path": "../../../tokamak-sim/runs/t15md_limited_replay_dataset_trim50_idealized_matched_gpu_plain_1e6/T15MD_new_data_legacy_contour_limited_replay.toml",
     "compute_backend": "gpu",
     "gpu_device": "cuda:0",
     "angles": 32,
     "max_episode_steps": 100,
     "reset_source": "csv_initial_states",
-    "csv_initial_state_library": "../../data/processed/t15_generated_trim50_idealized_initial_states.npz",
+    "csv_initial_state_library": "../../data/processed/t15_simple_manifold_generated_trim50_idealized_matched_0p1s_initial_states.npz",
     "csv_initial_state_split": "train",
     "current_safety_limits": {
       "pfc_currents": {
@@ -39,18 +39,14 @@
     "duration_s": 0.1,
     "t_step": 0.001,
     "theta_count": 32,
-    "seed": 17,
+    "seed": 11,
     "ip": {
-      "kind": "generated_segment_profile",
-      "limits_path": "../../data/processed/t15_generated_trim50_idealized_envelope.json",
-      "start_mode": "reset_ip",
-      "segment_min_steps": 30,
-      "smooth_ramps": true
+      "kind": "feasible_generated_window",
+      "feasible_reference_dir": "../../data/processed/t15_simple_manifold_generated_trim50_idealized_matched_0p1s"
     },
     "boundary": {
-      "kind": "generated_parameter_profile",
-      "envelope_path": "../../data/processed/t15_generated_trim50_idealized_envelope.json",
-      "segment_min_steps": 30
+      "kind": "feasible_generated_window",
+      "feasible_reference_dir": "../../data/processed/t15_simple_manifold_generated_trim50_idealized_matched_0p1s"
     }
   },
   "observation": {
@@ -77,6 +73,9 @@
     "derivative_usage_weight": 0.0,
     "action_weight": 0.0,
     "delta_action_weight": 0.0,
+    "jdot_switching_weight": 0.1,
+    "jdot_switching_scale": 0.05,
+    "jdot_switching_cap": 1.0,
     "current_soft_fraction": 0.9,
     "current_bad_fraction": 1.0,
     "derivative_soft_fraction": 0.9,
@@ -119,7 +118,7 @@
     "num_envs": 2048,
     "device": "auto",
     "seed": 1,
-    "output_dir": "../../outputs/t15_generated_trim50_idealized_0p1s_tcvjdot_balanced",
+    "output_dir": "../../outputs/t15_simple_manifold_generated_trim50_idealized_matched_0p1s_tcvjdot_balanced",
     "save_checkpoints": true,
     "checkpoint_interval_steps": 1000000,
     "eval_interval_steps": 500000,

@@ -10,12 +10,12 @@ from typing import Iterable
 import numpy as np
 
 
-DEFAULT_BOUNDARY_PARAM_DIR = Path("../tokamak-sim/output/t15_boundary_parameters_trim50_idealized_low_tau_gpu_plain_1e6")
-DEFAULT_DATA_ROOT = Path("../tokamak-sim/data/t15_data_new_trim50_idealized")
-DEFAULT_ENVELOPE_OUT = Path("data/processed/t15_generated_trim50_idealized_envelope.json")
-DEFAULT_INITIAL_STATES_OUT = Path("data/processed/t15_generated_trim50_idealized_initial_states.npz")
-DEFAULT_TRAIN_SHOTS = ("3854", "3855", "3856", "3859", "3862")
-DEFAULT_HOLDOUT_SHOTS = ("3863",)
+DEFAULT_BOUNDARY_PARAM_DIR = Path("../tokamak-sim/output/t15_boundary_parameters_trim50_idealized_matched_gpu_plain_1e6")
+DEFAULT_DATA_ROOT = Path("../tokamak-sim/data/t15_data_new_trim50_idealized_matched")
+DEFAULT_ENVELOPE_OUT = Path("data/processed/t15_generated_trim50_idealized_matched_envelope.json")
+DEFAULT_INITIAL_STATES_OUT = Path("data/processed/t15_generated_trim50_idealized_matched_initial_states.npz")
+DEFAULT_TRAIN_SHOTS = ("3856", "3857", "3858", "3863")
+DEFAULT_HOLDOUT_SHOTS = ("3864",)
 PARAM_COLUMNS = ("R0", "Z0", "A0", "kappa", "delta")
 DEFAULT_PADDING = 1.2
 SHAPE_MAX_PADDING = 1.6
@@ -103,7 +103,7 @@ def _build_envelope(
     kappa = _series(rows, "kappa")
     delta = _series(rows, "delta")
     return {
-        "schema": "t15_generated_trim50_idealized_envelope_v1",
+        "schema": "t15_generated_trim50_idealized_matched_envelope_v1",
         "source_boundary_param_dir": str(boundary_param_dir),
         "source_data_root": str(data_root),
         "train_shots": list(train_shots),
@@ -176,7 +176,7 @@ def _build_reset_library(
         else:
             raise ValueError(f"shot {shot} is not in train or holdout split")
     return {
-        "schema": np.asarray("t15_generated_trim50_idealized_initial_states_v1"),
+        "schema": np.asarray("t15_generated_trim50_idealized_matched_initial_states_v1"),
         "shot_id": np.asarray(shot_id, dtype="<U8"),
         "source_index": np.asarray(source_index, dtype=np.int64),
         "time_s": np.asarray(time_s, dtype=float),

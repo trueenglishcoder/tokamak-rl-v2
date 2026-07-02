@@ -37,7 +37,7 @@ def _fake_window(builder):
     )
     coils = np.zeros((steps + 1, 9), dtype=float)
     return builder.simple.ReplayWindow(
-        shot="3854",
+        shot="3856",
         start_row=12,
         source_index=12,
         time_s=0.012,
@@ -121,8 +121,8 @@ def test_written_reset_library_uses_training_preflight_schema(tmp_path: Path) ->
         candidates,
         initial_states,
         targets,
-        train_shots=("3854",),
-        holdout_shots=("3863",),
+        train_shots=("3856",),
+        holdout_shots=("3864",),
     )
 
     with np.load(initial_states, allow_pickle=False) as data:

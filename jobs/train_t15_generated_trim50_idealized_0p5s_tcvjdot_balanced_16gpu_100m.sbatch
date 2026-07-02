@@ -13,7 +13,7 @@ set -euo pipefail
 
 cd /scratch/$USER/tokamak/tokamak-rl-v2
 
-export SOURCE_CONFIG=${SOURCE_CONFIG:-configs/experiments/t15_generated_trim50_idealized_0p5s_tcvjdot_balanced_mpo.yaml}
-export RUN_LABEL=${RUN_LABEL:-t15_generated_trim50_idealized_0p5s_tcvjdot_balanced}
+export SOURCE_CONFIG=${SOURCE_CONFIG:-configs/experiments/t15_generated_trim50_idealized_matched_0p5s_tcvjdot_balanced_mpo.yaml}
+export RUN_LABEL=${RUN_LABEL:-t15_generated_trim50_idealized_matched_0p5s_tcvjdot_balanced}
 
-exec bash jobs/train_t15_generated_trim50_idealized_0p1s_tcvjdot_balanced_16gpu_100m.sbatch
+exec bash jobs/train_t15_generated_trim50_idealized_matched_0p1s_tcvjdot_balanced_16gpu_100m.sbatch

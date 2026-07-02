@@ -11,13 +11,13 @@ from pathlib import Path
 import numpy as np
 
 
-DEFAULT_BOUNDARY_PARAM_DIR = Path("../tokamak-sim/output/t15_boundary_parameters_trim50_idealized_low_tau_gpu_plain_1e6")
-DEFAULT_DATA_ROOT = Path("../tokamak-sim/data/t15_data_new_trim50_idealized")
+DEFAULT_BOUNDARY_PARAM_DIR = Path("../tokamak-sim/output/t15_boundary_parameters_trim50_idealized_matched_gpu_plain_1e6")
+DEFAULT_DATA_ROOT = Path("../tokamak-sim/data/t15_data_new_trim50_idealized_matched")
 DEFAULT_OUT_DIR = Path("data/processed/t15_feasible_generated_trim50_idealized_0p1s")
 DEFAULT_INITIAL_STATES_OUT = Path("data/processed/t15_feasible_generated_trim50_idealized_0p1s_initial_states.npz")
 DEFAULT_TARGETS_OUT = DEFAULT_OUT_DIR / "t15_feasible_generated_trim50_idealized_0p1s_targets.npz"
-DEFAULT_TRAIN_SHOTS = ("3854", "3855", "3856", "3859", "3862")
-DEFAULT_HOLDOUT_SHOTS = ("3863",)
+DEFAULT_TRAIN_SHOTS = ("3856", "3857", "3858", "3863")
+DEFAULT_HOLDOUT_SHOTS = ("3864",)
 PARAM_COLUMNS = ("R0", "Z0", "A0", "kappa", "delta")
 X_NAMES = ("Ip", "A0", "e", "delta")
 

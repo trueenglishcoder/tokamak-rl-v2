@@ -15,7 +15,7 @@ mkdir -p slurm_logs outputs
 
 export SOURCE_CONFIG=${SOURCE_CONFIG:-configs/experiments/t15_feasible_generated_trim50_idealized_0p1s_tcvjdot_balanced_mpo.yaml}
 export BUILDER_SCRIPT=${BUILDER_SCRIPT:-scripts/build_t15_feasible_generated_trim50_idealized_0p1s.py}
-export MACHINE_CONFIG_SOURCE=${MACHINE_CONFIG_SOURCE:-../tokamak-sim/runs/t15md_limited_replay_dataset_trim50_idealized_low_tau_gpu_plain_1e6_video/T15MD_new_data_legacy_contour_limited_replay.toml}
+export MACHINE_CONFIG_SOURCE=${MACHINE_CONFIG_SOURCE:-../tokamak-sim/runs/t15md_limited_replay_dataset_trim50_idealized_matched_gpu_plain_1e6/T15MD_new_data_legacy_contour_limited_replay.toml}
 export RESET_LIBRARY=${RESET_LIBRARY:-data/processed/t15_feasible_generated_trim50_idealized_0p1s_initial_states.npz}
 export TARGET_LIBRARY=${TARGET_LIBRARY:-data/processed/t15_feasible_generated_trim50_idealized_0p1s/t15_feasible_generated_trim50_idealized_0p1s_targets.npz}
 export TRAIN_ENV_STEPS=${TRAIN_ENV_STEPS:-100000000}

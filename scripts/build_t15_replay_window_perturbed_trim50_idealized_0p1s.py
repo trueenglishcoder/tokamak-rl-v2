@@ -17,8 +17,8 @@ if str(SCRIPT_DIR) not in sys.path:
 import build_t15_simple_manifold_generated_trim50_idealized_0p1s as simple
 
 
-DEFAULT_OUT_DIR = Path("data/processed/t15_replay_window_perturbed_trim50_idealized_0p1s")
-DEFAULT_INITIAL_STATES_OUT = Path("data/processed/t15_replay_window_perturbed_trim50_idealized_0p1s_initial_states.npz")
+DEFAULT_OUT_DIR = Path("data/processed/t15_replay_window_perturbed_trim50_idealized_matched_0p1s")
+DEFAULT_INITIAL_STATES_OUT = Path("data/processed/t15_replay_window_perturbed_trim50_idealized_matched_0p1s_initial_states.npz")
 DEFAULT_TARGETS_OUT = DEFAULT_OUT_DIR / "t15_feasible_generated_trim50_idealized_0p1s_targets.npz"
 
 
@@ -289,7 +289,7 @@ def _write_libraries(
     params0 = np.asarray([c.params_ref[0] for c in candidates], dtype=np.float32)
     np.savez_compressed(
         initial_states_out,
-        schema=np.asarray("t15_replay_window_perturbed_trim50_idealized_initial_states_v1"),
+        schema=np.asarray("t15_replay_window_perturbed_trim50_idealized_matched_initial_states_v1"),
         shot_id=shot_id,
         source_index=source_index,
         time_s=np.asarray([c.window.time_s for c in candidates], dtype=np.float64),
@@ -303,7 +303,7 @@ def _write_libraries(
     )
     np.savez_compressed(
         targets_out,
-        schema=np.asarray("t15_replay_window_perturbed_trim50_idealized_targets_v1"),
+        schema=np.asarray("t15_replay_window_perturbed_trim50_idealized_matched_targets_v1"),
         ip_ref=np.asarray([c.ip_ref for c in candidates], dtype=np.float32),
         params_ref=np.asarray([c.params_ref for c in candidates], dtype=np.float32),
         radii_ref=np.asarray([c.radii_ref for c in candidates], dtype=np.float32),
@@ -328,7 +328,7 @@ def _summary(candidates: list[PerturbedCandidate], *, windows: list[simple.Repla
     perturb = [c.max_fractional_perturbation for c in candidates]
     step_perturb = [c.max_step_fractional_perturbation for c in candidates]
     return {
-        "schema": "t15_replay_window_perturbed_trim50_idealized_summary_v1",
+        "schema": "t15_replay_window_perturbed_trim50_idealized_matched_summary_v1",
         "boundary_param_dir": str(args.boundary_param_dir),
         "data_root": str(args.data_root),
         "machine_config": str(args.machine_config),

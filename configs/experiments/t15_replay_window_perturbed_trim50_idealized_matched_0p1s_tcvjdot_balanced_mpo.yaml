@@ -1,13 +1,13 @@
 {
-  "name": "t15_simple_manifold_generated_trim50_idealized_0p1s_tcvjdot_balanced_mpo",
+  "name": "t15_replay_window_perturbed_trim50_idealized_matched_0p1s_tcvjdot_balanced_mpo",
   "sim": {
-    "config_path": "../../../tokamak-sim/runs/t15md_limited_replay_dataset_trim50_idealized_low_tau_gpu_plain_1e6_video/T15MD_new_data_legacy_contour_limited_replay.toml",
+    "config_path": "../../../tokamak-sim/runs/t15md_limited_replay_dataset_trim50_idealized_matched_gpu_plain_1e6/T15MD_new_data_legacy_contour_limited_replay.toml",
     "compute_backend": "gpu",
     "gpu_device": "cuda:0",
     "angles": 32,
     "max_episode_steps": 100,
     "reset_source": "csv_initial_states",
-    "csv_initial_state_library": "../../data/processed/t15_simple_manifold_generated_trim50_idealized_0p1s_initial_states.npz",
+    "csv_initial_state_library": "../../data/processed/t15_replay_window_perturbed_trim50_idealized_matched_0p1s_initial_states.npz",
     "csv_initial_state_split": "train",
     "current_safety_limits": {
       "pfc_currents": {
@@ -42,11 +42,11 @@
     "seed": 11,
     "ip": {
       "kind": "feasible_generated_window",
-      "feasible_reference_dir": "../../data/processed/t15_simple_manifold_generated_trim50_idealized_0p1s"
+      "feasible_reference_dir": "../../data/processed/t15_replay_window_perturbed_trim50_idealized_matched_0p1s"
     },
     "boundary": {
       "kind": "feasible_generated_window",
-      "feasible_reference_dir": "../../data/processed/t15_simple_manifold_generated_trim50_idealized_0p1s"
+      "feasible_reference_dir": "../../data/processed/t15_replay_window_perturbed_trim50_idealized_matched_0p1s"
     }
   },
   "observation": {
@@ -118,7 +118,7 @@
     "num_envs": 2048,
     "device": "auto",
     "seed": 1,
-    "output_dir": "../../outputs/t15_simple_manifold_generated_trim50_idealized_0p1s_tcvjdot_balanced",
+    "output_dir": "../../outputs/t15_replay_window_perturbed_trim50_idealized_matched_0p1s_tcvjdot_balanced",
     "save_checkpoints": true,
     "checkpoint_interval_steps": 1000000,
     "eval_interval_steps": 500000,

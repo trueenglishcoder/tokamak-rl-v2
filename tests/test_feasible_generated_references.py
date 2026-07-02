@@ -41,7 +41,7 @@ def test_feasible_builder_writes_row_aligned_reset_and_target_libraries(tmp_path
         assert target["params_ref"].shape[1:] == (101, 5)
         assert target["radii_ref"].shape[1:] == (101, 32)
         assert set(reset["difficulty_bin"].astype(str).tolist()) == {"core", "moderate", "ambitious"}
-        assert set(reset["shot_id"][reset["split"].astype(str) == "holdout"].astype(str).tolist()) == {"3863"}
+        assert set(reset["shot_id"][reset["split"].astype(str) == "holdout"].astype(str).tolist()) == {"3864"}
         assert np.max(np.abs(reset["ip0"] - target["ip_ref"][:, 0])) == pytest.approx(0.0)
         assert np.max(np.abs(reset["params0"] - target["params_ref"][:, 0, :])) == pytest.approx(0.0)
         assert np.array_equal(reset["source_index"], np.arange(reset["ip0"].shape[0]))

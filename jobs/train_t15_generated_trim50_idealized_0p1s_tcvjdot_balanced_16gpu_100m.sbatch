@@ -14,10 +14,10 @@ set -euo pipefail
 cd /scratch/$USER/tokamak/tokamak-rl-v2
 mkdir -p slurm_logs outputs
 
-export SOURCE_CONFIG=${SOURCE_CONFIG:-configs/experiments/t15_generated_trim50_idealized_0p1s_tcvjdot_balanced_mpo.yaml}
-export GENERATED_MACHINE_CONFIG_SOURCE=${GENERATED_MACHINE_CONFIG_SOURCE:-../tokamak-sim/runs/t15md_limited_replay_dataset_trim50_idealized_low_tau_gpu_plain_1e6_video/T15MD_new_data_legacy_contour_limited_replay.toml}
-export RESET_LIBRARY=${RESET_LIBRARY:-data/processed/t15_generated_trim50_idealized_initial_states.npz}
-export ENVELOPE_JSON=${ENVELOPE_JSON:-data/processed/t15_generated_trim50_idealized_envelope.json}
+export SOURCE_CONFIG=${SOURCE_CONFIG:-configs/experiments/t15_generated_trim50_idealized_matched_0p1s_tcvjdot_balanced_mpo.yaml}
+export GENERATED_MACHINE_CONFIG_SOURCE=${GENERATED_MACHINE_CONFIG_SOURCE:-../tokamak-sim/runs/t15md_limited_replay_dataset_trim50_idealized_matched_gpu_plain_1e6/T15MD_new_data_legacy_contour_limited_replay.toml}
+export RESET_LIBRARY=${RESET_LIBRARY:-data/processed/t15_generated_trim50_idealized_matched_initial_states.npz}
+export ENVELOPE_JSON=${ENVELOPE_JSON:-data/processed/t15_generated_trim50_idealized_matched_envelope.json}
 export TRAIN_ENV_STEPS=${TRAIN_ENV_STEPS:-100000000}
 export EVAL_ENV_STEPS=${EVAL_ENV_STEPS:-500000}
 export CHECKPOINT_ENV_STEPS=${CHECKPOINT_ENV_STEPS:-1000000}
@@ -29,7 +29,7 @@ export NUM_ENVS=${NUM_ENVS:-$(( WORLD_SIZE * LOCAL_ENVS_PER_RANK ))}
 export GLOBAL_LEARNER_BATCH=${GLOBAL_LEARNER_BATCH:-256}
 export BATCH_SIZE=${BATCH_SIZE:-$(( GLOBAL_LEARNER_BATCH / WORLD_SIZE ))}
 export UPDATES_PER_ROLLOUT_CHUNK=${UPDATES_PER_ROLLOUT_CHUNK:-$(( 64 * WORLD_SIZE / 8 ))}
-export RUN_LABEL=${RUN_LABEL:-t15_generated_trim50_idealized_0p1s_tcvjdot_balanced}
+export RUN_LABEL=${RUN_LABEL:-t15_generated_trim50_idealized_matched_0p1s_tcvjdot_balanced}
 export RUN_NAME=${RUN_NAME:-${RUN_LABEL}_${WORLD_SIZE}gpu_100m_${SLURM_JOB_ID:-manual}}
 export TRAIN_OUTPUT=${TRAIN_OUTPUT:-outputs/${RUN_NAME}}
 export GENERATED_CONFIG=${GENERATED_CONFIG:-${TRAIN_OUTPUT}/generated_configs/${RUN_NAME}.json}
@@ -107,7 +107,7 @@ if [[ ! "${HOLDOUT_EVAL_EPISODES}" =~ ^[0-9]+$ ]] || (( HOLDOUT_EVAL_EPISODES <=
 fi
 
 mkdir -p "$(dirname "${GENERATED_CONFIG}")"
-cp "${GENERATED_MACHINE_CONFIG_SOURCE}" "$(dirname "${GENERATED_CONFIG}")/T15MD_new_data_trim50_idealized_gpu_plain_1e6.toml"
+cp "${GENERATED_MACHINE_CONFIG_SOURCE}" "$(dirname "${GENERATED_CONFIG}")/T15MD_new_data_trim50_idealized_matched_gpu_plain_1e6.toml"
 python3 - <<PYCFG
 import json
 from pathlib import Path
@@ -117,7 +117,7 @@ out = Path("${GENERATED_CONFIG}")
 cfg = json.loads(source.read_text(encoding="utf-8"))
 
 cfg["name"] = "${RUN_LABEL}_${WORLD_SIZE}gpu_100m"
-cfg["sim"]["config_path"] = "/workspace/tokamak-rl-v2/${TRAIN_OUTPUT}/generated_configs/T15MD_new_data_trim50_idealized_gpu_plain_1e6.toml"
+cfg["sim"]["config_path"] = "/workspace/tokamak-rl-v2/${TRAIN_OUTPUT}/generated_configs/T15MD_new_data_trim50_idealized_matched_gpu_plain_1e6.toml"
 cfg["sim"]["csv_initial_state_library"] = "/workspace/tokamak-rl-v2/${RESET_LIBRARY}"
 cfg["reference"]["ip"]["limits_path"] = "/workspace/tokamak-rl-v2/${ENVELOPE_JSON}"
 cfg["reference"]["boundary"]["envelope_path"] = "/workspace/tokamak-rl-v2/${ENVELOPE_JSON}"
@@ -142,10 +142,10 @@ cfg["learner"]["batch_size"] = int("${BATCH_SIZE}")
 cfg["learner"]["updates_per_rollout_chunk"] = int("${UPDATES_PER_ROLLOUT_CHUNK}")
 
 checks = {
-    "generated_config_copy": cfg["sim"]["config_path"].endswith("/generated_configs/T15MD_new_data_trim50_idealized_gpu_plain_1e6.toml"),
-    "generated_reset_library": "t15_generated_trim50_idealized_initial_states" in str(cfg["sim"]["csv_initial_state_library"]),
-    "generated_envelope_ip": "t15_generated_trim50_idealized_envelope" in str(cfg["reference"]["ip"]["limits_path"]),
-    "generated_envelope_boundary": "t15_generated_trim50_idealized_envelope" in str(cfg["reference"]["boundary"]["envelope_path"]),
+    "generated_config_copy": cfg["sim"]["config_path"].endswith("/generated_configs/T15MD_new_data_trim50_idealized_matched_gpu_plain_1e6.toml"),
+    "generated_reset_library": "t15_generated_trim50_idealized_matched_initial_states" in str(cfg["sim"]["csv_initial_state_library"]),
+    "generated_envelope_ip": "t15_generated_trim50_idealized_matched_envelope" in str(cfg["reference"]["ip"]["limits_path"]),
+    "generated_envelope_boundary": "t15_generated_trim50_idealized_matched_envelope" in str(cfg["reference"]["boundary"]["envelope_path"]),
     "generated_ip": cfg["reference"]["ip"]["kind"] == "generated_segment_profile",
     "generated_boundary": cfg["reference"]["boundary"]["kind"] == "generated_parameter_profile",
     "jdot_command": cfg["sim"]["action_contract"] == "jdot_command",

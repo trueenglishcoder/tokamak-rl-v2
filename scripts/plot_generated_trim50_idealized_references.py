@@ -25,7 +25,7 @@ from tokamak_rl_v2.env.references import (
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=Path("configs/experiments/t15_generated_trim50_idealized_0p1s_tcvjdot_balanced_mpo.yaml"))
+    parser.add_argument("--config", type=Path, default=Path("configs/experiments/t15_generated_trim50_idealized_matched_0p1s_tcvjdot_balanced_mpo.yaml"))
     parser.add_argument("--out-dir", type=Path, default=Path("outputs/generated_trim50_idealized_reference_examples"))
     parser.add_argument("--samples", type=int, default=256)
     parser.add_argument("--seed", type=int, default=123)
