@@ -300,9 +300,6 @@ def _write_libraries(
         split=split,
         difficulty_bin=difficulty_bin,
         mode=mode,
-        replay_source_index=np.asarray([c.window.source_index for c in candidates], dtype=np.int64),
-        replay_start_row=np.asarray([c.window.start_row for c in candidates], dtype=np.int64),
-        variant_index=np.asarray([c.variant_index for c in candidates], dtype=np.int64),
     )
     np.savez_compressed(
         targets_out,
@@ -317,6 +314,7 @@ def _write_libraries(
         source_index=source_index,
         replay_source_index=np.asarray([c.window.source_index for c in candidates], dtype=np.int64),
         replay_start_row=np.asarray([c.window.start_row for c in candidates], dtype=np.int64),
+        variant_index=np.asarray([c.variant_index for c in candidates], dtype=np.int64),
         time_s=np.asarray([c.window.time_s for c in candidates], dtype=np.float64),
         split=split,
         max_fractional_perturbation=np.asarray([c.max_fractional_perturbation for c in candidates], dtype=np.float32),

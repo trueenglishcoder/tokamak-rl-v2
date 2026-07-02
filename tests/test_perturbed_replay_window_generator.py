@@ -95,3 +95,58 @@ def test_perturbed_window_starts_at_real_reset_and_stays_within_five_percent() -
     assert float(np.max(frac)) <= 0.050001
     assert candidate.max_fractional_perturbation <= 0.050001
     assert candidate.max_step_fractional_perturbation < 0.02
+
+
+def test_written_reset_library_uses_training_preflight_schema(tmp_path: Path) -> None:
+    builder = _load_builder_module()
+    window = _fake_window(builder)
+    theta = np.linspace(-np.pi, np.pi, 32, endpoint=False)
+    candidates = [
+        builder._candidate_from_window(window, theta=theta),
+        builder._perturbed_candidate_from_window(
+            window,
+            theta=theta,
+            rng=np.random.default_rng(123),
+            variant_index=0,
+            max_fraction=0.05,
+            knot_count=6,
+            smooth_window=9,
+            perturb_center=False,
+        ),
+    ]
+    initial_states = tmp_path / "initial_states.npz"
+    targets = tmp_path / "targets" / "t15_feasible_generated_trim50_idealized_0p1s_targets.npz"
+
+    builder._write_libraries(
+        candidates,
+        initial_states,
+        targets,
+        train_shots=("3854",),
+        holdout_shots=("3863",),
+    )
+
+    with np.load(initial_states, allow_pickle=False) as data:
+        allowed = {
+            "schema",
+            "shot_id",
+            "source_index",
+            "time_s",
+            "ip0",
+            "pfc0",
+            "sol0",
+            "params0",
+            "split",
+            "difficulty_bin",
+            "mode",
+        }
+        assert set(data.files) <= allowed
+        assert "replay_source_index" not in data.files
+        assert "replay_start_row" not in data.files
+        assert "variant_index" not in data.files
+        assert data["source_index"].tolist() == [0, 1]
+
+    with np.load(targets, allow_pickle=False) as data:
+        assert data["source_index"].tolist() == [0, 1]
+        assert data["replay_source_index"].tolist() == [12, 12]
+        assert data["replay_start_row"].tolist() == [12, 12]
+        assert data["variant_index"].tolist() == [-1, 0]
