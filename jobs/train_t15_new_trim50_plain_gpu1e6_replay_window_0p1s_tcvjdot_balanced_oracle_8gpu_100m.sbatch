@@ -15,9 +15,12 @@ mkdir -p slurm_logs outputs
 
 export SOURCE_CONFIG=${SOURCE_CONFIG:-configs/experiments/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_mpo_balanced.yaml}
 export TRIM_MACHINE_CONFIG_SOURCE=${TRIM_MACHINE_CONFIG_SOURCE:-../tokamak-sim/configs/T15MD_new_data.toml}
+export TRIM_DATA_ROOT=${TRIM_DATA_ROOT:-../tokamak-sim/data/t15_data_new_trim50}
 export RESET_LIBRARY=${RESET_LIBRARY:-data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_initial_states.npz}
 export ORACLE_TARGET_DIR=${ORACLE_TARGET_DIR:-data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_targets}
 export ORACLE_TARGETS=${ORACLE_TARGETS:-${ORACLE_TARGET_DIR}/t15_replay_window_oracle_targets.npz}
+export ORACLE_MACHINE_CONFIG=${ORACLE_MACHINE_CONFIG:-data/processed/t15_new_trim50_plain_gpu1e6_machine_config.toml}
+export ORACLE_CONFIG_OUT=${ORACLE_CONFIG_OUT:-data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_config.yaml}
 export RUN_NAME=${RUN_NAME:-t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_100m_${SLURM_JOB_ID:-manual}}
 export TRAIN_OUTPUT=${TRAIN_OUTPUT:-outputs/${RUN_NAME}}
 export GENERATED_CONFIG=${GENERATED_CONFIG:-${TRAIN_OUTPUT}/generated_configs/${RUN_NAME}.json}
@@ -42,16 +45,59 @@ if [[ ! -f "${TRIM_MACHINE_CONFIG_SOURCE}" ]]; then
   echo "missing trim50 machine config source: ${TRIM_MACHINE_CONFIG_SOURCE}" >&2
   exit 2
 fi
+if [[ ! -d "${TRIM_DATA_ROOT}" ]]; then
+  echo "missing trim50 data root: ${TRIM_DATA_ROOT}" >&2
+  exit 2
+fi
+
+if [[ ! -f "${RESET_LIBRARY}" || ! -f "${ORACLE_TARGETS}" || ! -d "${ORACLE_TARGET_DIR}" ]]; then
+  echo "trim50 oracle reset/target libraries are missing; building them inside the container"
+  srun \
+    --ntasks=1 \
+    --container-image /scratch/$USER/tokamak/tokamak-rl-v2.sqsh \
+    --container-mounts /scratch/$USER/tokamak:/workspace,/dev:/dev,/lib/x86_64-linux-gnu:/host-libs \
+    bash -lc '
+      set -euo pipefail
+      mkdir -p /tmp/nvidia-lib
+      ln -sf /host-libs/libcuda.so.1 /tmp/nvidia-lib/libcuda.so.1
+      ln -sf /tmp/nvidia-lib/libcuda.so.1 /tmp/nvidia-lib/libcuda.so
+      ln -sf /host-libs/libnvidia-ml.so.1 /tmp/nvidia-lib/libnvidia-ml.so.1
+      ln -sf /tmp/nvidia-lib/libnvidia-ml.so.1 /tmp/nvidia-lib/libnvidia-ml.so
+      export LD_LIBRARY_PATH=/tmp/nvidia-lib:${LD_LIBRARY_PATH:-}
+      export PYTHONPATH=/workspace/tokamak-sim:/workspace/tokamak-rl-v2:${PYTHONPATH:-}
+      cd /workspace/tokamak-rl-v2
+
+      python3 scripts/write_trim50_plain_gpu1e6_machine_config.py \
+        --source "${TRIM_MACHINE_CONFIG_SOURCE}" \
+        --out "${ORACLE_MACHINE_CONFIG}"
+
+      python3 scripts/build_t15_new_replay_window_oracle_targets.py \
+        --base-config "${SOURCE_CONFIG}" \
+        --data-root "${TRIM_DATA_ROOT}" \
+        --machine-config "${ORACLE_MACHINE_CONFIG}" \
+        --target-dir "${ORACLE_TARGET_DIR}" \
+        --initial-library-out "${RESET_LIBRARY}" \
+        --config-out "${ORACLE_CONFIG_OUT}" \
+        --compute-backend gpu \
+        --gpu-device cuda:0 \
+        --batch-size 256 \
+        --window-steps 100 \
+        --angles 32 \
+        --train-shots 3856 3857 3858 3863 \
+        --holdout-shots 3864
+    '
+fi
+
 if [[ ! -f "${RESET_LIBRARY}" ]]; then
-  echo "missing trim50 oracle reset library: ${RESET_LIBRARY}" >&2
+  echo "missing trim50 oracle reset library after build: ${RESET_LIBRARY}" >&2
   exit 2
 fi
 if [[ ! -f "${ORACLE_TARGETS}" ]]; then
-  echo "missing trim50 oracle targets: ${ORACLE_TARGETS}" >&2
+  echo "missing trim50 oracle targets after build: ${ORACLE_TARGETS}" >&2
   exit 2
 fi
 if [[ ! -d "${ORACLE_TARGET_DIR}" ]]; then
-  echo "missing trim50 oracle target directory: ${ORACLE_TARGET_DIR}" >&2
+  echo "missing trim50 oracle target directory after build: ${ORACLE_TARGET_DIR}" >&2
   exit 2
 fi
 if (( NUM_ENVS % WORLD_SIZE != 0 )); then
