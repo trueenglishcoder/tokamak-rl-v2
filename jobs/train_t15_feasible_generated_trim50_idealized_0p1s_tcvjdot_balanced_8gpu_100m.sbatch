@@ -76,7 +76,17 @@ for path in "${RESET_LIBRARY}" "${TARGET_LIBRARY}"; do
 done
 
 if [[ -z "${HOLDOUT_EVAL_EPISODES:-}" ]]; then
-  HOLDOUT_EVAL_EPISODES=$(python3 scripts/count_npz_string_value.py "${RESET_LIBRARY}" --array split --value holdout)
+  HOLDOUT_EVAL_EPISODES=$(
+    srun --ntasks=1 \
+      --container-image /scratch/$USER/tokamak/tokamak-rl-v2.sqsh \
+      --container-mounts /scratch/$USER/tokamak:/workspace \
+      bash -lc '
+        set -euo pipefail
+        export PYTHONPATH=/workspace/tokamak-sim:/workspace/tokamak-rl-v2:${PYTHONPATH:-}
+        cd /workspace/tokamak-rl-v2
+        python3 scripts/count_npz_string_value.py "${RESET_LIBRARY}" --array split --value holdout
+      '
+  )
   export HOLDOUT_EVAL_EPISODES
 fi
 if [[ ! "${HOLDOUT_EVAL_EPISODES}" =~ ^[0-9]+$ ]] || (( HOLDOUT_EVAL_EPISODES <= 0 )); then
