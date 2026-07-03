@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ACTIVE_CONFIG = ROOT / "configs/experiments/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_mpo_balanced.yaml"
 IDEALIZED_ORACLE_JOB = ROOT / "jobs/train_t15_idealized_matched_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_100m.sbatch"
 GENERATED_ORACLE_JOB = ROOT / "jobs/train_t15_simple_manifold_generated_trim50_plain_gpu1e6_oracle_window_0p1s_tcvjdot_balanced_8gpu_100m.sbatch"
+OLD_GOOD_ORACLE_JOB = ROOT / "jobs/train_t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_100m.sbatch"
 
 
 def _load_trim50_machine_writer():
@@ -86,6 +87,7 @@ def test_idealized_oracle_job_uses_working_replay_window_path() -> None:
 def test_generated_oracle_job_uses_working_replay_window_path() -> None:
     text = GENERATED_ORACLE_JOB.read_text(encoding="utf-8")
 
+    assert "OLD_GOOD_SOURCE_CONFIG=configs/experiments/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_mpo_balanced.yaml" in text
     assert "build_t15_simple_manifold_generated_trim50_idealized_0p1s.py" in text
     assert "t15_simple_manifold_generated_trim50_plain_gpu1e6_oracle_window_0p1s" in text
     assert "t15_replay_window_oracle_targets.npz" in text
@@ -93,7 +95,18 @@ def test_generated_oracle_job_uses_working_replay_window_path() -> None:
     assert "replay_window" in text
     assert "t15_replay_segment_conditioned" in text
     assert "feasible_generated_window" not in text
-    assert 'source["reward"].get("jdot_switching_weight", 0.0) != 0.0' in text
+    assert "jdot_switching" not in text
+
+
+def test_old_good_job_enforces_exact_config_delta_allowlist() -> None:
+    text = OLD_GOOD_ORACLE_JOB.read_text(encoding="utf-8")
+
+    assert "scripts/assert_config_only_allowed_diffs.py" in text
+    assert "--allow reference.boundary.replay_reference_dir" in text
+    assert "--allow sim.csv_initial_state_library" in text
+    assert "--allow reward" not in text
+    assert "--allow observation" not in text
+    assert "--allow sim.action_contract" not in text
 
 
 def test_idealized_generated_diagnostic_configs_do_not_change_reward_center() -> None:

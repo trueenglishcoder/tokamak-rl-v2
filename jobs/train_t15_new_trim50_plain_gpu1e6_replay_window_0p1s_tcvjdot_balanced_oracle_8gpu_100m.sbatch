@@ -169,6 +169,28 @@ out.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 print(out)
 PYCFG
 
+python3 scripts/assert_config_only_allowed_diffs.py \
+  --source "${SOURCE_CONFIG}" \
+  --generated "${GENERATED_CONFIG}" \
+  --allow name \
+  --allow sim.config_path \
+  --allow sim.csv_initial_state_library \
+  --allow reference.boundary.replay_reference_dir \
+  --allow training.steps \
+  --allow training.num_envs \
+  --allow training.output_dir \
+  --allow training.eval_interval_steps \
+  --allow training.checkpoint_interval_steps \
+  --allow training.milestone_checkpoint_interval_steps \
+  --allow training.eval_checkpoint_top_k \
+  --allow training.keep_latest_checkpoint \
+  --allow training.distributed_mode \
+  --allow training.production_mode \
+  --allow training.eval_max_steps \
+  --allow training.save_checkpoints \
+  --allow training.early_stop_patience_evals \
+  --allow training.early_stop_min_delta
+
 echo "job_id=${SLURM_JOB_ID:-manual}"
 echo "run_name=${RUN_NAME}"
 echo "train_output=${TRAIN_OUTPUT}"
