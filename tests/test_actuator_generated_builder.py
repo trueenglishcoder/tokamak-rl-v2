@@ -57,12 +57,23 @@ def test_sample_coil_candidates_are_reset_anchored_and_within_action_limits() ->
     )
 
     assert len(out) == 8
-    assert {c.mode for c in out} >= {"exact_real", "scaled_same", "scaled_same_channel_jitter", "borrowed_motion"}
+    assert {c.mode for c in out} >= {
+        "ladder_constant",
+        "ladder_one_bend",
+        "ladder_two_bend",
+        "ladder_hold_drive",
+        "ladder_drive_hold",
+        "ladder_reversal",
+    }
+    unique_action_counts = []
     for candidate in out:
         assert candidate.currents.shape == (101, 9)
         assert candidate.action.shape == (100, 9)
         assert candidate.currents[0] == pytest.approx(candidate.reset.currents[0])
         assert float(np.max(np.abs(candidate.action))) <= 1.0001
+        unique_action_counts.append(np.unique(np.round(candidate.action, decimals=8), axis=0).shape[0])
+    assert max(unique_action_counts) <= 3
+    assert max(unique_action_counts) > 1
 
 
 def test_write_libraries_uses_unique_generated_source_indices(tmp_path: Path) -> None:

@@ -56,6 +56,11 @@ class RealWindow:
 
 
 @dataclass(frozen=True, slots=True)
+class JdotStyle:
+    average_vectors: np.ndarray
+
+
+@dataclass(frozen=True, slots=True)
 class CoilCandidate:
     reset: RealWindow
     motion: RealWindow
@@ -81,8 +86,9 @@ class ObservedEnvelope:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Build actuator-first generated 0.1 s T15 targets. Coil movements are sampled from "
-            "real trim50 replay derivative patterns, simulated through tokamak-sim, and accepted "
+            "Build actuator-first generated 0.1 s T15 targets. Piecewise-constant ladder Jdot "
+            "commands are generated from real trim50 replay scale/coupling statistics, simulated "
+            "through tokamak-sim, and accepted "
             "only when the resulting Ip/boundary/current trajectory stays inside the observed "
             "real trim50 replay state space."
         )
@@ -369,14 +375,15 @@ def _sample_coil_candidates(
     limits: Limits,
     steps: int,
 ) -> list[CoilCandidate]:
+    style = _jdot_style_from_windows(windows=windows, steps=int(steps))
     modes = np.asarray(
         [
-            "exact_real",
-            "scaled_same",
-            "scaled_same",
-            "scaled_same_channel_jitter",
-            "scaled_same_channel_jitter",
-            "borrowed_motion",
+            "ladder_constant",
+            "ladder_one_bend",
+            "ladder_two_bend",
+            "ladder_hold_drive",
+            "ladder_drive_hold",
+            "ladder_reversal",
         ],
         dtype=object,
     )
@@ -387,23 +394,29 @@ def _sample_coil_candidates(
         attempts += 1
         reset = windows[int(rng.integers(0, len(windows)))]
         mode = str(modes[len(out) % len(modes)])
-        motion = reset if mode != "borrowed_motion" else windows[int(rng.integers(0, len(windows)))]
-        if mode == "exact_real":
-            scale = 1.0
-            gains = np.ones((9,), dtype=float)
-        else:
-            scale = float(rng.uniform(0.55, 1.05))
-            jitter = 0.0 if mode in {"scaled_same", "borrowed_motion"} else 0.08
-            gains = np.clip(rng.normal(loc=1.0, scale=jitter, size=(9,)), 0.8, 1.2)
-        delta = (motion.currents - motion.currents[0:1, :]) * scale * gains[None, :]
-        currents = reset.currents[0:1, :] + delta
+        motion = windows[int(rng.integers(0, len(windows)))]
+        scale = float(rng.uniform(0.65, 1.20))
+        gains = np.clip(rng.normal(loc=1.0, scale=0.04, size=(9,)), 0.9, 1.1)
+        jdot = _generate_ladder_jdot(
+            style=style,
+            mode=mode,
+            source_window=motion,
+            rng=rng,
+            limits=limits,
+            steps=int(steps),
+            scale=scale,
+            gains=gains,
+        )
+        currents = reset.currents[0:1, :] + np.concatenate(
+            [np.zeros((1, 9), dtype=float), np.cumsum(jdot * 0.001, axis=0)],
+            axis=0,
+        )
         if currents.shape != (int(steps) + 1, 9):
             continue
         if not np.all(np.isfinite(currents)):
             continue
         if np.any(np.abs(currents) > limits.current_vector[None, :]):
             continue
-        jdot = np.diff(currents, axis=0) / 0.001
         action = jdot / limits.derivative_vector[None, :]
         if np.any(np.abs(action) > 1.0001):
             continue
@@ -422,6 +435,93 @@ def _sample_coil_candidates(
     if len(out) < int(count):
         raise RuntimeError(f"accepted only {len(out)} / {count} actuator candidates after {attempts} attempts")
     return out
+
+
+def _jdot_style_from_windows(*, windows: list[RealWindow], steps: int) -> JdotStyle:
+    vectors: list[np.ndarray] = []
+    for window in windows:
+        if window.currents.shape != (int(steps) + 1, 9):
+            continue
+        avg = (window.currents[-1] - window.currents[0]) / (float(steps) * 0.001)
+        if not np.all(np.isfinite(avg)):
+            continue
+        if float(np.max(np.abs(avg))) < 1.0:
+            continue
+        vectors.append(np.asarray(avg, dtype=float))
+    if not vectors:
+        raise ValueError("could not derive any Jdot style vectors from real windows")
+    return JdotStyle(average_vectors=np.stack(vectors, axis=0))
+
+
+def _generate_ladder_jdot(
+    *,
+    style: JdotStyle,
+    mode: str,
+    source_window: RealWindow,
+    rng: np.random.Generator,
+    limits: Limits,
+    steps: int,
+    scale: float,
+    gains: np.ndarray,
+) -> np.ndarray:
+    if style.average_vectors.shape[0] <= 0:
+        raise ValueError("empty Jdot style")
+    base = np.asarray(style.average_vectors[int(rng.integers(0, style.average_vectors.shape[0]))], dtype=float)
+
+    # Keep the generated command on the same coarse coil-coupling manifold as
+    # real replay windows, but do not copy a real step-by-step Jdot sequence.
+    source_avg = (source_window.currents[-1] - source_window.currents[0]) / (float(steps) * 0.001)
+    if np.all(np.isfinite(source_avg)) and float(np.max(np.abs(source_avg))) > 1.0:
+        mix = float(rng.uniform(0.35, 0.75))
+        base = mix * base + (1.0 - mix) * source_avg
+
+    base = base * float(scale) * np.asarray(gains, dtype=float)
+    max_action = float(np.max(np.abs(base / limits.derivative_vector)))
+    if max_action > 0.82:
+        base = base * (0.82 / max_action)
+
+    factors = _ladder_factors(mode=mode, steps=int(steps), rng=rng)
+    jdot = np.zeros((int(steps), 9), dtype=float)
+    start = 0
+    for length, factor in factors:
+        end = min(int(steps), start + int(length))
+        if end > start:
+            jdot[start:end, :] = float(factor) * base[None, :]
+        start = end
+    if start < int(steps):
+        jdot[start:, :] = float(factors[-1][1]) * base[None, :]
+
+    action = jdot / limits.derivative_vector[None, :]
+    max_abs = float(np.max(np.abs(action)))
+    if max_abs > 0.98:
+        jdot *= 0.98 / max_abs
+    return jdot
+
+
+def _ladder_factors(*, mode: str, steps: int, rng: np.random.Generator) -> list[tuple[int, float]]:
+    if mode == "ladder_constant":
+        return [(steps, float(rng.uniform(0.75, 1.15)))]
+    if mode == "ladder_one_bend":
+        s0 = int(rng.integers(25, 76))
+        return [(s0, float(rng.uniform(0.55, 0.95))), (steps - s0, float(rng.uniform(0.90, 1.35)))]
+    if mode == "ladder_two_bend":
+        s0 = int(rng.integers(20, 46))
+        s1 = int(rng.integers(max(s0 + 20, 50), 86))
+        return [
+            (s0, float(rng.uniform(0.55, 0.95))),
+            (s1 - s0, float(rng.uniform(0.90, 1.35))),
+            (steps - s1, float(rng.uniform(0.45, 1.05))),
+        ]
+    if mode == "ladder_hold_drive":
+        hold = int(rng.integers(8, 31))
+        return [(hold, 0.0), (steps - hold, float(rng.uniform(0.85, 1.25)))]
+    if mode == "ladder_drive_hold":
+        drive = int(rng.integers(60, 91))
+        return [(drive, float(rng.uniform(0.85, 1.25))), (steps - drive, 0.0)]
+    if mode == "ladder_reversal":
+        s0 = int(rng.integers(35, 71))
+        return [(s0, float(rng.uniform(0.75, 1.15))), (steps - s0, -float(rng.uniform(0.25, 0.70)))]
+    raise ValueError(f"unknown ladder mode: {mode}")
 
 
 def _simulate_and_filter(
