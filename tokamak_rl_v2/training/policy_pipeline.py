@@ -958,7 +958,15 @@ def _preflight_artifact_failure(cfg: ExperimentConfig) -> dict[str, object] | No
 
             with np.load(path, allow_pickle=False) as data:
                 expected_arrays = {"shot_id", "source_index", "time_s", "ip0", "pfc0", "sol0", "split"}
-                allowed_arrays = expected_arrays | {"difficulty_bin", "params0", "schema", "mode"}
+                allowed_arrays = expected_arrays | {
+                    "difficulty_bin",
+                    "params0",
+                    "schema",
+                    "mode",
+                    "motion_shot_id",
+                    "motion_source_index",
+                    "reset_source_index",
+                }
                 actual_arrays = set(data.files)
                 missing = sorted(expected_arrays - actual_arrays)
                 unexpected = sorted(actual_arrays - allowed_arrays)

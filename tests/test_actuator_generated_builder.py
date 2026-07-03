@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import numpy as np
 import pytest
+
+from tokamak_rl_v2.training.policy_pipeline import _preflight_artifact_failure
 
 
 def _load_builder_module():
@@ -134,6 +137,33 @@ def test_write_libraries_uses_unique_generated_source_indices(tmp_path: Path) ->
 
     with np.load(diagnostics, allow_pickle=False) as data:
         assert data["schema"].item() == "t15_actuator_generated_trim50_plain_gpu1e6_0p1s_targets_v1"
+
+
+def test_actuator_reset_provenance_metadata_passes_artifact_preflight(tmp_path: Path) -> None:
+    reset_path = tmp_path / "actuator_initial_states.npz"
+    np.savez_compressed(
+        reset_path,
+        schema=np.asarray("t15_actuator_generated_trim50_plain_gpu1e6_0p1s_initial_states_v1"),
+        shot_id=np.asarray(["3856", "3864"]),
+        source_index=np.asarray([0, 1], dtype=np.int64),
+        time_s=np.asarray([0.05, 0.06], dtype=float),
+        ip0=np.asarray([200000.0, 210000.0], dtype=float),
+        pfc0=np.zeros((2, 6), dtype=float),
+        sol0=np.zeros((2, 3), dtype=float),
+        split=np.asarray(["train", "holdout"]),
+        difficulty_bin=np.asarray(["medium_up", "medium_down"]),
+        mode=np.asarray(["ladder_constant", "ladder_reversal"]),
+        motion_shot_id=np.asarray(["3857", "3863"]),
+        motion_source_index=np.asarray([17, 23], dtype=np.int64),
+        reset_source_index=np.asarray([101, 202], dtype=np.int64),
+    )
+
+    cfg = SimpleNamespace(
+        sim=SimpleNamespace(reset_source="csv_initial_states", csv_initial_state_library=str(reset_path)),
+        reference=SimpleNamespace(ip=SimpleNamespace(kind="replay_window")),
+    )
+
+    assert _preflight_artifact_failure(cfg) is None
 
 
 def test_rollout_filter_rejects_outside_observed_state_envelope() -> None:
