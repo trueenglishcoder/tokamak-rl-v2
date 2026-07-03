@@ -17,6 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 ACTIVE_CONFIG = ROOT / "configs/experiments/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_mpo_balanced.yaml"
 IDEALIZED_ORACLE_JOB = ROOT / "jobs/train_t15_idealized_matched_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_100m.sbatch"
 GENERATED_ORACLE_JOB = ROOT / "jobs/train_t15_simple_manifold_generated_trim50_plain_gpu1e6_oracle_window_0p1s_tcvjdot_balanced_8gpu_100m.sbatch"
+ACTUATOR_GENERATED_ORACLE_JOB = ROOT / "jobs/train_t15_actuator_generated_trim50_plain_gpu1e6_oracle_window_0p1s_tcvjdot_balanced_8gpu_100m.sbatch"
+ACTUATOR_GENERATED_BUILD_JOB = ROOT / "jobs/build_t15_actuator_generated_trim50_plain_gpu1e6_0p1s_1gpu.sbatch"
 OLD_GOOD_ORACLE_JOB = ROOT / "jobs/train_t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_100m.sbatch"
 
 
@@ -96,6 +98,30 @@ def test_generated_oracle_job_uses_working_replay_window_path() -> None:
     assert "t15_replay_segment_conditioned" in text
     assert "feasible_generated_window" not in text
     assert "jdot_switching" not in text
+
+
+def test_actuator_generated_oracle_job_uses_working_replay_window_path() -> None:
+    text = ACTUATOR_GENERATED_ORACLE_JOB.read_text(encoding="utf-8")
+
+    assert "OLD_GOOD_SOURCE_CONFIG=configs/experiments/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_mpo_balanced.yaml" in text
+    assert "build_t15_actuator_generated_trim50_plain_gpu1e6_0p1s.py" in text
+    assert "ALLOW_BUILD_ACTUATOR_DATASET" in text
+    assert "build_t15_actuator_generated_trim50_plain_gpu1e6_0p1s_1gpu.sbatch" in text
+    assert "t15_actuator_generated_trim50_plain_gpu1e6_0p1s" in text
+    assert "t15_replay_window_oracle_targets.npz" in text
+    assert "train_t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_100m.sbatch" in text
+    assert "mean_jdot_bias_weight" in text
+    assert "jdot_switching" not in text
+    assert "feasible_generated_window" not in text
+
+
+def test_actuator_generated_build_job_writes_inspection_artifacts() -> None:
+    text = ACTUATOR_GENERATED_BUILD_JOB.read_text(encoding="utf-8")
+
+    assert "build_t15_actuator_generated_trim50_plain_gpu1e6_0p1s.py" in text
+    assert "summarize_t15_actuator_generated_dataset.py" in text
+    assert "actuator_generated_dataset_report.md" in text
+    assert "--plots" in text
 
 
 def test_old_good_job_enforces_exact_config_delta_allowlist() -> None:
