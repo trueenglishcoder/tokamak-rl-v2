@@ -57,16 +57,53 @@ class ShotSeries:
 
 
 @dataclass(frozen=True, slots=True)
+class ParentReset:
+    shot_id: str
+    split: str
+    start: int
+    time_s: float
+    ip: np.ndarray
+    currents: np.ndarray
+
+
+@dataclass(frozen=True, slots=True)
 class ParentCandidate:
     parent_id: int
     split: str
     reset: object
-    template: ShotSeries
-    template_start: int
     mode: str
     scale: float
+    style_source: str
     currents: np.ndarray
     action: np.ndarray
+
+
+@dataclass(frozen=True, slots=True)
+class JdotFeatureEnvelope:
+    names: tuple[str, ...]
+    min_values: np.ndarray
+    max_values: np.ndarray
+    samples: np.ndarray
+
+
+@dataclass(frozen=True, slots=True)
+class JdotStyleModel:
+    split: str
+    action_mean: np.ndarray
+    action_chol: np.ndarray
+    delta_chol: np.ndarray
+    action_min: np.ndarray
+    action_max: np.ndarray
+    segment_lengths: np.ndarray
+    ripple_amp: np.ndarray
+    feature_envelope: JdotFeatureEnvelope
+    level_bank: np.ndarray
+    delta_bank: np.ndarray
+    profile_mean: np.ndarray
+    profile_components: np.ndarray
+    profile_coeff_min: np.ndarray
+    profile_coeff_max: np.ndarray
+    profile_coeff_std: np.ndarray
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,9 +138,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--target-count", type=int, default=0, help="Compatibility alias; 0 keeps all overlapping windows.")
     parser.add_argument("--parent-min-steps", type=int, default=1000)
     parser.add_argument("--parent-max-steps", type=int, default=1500)
+    parser.add_argument(
+        "--parent-lengths",
+        nargs="*",
+        type=int,
+        default=[1000, 1250, 1500],
+        help="Discrete parent lengths to sample; discrete lengths allow efficient GPU batching.",
+    )
     parser.add_argument("--window-stride", type=int, default=1)
     parser.add_argument("--max-windows", type=int, default=0, help="0 keeps every accepted overlapping 100-step window.")
-    parser.add_argument("--batch-size", type=int, default=1, help="Parent simulation is intentionally one parent at a time.")
+    parser.add_argument("--batch-size", type=int, default=16, help="Number of same-length parent trajectories per GPU batch.")
     parser.add_argument("--angles", type=int, default=32)
     parser.add_argument("--gpu-device", default="cuda:0")
     parser.add_argument("--seed", type=int, default=20260704)
@@ -111,9 +155,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--radii-margin-m", type=float, default=0.05)
     parser.add_argument("--current-margin-fraction", type=float, default=0.03)
     parser.add_argument("--state-feature-distance-limit", type=float, default=0.0)
-    parser.add_argument("--template-scale-min", type=float, default=0.88)
-    parser.add_argument("--template-scale-max", type=float, default=1.12)
-    parser.add_argument("--residual-action-rms", type=float, default=0.035)
+    parser.add_argument("--level-scale-min", type=float, default=0.97)
+    parser.add_argument("--level-scale-max", type=float, default=1.03)
+    parser.add_argument(
+        "--residual-action-rms",
+        type=float,
+        default=1.0,
+        help="Multiplier for fitted small high-frequency residuals; 0 disables them.",
+    )
     parser.add_argument("--plots", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args(argv)
 
@@ -125,6 +174,10 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--parent-min-steps must be greater than the 100-step window length")
     if int(args.parent_max_steps) < int(args.parent_min_steps):
         raise SystemExit("--parent-max-steps must be >= --parent-min-steps")
+    parent_lengths = [int(v) for v in args.parent_lengths if int(args.parent_min_steps) <= int(v) <= int(args.parent_max_steps)]
+    if not parent_lengths:
+        raise SystemExit("--parent-lengths must include at least one value inside [parent-min-steps, parent-max-steps]")
+    args.parent_lengths = parent_lengths
     if int(args.window_stride) <= 0:
         raise SystemExit("--window-stride must be positive")
 
@@ -168,13 +221,26 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     rng = np.random.default_rng(int(args.seed))
+    style_models = {
+        "train": _fit_jdot_style_model(
+            [s for s in shot_series.values() if s.split == "train"],
+            limits=limits,
+            split="train",
+        ),
+        "holdout": _fit_jdot_style_model(
+            [s for s in shot_series.values() if s.split == "holdout"],
+            limits=limits,
+            split="holdout",
+        ),
+    }
     split_counts = base._split_counts(int(args.parent_count), train_windows=train_windows, holdout_windows=holdout_windows)
     candidates, candidate_rejections = _make_parent_candidates(
         train_windows=train_windows,
         holdout_windows=holdout_windows,
-        shot_series=shot_series,
+        style_models=style_models,
         split_counts=split_counts,
         limits=limits,
+        envelope=envelope,
         rng=rng,
         args=args,
     )
@@ -186,6 +252,7 @@ def main(argv: list[str] | None = None) -> int:
         candidates,
         machine_config=machine_config,
         envelope=envelope,
+        batch_size=int(args.batch_size),
         angles=int(args.angles),
         gpu_device=str(args.gpu_device),
         state_feature_distance_limit=float(args.state_feature_distance_limit),
@@ -279,9 +346,10 @@ def _make_parent_candidates(
     *,
     train_windows: list[object],
     holdout_windows: list[object],
-    shot_series: dict[str, ShotSeries],
+    style_models: dict[str, JdotStyleModel],
     split_counts: dict[str, int],
     limits: object,
+    envelope: object,
     rng: np.random.Generator,
     args: argparse.Namespace,
 ) -> tuple[list[ParentCandidate], list[dict[str, object]]]:
@@ -292,22 +360,26 @@ def _make_parent_candidates(
         count = int(split_counts[split])
         attempts = 0
         max_attempts = max(1000, count * 120)
-        split_series = [s for s in shot_series.values() if s.split == split]
+        style = style_models[split]
         while len([c for c in candidates if c.split == split]) < count and attempts < max_attempts:
             attempts += 1
-            reset = windows[int(rng.integers(0, len(windows)))]
-            template = split_series[int(rng.integers(0, len(split_series)))]
-            parent_steps = int(rng.integers(int(args.parent_min_steps), int(args.parent_max_steps) + 1))
-            if template.currents.shape[0] <= parent_steps + 1:
-                continue
-            template_start = int(rng.integers(0, template.currents.shape[0] - parent_steps - 1))
-            candidate, reason = _candidate_from_template(
+            reset_window = windows[int(rng.integers(0, len(windows)))]
+            parent_steps = int(args.parent_lengths[int(rng.integers(0, len(args.parent_lengths)))])
+            reset = ParentReset(
+                shot_id=reset_window.shot_id,
+                split=reset_window.split,
+                start=reset_window.start,
+                time_s=float(reset_window.time_s),
+                ip=np.asarray([reset_window.ip[0]], dtype=float),
+                currents=np.asarray(reset_window.currents[0:1], dtype=float),
+            )
+            candidate, reason = _candidate_from_style(
                 parent_id=parent_id,
                 reset=reset,
-                template=template,
-                template_start=template_start,
                 parent_steps=parent_steps,
+                style=style,
                 limits=limits,
+                envelope=envelope,
                 rng=rng,
                 args=args,
             )
@@ -318,8 +390,7 @@ def _make_parent_candidates(
                         "split": split,
                         "reset_shot_id": reset.shot_id,
                         "reset_source_index": reset.start,
-                        "template_shot_id": template.shot_id,
-                        "template_start": template_start,
+                        "style_source": style.split,
                         "steps": parent_steps,
                         "mode": "candidate",
                         "reason": reason,
@@ -337,44 +408,40 @@ def _make_parent_candidates(
     return candidates, rejected
 
 
-def _candidate_from_template(
+def _candidate_from_style(
     *,
     parent_id: int,
     reset: object,
-    template: ShotSeries,
-    template_start: int,
     parent_steps: int,
+    style: JdotStyleModel,
     limits: object,
+    envelope: object,
     rng: np.random.Generator,
     args: argparse.Namespace,
 ) -> tuple[ParentCandidate | None, str]:
-    template_currents = template.currents[template_start : template_start + parent_steps + 1]
-    if template_currents.shape != (parent_steps + 1, 9):
-        return None, "bad_template_shape"
-    template_delta = template_currents - template_currents[0:1]
-    mode = "template_scaled"
-    scale = float(rng.uniform(float(args.template_scale_min), float(args.template_scale_max)))
-    per_coil_scale = np.clip(rng.normal(loc=scale, scale=0.025, size=(9,)), 0.82, 1.18)
-
-    residual_action = _low_frequency_ladder_action(
+    scale = float(rng.uniform(float(args.level_scale_min), float(args.level_scale_max)))
+    action = _generate_synthetic_ladder_jdot_action(
+        style=style,
         rng=rng,
         steps=parent_steps,
-        rms=float(args.residual_action_rms),
+        scale=scale,
+        residual_multiplier=float(args.residual_action_rms),
     )
-    if float(args.residual_action_rms) > 0.0:
-        mode = "template_scaled_with_ladder_residual"
-
-    residual_current = np.concatenate(
-        [np.zeros((1, 9), dtype=float), np.cumsum(residual_action * limits.derivative_vector[None, :] * 0.001, axis=0)],
+    ok, feature_reason = _jdot_features_ok(action, style.feature_envelope)
+    if not ok:
+        return None, feature_reason
+    currents = reset.currents[0:1] + np.concatenate(
+        [np.zeros((1, 9), dtype=float), np.cumsum(action * limits.derivative_vector[None, :] * 0.001, axis=0)],
         axis=0,
     )
-    currents = reset.currents[0:1] + template_delta * per_coil_scale[None, :] + residual_current
     if not np.all(np.isfinite(currents)):
         return None, "nonfinite_current"
     if np.any(np.abs(currents) > limits.current_vector[None, :]):
         return None, "current_limit"
-    jdot = np.diff(currents, axis=0) / 0.001
-    action = jdot / limits.derivative_vector[None, :]
+    if np.nanmin(currents - envelope.current_min[None, :]) < -1.0e-8:
+        return None, "current_below_observed_envelope"
+    if np.nanmax(currents - envelope.current_max[None, :]) > 1.0e-8:
+        return None, "current_above_observed_envelope"
     if float(np.nanmax(np.abs(action))) > 1.0001:
         return None, "derivative_limit"
     return (
@@ -382,10 +449,9 @@ def _candidate_from_template(
             parent_id=int(parent_id),
             split=str(reset.split),
             reset=reset,
-            template=template,
-            template_start=int(template_start),
-            mode=mode,
+            mode="synthetic_ladder_jdot",
             scale=float(scale),
+            style_source=style.split,
             currents=np.asarray(currents, dtype=float),
             action=np.asarray(action, dtype=float),
         ),
@@ -393,21 +459,513 @@ def _candidate_from_template(
     )
 
 
-def _low_frequency_ladder_action(*, rng: np.random.Generator, steps: int, rms: float) -> np.ndarray:
-    if float(rms) <= 0.0:
+def _fit_jdot_style_model(series: list[ShotSeries], *, limits: object, split: str) -> JdotStyleModel:
+    if not series:
+        raise ValueError(f"cannot fit Jdot style model for empty split: {split}")
+    block = 25
+    levels_by_shot: list[np.ndarray] = []
+    all_actions: list[np.ndarray] = []
+    all_levels: list[np.ndarray] = []
+    all_residuals: list[np.ndarray] = []
+    segment_lengths: list[int] = []
+    for shot in series:
+        action = np.diff(shot.currents, axis=0) / 0.001 / limits.derivative_vector[None, :]
+        action = np.clip(action, -0.98, 0.98)
+        if action.shape[0] < block * 2:
+            continue
+        all_actions.append(action)
+        n_blocks = action.shape[0] // block
+        blocks = action[: n_blocks * block].reshape(n_blocks, block, 9).mean(axis=1)
+        levels_by_shot.append(blocks)
+        all_levels.append(blocks)
+        repeated = np.repeat(blocks, block, axis=0)
+        all_residuals.append(action[: repeated.shape[0]] - repeated)
+        if blocks.shape[0] > 1:
+            changes = np.max(np.abs(np.diff(blocks, axis=0)), axis=1)
+            change_points = np.where(changes > 0.025)[0] + 1
+            prev = 0
+            for cp in change_points.tolist() + [blocks.shape[0]]:
+                length = int((cp - prev) * block)
+                if length >= 25:
+                    segment_lengths.append(int(np.clip(length, 40, 260)))
+                prev = cp
+    if not all_levels:
+        raise ValueError(f"could not derive Jdot levels for split={split}")
+    levels = np.concatenate(all_levels, axis=0)
+    actions = np.concatenate(all_actions, axis=0)
+    residuals = np.concatenate(all_residuals, axis=0) if all_residuals else np.zeros_like(actions)
+    deltas = []
+    for levels_one in levels_by_shot:
+        if levels_one.shape[0] > 1:
+            deltas.append(np.diff(levels_one, axis=0))
+    delta_values = np.concatenate(deltas, axis=0) if deltas else levels - np.mean(levels, axis=0, keepdims=True)
+    if not segment_lengths:
+        segment_lengths = [50, 75, 100, 125, 150, 200, 250]
+
+    action_mean = np.mean(levels, axis=0)
+    action_cov = _regularized_cov(levels, diagonal_floor=2.5e-4)
+    delta_cov = _regularized_cov(delta_values, diagonal_floor=1.0e-4)
+    action_min = np.maximum(np.quantile(actions, 0.005, axis=0) - 0.03, -0.92)
+    action_max = np.minimum(np.quantile(actions, 0.995, axis=0) + 0.03, 0.92)
+    ripple_amp = np.quantile(np.abs(residuals), 0.85, axis=0)
+    ripple_amp[:6] = np.minimum(ripple_amp[:6], 0.025)
+    ripple_amp[6:] = np.minimum(ripple_amp[6:], 0.090)
+    ripple_amp = np.maximum(ripple_amp, np.asarray([0.004] * 6 + [0.015] * 3, dtype=float))
+    feature_envelope = _fit_jdot_feature_envelope(all_actions)
+    profile_mean, profile_components, profile_coeff_min, profile_coeff_max, profile_coeff_std = _fit_profile_model(
+        all_actions,
+        action_min=action_min,
+        action_max=action_max,
+    )
+    return JdotStyleModel(
+        split=str(split),
+        action_mean=action_mean.astype(float),
+        action_chol=_safe_cholesky(action_cov),
+        delta_chol=_safe_cholesky(delta_cov),
+        action_min=action_min.astype(float),
+        action_max=action_max.astype(float),
+        segment_lengths=np.asarray(segment_lengths, dtype=np.int32),
+        ripple_amp=ripple_amp.astype(float),
+        feature_envelope=feature_envelope,
+        level_bank=levels.astype(float),
+        delta_bank=delta_values.astype(float),
+        profile_mean=profile_mean.astype(float),
+        profile_components=profile_components.astype(float),
+        profile_coeff_min=profile_coeff_min.astype(float),
+        profile_coeff_max=profile_coeff_max.astype(float),
+        profile_coeff_std=profile_coeff_std.astype(float),
+    )
+
+
+def _fit_profile_model(
+    actions_by_shot: list[np.ndarray],
+    *,
+    action_min: np.ndarray,
+    action_max: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    profile_steps = 1000
+    profiles: list[np.ndarray] = []
+    target_u = np.linspace(0.0, 1.0, profile_steps, dtype=float)
+    for action in actions_by_shot:
+        action = np.asarray(action, dtype=float)
+        if action.shape[0] < 100:
+            continue
+        source_u = np.linspace(0.0, 1.0, action.shape[0], dtype=float)
+        profile = np.stack(
+            [np.interp(target_u, source_u, action[:, coil]) for coil in range(9)],
+            axis=1,
+        )
+        profiles.append(profile.astype(float))
+    if not profiles:
+        mean = np.repeat(np.asarray(action_min, dtype=float)[None, :], profile_steps, axis=0)
+        components = np.zeros((0, profile_steps, 9), dtype=float)
+        empty = np.zeros((0,), dtype=float)
+        return mean, components, empty, empty, empty
+
+    stacked = np.stack(profiles, axis=0)
+    mean = np.mean(stacked, axis=0)
+    if stacked.shape[0] < 2:
+        components = np.zeros((0, profile_steps, 9), dtype=float)
+        empty = np.zeros((0,), dtype=float)
+        return np.clip(mean, action_min[None, :], action_max[None, :]), components, empty, empty, empty
+
+    centered = (stacked - mean[None, :, :]).reshape(stacked.shape[0], -1)
+    _, _, vt = np.linalg.svd(centered, full_matrices=False)
+    n_components = min(3, vt.shape[0])
+    basis = vt[:n_components]
+    coeff = centered @ basis.T
+    coeff_min = np.min(coeff, axis=0)
+    coeff_max = np.max(coeff, axis=0)
+    coeff_std = np.std(coeff, axis=0, ddof=1)
+    coeff_span = np.maximum(coeff_max - coeff_min, 1.0e-6)
+    coeff_min = coeff_min - 0.08 * coeff_span
+    coeff_max = coeff_max + 0.08 * coeff_span
+    components = basis.reshape(n_components, profile_steps, 9)
+    mean = np.clip(mean, action_min[None, :], action_max[None, :])
+    return mean, components, coeff_min, coeff_max, coeff_std
+
+
+def _fit_jdot_feature_envelope(actions_by_shot: list[np.ndarray]) -> JdotFeatureEnvelope:
+    feature_rows: list[np.ndarray] = []
+    for action in actions_by_shot:
+        action = np.asarray(action, dtype=float)
+        if action.shape[0] < 100:
+            continue
+        lengths = [min(700, action.shape[0]), 1000, 1250, 1500]
+        for length in sorted({int(v) for v in lengths if int(v) <= action.shape[0]}):
+            if length <= 0:
+                continue
+            max_start = action.shape[0] - length
+            if max_start <= 0:
+                starts = [0]
+            else:
+                count = min(24, max_start + 1)
+                starts = np.linspace(0, max_start, count, dtype=int).tolist()
+            for start in starts:
+                feature_rows.append(_jdot_feature_values(action[int(start) : int(start) + length]))
+    if not feature_rows:
+        raise ValueError("could not build real Jdot feature envelope")
+    features = np.stack(feature_rows, axis=0)
+    lo = np.min(features, axis=0)
+    hi = np.max(features, axis=0)
+    span = np.maximum(hi - lo, 1.0e-6)
+    lo = np.maximum(lo - 0.02 * span, 0.0)
+    hi = hi + 0.02 * span
+    return JdotFeatureEnvelope(
+        names=_jdot_feature_names(),
+        min_values=lo.astype(float),
+        max_values=hi.astype(float),
+        samples=features.astype(float),
+    )
+
+
+def _jdot_feature_names() -> tuple[str, ...]:
+    names: list[str] = []
+    for prefix in ("rms", "max_abs", "mean_abs", "mean_abs_diff", "jump_rate", "sign_rate"):
+        names.extend(f"{prefix}_{coil}" for coil in COIL_NAMES)
+    names.extend(
+        [
+            "active_count",
+            "pfc_rms_mean",
+            "sol_rms_mean",
+            "total_rms",
+            "max_simultaneous_abs_gt_0p10",
+            "max_simultaneous_abs_gt_0p25",
+            "max_simultaneous_abs_gt_0p50",
+        ]
+    )
+    return tuple(names)
+
+
+def _jdot_feature_values(action: np.ndarray) -> np.ndarray:
+    action = np.asarray(action, dtype=float)
+    if action.ndim != 2 or action.shape[1] != 9:
+        raise ValueError(f"expected Jdot action [T,9], got {action.shape}")
+    duration_s = max(float(action.shape[0]) * 0.001, 0.001)
+    diff = np.diff(action, axis=0) if action.shape[0] > 1 else np.zeros((0, 9), dtype=float)
+    rms = np.sqrt(np.mean(action**2, axis=0))
+    max_abs = np.max(np.abs(action), axis=0)
+    mean_abs = np.mean(np.abs(action), axis=0)
+    mean_abs_diff = np.mean(np.abs(diff), axis=0) if diff.shape[0] else np.zeros((9,), dtype=float)
+    jump_rate = np.sum(np.abs(diff) > 0.06, axis=0) / duration_s if diff.shape[0] else np.zeros((9,), dtype=float)
+    sign_rate = _block_sign_change_rate(action, block=25, duration_s=duration_s)
+    simultaneous = np.abs(action)
+    extras = np.asarray(
+        [
+            float(np.sum(rms > 0.035)),
+            float(np.mean(rms[:6])),
+            float(np.mean(rms[6:])),
+            float(np.sqrt(np.mean(action**2))),
+            float(np.max(np.sum(simultaneous > 0.10, axis=1))),
+            float(np.max(np.sum(simultaneous > 0.25, axis=1))),
+            float(np.max(np.sum(simultaneous > 0.50, axis=1))),
+        ],
+        dtype=float,
+    )
+    return np.concatenate([rms, max_abs, mean_abs, mean_abs_diff, jump_rate, sign_rate, extras], axis=0).astype(float)
+
+
+def _block_sign_change_rate(action: np.ndarray, *, block: int, duration_s: float) -> np.ndarray:
+    n_blocks = int(action.shape[0]) // int(block)
+    if n_blocks < 2:
+        return np.zeros((9,), dtype=float)
+    blocks = action[: n_blocks * int(block)].reshape(n_blocks, int(block), 9).mean(axis=1)
+    signs = np.sign(blocks)
+    signs[np.abs(blocks) < 0.025] = 0.0
+    changes = np.zeros((9,), dtype=float)
+    for coil in range(9):
+        vals = signs[:, coil]
+        prev = 0.0
+        count = 0
+        for value in vals:
+            if value == 0.0:
+                continue
+            if prev != 0.0 and value != prev:
+                count += 1
+            prev = value
+        changes[coil] = float(count) / max(float(duration_s), 0.001)
+    return changes
+
+
+def _jdot_features_ok(action: np.ndarray, envelope: JdotFeatureEnvelope) -> tuple[bool, str]:
+    features = _jdot_feature_values(action)
+    tol = 1.0e-8
+    lower_mask = np.asarray([_jdot_feature_has_lower_bound(name) for name in envelope.names], dtype=bool)
+    below = (features < envelope.min_values - tol) & lower_mask
+    above = features > envelope.max_values + tol
+    if not bool(np.any(below) or np.any(above)):
+        return True, "ok"
+    names = envelope.names
+    if bool(np.any(above)):
+        violation = np.where(above)[0]
+        span = np.maximum(envelope.max_values - envelope.min_values, 1.0e-6)
+        idx = int(violation[np.argmax((features[violation] - envelope.max_values[violation]) / span[violation])])
+        return False, f"jdot_feature_high:{names[idx]}"
+    violation = np.where(below)[0]
+    span = np.maximum(envelope.max_values - envelope.min_values, 1.0e-6)
+    idx = int(violation[np.argmax((envelope.min_values[violation] - features[violation]) / span[violation])])
+    return False, f"jdot_feature_low:{names[idx]}"
+
+
+def _jdot_feature_has_lower_bound(name: str) -> bool:
+    return (
+        name.startswith("rms_")
+        or name.startswith("mean_abs_diff_")
+        or name == "jump_rate_SOL1"
+        or name in {"active_count", "pfc_rms_mean", "sol_rms_mean", "total_rms"}
+    )
+
+
+def _jdot_feature_score(action: np.ndarray, envelope: JdotFeatureEnvelope) -> float:
+    features = _jdot_feature_values(action)
+    span = np.maximum(envelope.max_values - envelope.min_values, 1.0e-6)
+    tol = 1.0e-8
+    lower_mask = np.asarray([_jdot_feature_has_lower_bound(name) for name in envelope.names], dtype=bool)
+    low = np.where(lower_mask, np.maximum(envelope.min_values - features - tol, 0.0) / span, 0.0)
+    high = np.maximum(features - envelope.max_values - tol, 0.0) / span
+    return float(np.max(np.maximum(low, high)))
+
+
+def _regularized_cov(values: np.ndarray, *, diagonal_floor: float) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    if values.ndim != 2 or values.shape[1] != 9:
+        raise ValueError(f"expected [N,9] covariance values, got {values.shape}")
+    if values.shape[0] < 2:
+        return np.eye(9, dtype=float) * float(diagonal_floor)
+    cov = np.cov(values, rowvar=False)
+    diag = np.maximum(np.diag(cov), float(diagonal_floor))
+    cov = 0.75 * cov + 0.25 * np.diag(diag)
+    cov += np.eye(9, dtype=float) * float(diagonal_floor)
+    return cov.astype(float)
+
+
+def _safe_cholesky(cov: np.ndarray) -> np.ndarray:
+    cov = np.asarray(cov, dtype=float)
+    jitter = 1.0e-8
+    for _ in range(8):
+        try:
+            return np.linalg.cholesky(cov + np.eye(cov.shape[0]) * jitter)
+        except np.linalg.LinAlgError:
+            jitter *= 10.0
+    return np.linalg.cholesky(np.diag(np.maximum(np.diag(cov), 1.0e-4)))
+
+
+def _generate_synthetic_ladder_jdot_action(
+    *,
+    style: JdotStyleModel,
+    rng: np.random.Generator,
+    steps: int,
+    scale: float,
+    residual_multiplier: float,
+) -> np.ndarray:
+    best: np.ndarray | None = None
+    best_score = float("inf")
+    for attempt in range(240):
+        spread = max(0.20, 0.48 * (0.986 ** attempt))
+        residual_scale = float(residual_multiplier) * max(0.25, 0.80 * (0.990 ** attempt))
+        candidate = _generate_synthetic_ladder_jdot_action_once(
+            style=style,
+            rng=rng,
+            steps=int(steps),
+            scale=float(scale),
+            residual_multiplier=residual_scale,
+            spread=float(spread),
+        )
+        score = _jdot_feature_score(candidate, style.feature_envelope)
+        if score <= 0.0:
+            return candidate
+        if score < best_score:
+            best = candidate
+            best_score = score
+    if best is None:
+        raise RuntimeError("failed to generate a synthetic Jdot action")
+    return best.astype(float)
+
+
+def _generate_synthetic_ladder_jdot_action_once(
+    *,
+    style: JdotStyleModel,
+    rng: np.random.Generator,
+    steps: int,
+    scale: float,
+    residual_multiplier: float,
+    spread: float,
+) -> np.ndarray:
+    if style.profile_components.shape[0] > 0:
+        action = _generate_profile_jdot_action(
+            style=style,
+            rng=rng,
+            steps=int(steps),
+            scale=float(scale),
+            spread=float(spread),
+        )
+    else:
+        action = np.zeros((int(steps), 9), dtype=float)
+        cursor = 0
+        level = _sample_level(style, rng, scale=float(scale), spread=float(spread))
+        segment_id = 0
+        while cursor < int(steps):
+            length = int(style.segment_lengths[int(rng.integers(0, style.segment_lengths.shape[0]))])
+            length = int(np.clip(length + int(rng.integers(-20, 21)), 90, 430))
+            end = min(int(steps), cursor + length)
+            action[cursor:end, :] = level[None, :]
+            cursor = end
+            segment_id += 1
+            if cursor >= int(steps):
+                break
+            if segment_id == 1 or float(rng.random()) < 0.10:
+                level = _sample_level(style, rng, scale=float(scale), spread=float(spread))
+            else:
+                delta = _sample_observed_delta(style, rng) * float(rng.uniform(0.70, 1.20))
+                delta += _sample_zero_mean(style.delta_chol, rng) * float(rng.uniform(0.04, 0.12)) * float(spread)
+                level = np.clip(level + delta, style.action_min, style.action_max)
+    action += _synthetic_residual(action.shape[0], style=style, rng=rng, multiplier=float(residual_multiplier))
+    action = _match_real_jdot_activity_envelope(action, envelope=style.feature_envelope, rng=rng)
+    return np.clip(action, -0.98, 0.98).astype(float)
+
+
+def _generate_profile_jdot_action(
+    *,
+    style: JdotStyleModel,
+    rng: np.random.Generator,
+    steps: int,
+    scale: float,
+    spread: float,
+) -> np.ndarray:
+    profile_steps = int(style.profile_mean.shape[0])
+    source_u = np.linspace(0.0, 1.0, profile_steps, dtype=float)
+    target_u = np.linspace(0.0, 1.0, int(steps), dtype=float)
+    gamma = float(rng.uniform(0.92, 1.08))
+    warped_u = np.clip(target_u**gamma, 0.0, 1.0)
+
+    profile = style.profile_mean.copy()
+    for idx in range(style.profile_components.shape[0]):
+        lo = float(style.profile_coeff_min[idx])
+        hi = float(style.profile_coeff_max[idx])
+        std = float(style.profile_coeff_std[idx])
+        if not np.isfinite(lo + hi + std) or hi <= lo:
+            continue
+        coeff = float(rng.uniform(lo, hi))
+        coeff += float(rng.normal(0.0, 0.08 * max(std, 1.0e-6))) * float(spread)
+        coeff = float(np.clip(coeff, lo, hi))
+        profile += coeff * style.profile_components[idx]
+
+    action = np.stack(
+        [np.interp(warped_u, source_u, profile[:, coil]) for coil in range(9)],
+        axis=1,
+    )
+    coil_scale = rng.normal(1.0, 0.035 * float(spread), size=(9,))
+    coil_scale = np.clip(coil_scale, 0.90, 1.10)
+    action *= coil_scale[None, :] * float(scale)
+    return np.clip(action, style.action_min[None, :], style.action_max[None, :])
+
+
+def _sample_level(style: JdotStyleModel, rng: np.random.Generator, *, scale: float, spread: float) -> np.ndarray:
+    idx = int(rng.integers(0, style.level_bank.shape[0]))
+    value = style.level_bank[idx].astype(float).copy()
+    value += _sample_zero_mean(style.action_chol, rng) * float(rng.uniform(0.03, 0.10)) * float(spread)
+    return np.clip(value * float(scale), style.action_min, style.action_max)
+
+
+def _sample_observed_delta(style: JdotStyleModel, rng: np.random.Generator) -> np.ndarray:
+    if style.delta_bank.shape[0] == 0:
+        return np.zeros((9,), dtype=float)
+    idx = int(rng.integers(0, style.delta_bank.shape[0]))
+    return style.delta_bank[idx].astype(float)
+
+
+def _match_real_jdot_activity_envelope(
+    action: np.ndarray,
+    *,
+    envelope: JdotFeatureEnvelope,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    action = np.asarray(action, dtype=float).copy()
+    target = envelope.samples[int(rng.integers(0, envelope.samples.shape[0]))]
+    for coil, name in enumerate(COIL_NAMES):
+        rms_lo, rms_hi = _feature_range(envelope, f"rms_{name}")
+        rms_idx = envelope.names.index(f"rms_{name}")
+        target_rms = float(target[rms_idx]) * float(rng.uniform(0.92, 1.08))
+        target_rms = float(np.clip(target_rms, rms_lo, rms_hi))
+        current_rms = float(np.sqrt(np.mean(action[:, coil] ** 2)))
+        if current_rms > 1.0e-9:
+            action[:, coil] *= target_rms / current_rms
+        mean_lo, mean_hi = _feature_range(envelope, f"mean_abs_{name}")
+        current_mean = float(np.mean(np.abs(action[:, coil])))
+        if current_mean > mean_hi and current_mean > 1.0e-9:
+            action[:, coil] *= mean_hi / current_mean
+        max_lo, max_hi = _feature_range(envelope, f"max_abs_{name}")
+        current_max = float(np.max(np.abs(action[:, coil])))
+        if current_max > max_hi and current_max > 1.0e-9:
+            action[:, coil] *= max_hi / current_max
+        current_rms = float(np.sqrt(np.mean(action[:, coil] ** 2)))
+        if current_rms < rms_lo and current_rms > 1.0e-9:
+            scale = min(rms_lo / current_rms, 1.25)
+            action[:, coil] *= scale
+        current_mean = float(np.mean(np.abs(action[:, coil])))
+        if current_mean > mean_hi and current_mean > 1.0e-9:
+            action[:, coil] *= mean_hi / current_mean
+        current_max = float(np.max(np.abs(action[:, coil])))
+        if current_max > max_hi and current_max > 1.0e-9:
+            action[:, coil] *= max_hi / current_max
+        # The maximum-action lower bound is diagnostic, not a hard requirement. It
+        # would otherwise force every synthetic parent to hit every coil extreme.
+        _ = max_lo
+        _, diff_hi = _feature_range(envelope, f"mean_abs_diff_{name}")
+        for _ in range(4):
+            diff = np.diff(action[:, coil])
+            mean_abs_diff = float(np.mean(np.abs(diff))) if diff.shape[0] else 0.0
+            if mean_abs_diff <= diff_hi:
+                break
+            action[:, coil] = _smooth_1d_reflect(action[:, coil])
+        current_mean = float(np.mean(np.abs(action[:, coil])))
+        if current_mean > mean_hi and current_mean > 1.0e-9:
+            action[:, coil] *= mean_hi / current_mean
+    return action
+
+
+def _feature_range(envelope: JdotFeatureEnvelope, name: str) -> tuple[float, float]:
+    idx = envelope.names.index(name)
+    return float(envelope.min_values[idx]), float(envelope.max_values[idx])
+
+
+def _smooth_1d_reflect(values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    if values.shape[0] < 3:
+        return values.copy()
+    padded = np.pad(values, (1, 1), mode="edge")
+    return (0.25 * padded[:-2] + 0.50 * padded[1:-1] + 0.25 * padded[2:]).astype(float)
+
+
+def _sample_zero_mean(chol: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    return np.asarray(chol, dtype=float) @ rng.normal(size=(9,))
+
+
+def _synthetic_residual(
+    steps: int,
+    *,
+    style: JdotStyleModel,
+    rng: np.random.Generator,
+    multiplier: float,
+) -> np.ndarray:
+    if float(multiplier) <= 0.0:
         return np.zeros((int(steps), 9), dtype=float)
-    action = np.zeros((int(steps), 9), dtype=float)
-    start = 0
-    current = rng.normal(0.0, float(rms), size=(9,))
-    while start < int(steps):
-        length = int(rng.integers(60, 181))
-        end = min(int(steps), start + length)
-        if start > 0:
-            jump = rng.normal(0.0, float(rms) * 0.6, size=(9,))
-            current = np.clip(current + jump, -3.0 * float(rms), 3.0 * float(rms))
-        action[start:end, :] = current[None, :]
-        start = end
-    return np.asarray(action, dtype=float)
+    t = np.arange(int(steps), dtype=float)
+    residual = np.zeros((int(steps), 9), dtype=float)
+    for coil in range(9):
+        amp = float(style.ripple_amp[coil]) * float(multiplier) * float(rng.uniform(0.35, 1.0))
+        if coil < 6:
+            period = float(rng.integers(45, 121))
+            noise_scale = 0.15
+        else:
+            period = float(rng.integers(18, 46))
+            noise_scale = 0.35
+        phase = float(rng.uniform(0.0, 2.0 * np.pi))
+        wave = np.sin(2.0 * np.pi * t / period + phase)
+        wave += 0.45 * np.sin(2.0 * np.pi * t / (period * 0.51) + 0.7 * phase)
+        noise = rng.normal(0.0, amp * noise_scale, size=(int(steps),))
+        residual[:, coil] = amp * wave + noise
+    return residual
 
 
 def _simulate_and_filter_parents(
@@ -415,6 +973,7 @@ def _simulate_and_filter_parents(
     *,
     machine_config: Path,
     envelope: object,
+    batch_size: int,
     angles: int,
     gpu_device: str,
     state_feature_distance_limit: float,
@@ -427,79 +986,94 @@ def _simulate_and_filter_parents(
     theta = np.linspace(-np.pi, np.pi, int(angles), endpoint=False, dtype=float)
     accepted: list[ParentRollout] = []
     rejected: list[dict[str, object]] = []
-    for idx, candidate in enumerate(candidates):
-        sim = BatchedGpuTokamakSimulator(
-            grid=sim_cfg.grid,
-            pfc=sim_cfg.pfc,
-            sol=sim_cfg.sol,
-            settings=sim_cfg.physics,
-            batch_size=1,
-            angles_rad=theta,
-            limiter_shape=sim_cfg.limiter_shape,
-            boundary_mode=sim_cfg.boundary_mode,
-            boundary_base_mode=sim_cfg.boundary_base_mode,
-            boundary_legacy_precision_index2=sim_cfg.boundary_legacy_precision_index2,
-            boundary_soft_level_selection=sim_cfg.boundary_soft_level_selection,
-            boundary_soft_level_candidates=sim_cfg.boundary_soft_level_candidates,
-            boundary_soft_level_temperature=sim_cfg.boundary_soft_level_temperature,
-            boundary_soft_level_radius_weight=sim_cfg.boundary_soft_level_radius_weight,
-            boundary_soft_level_missing_penalty=sim_cfg.boundary_soft_level_missing_penalty,
-            boundary_soft_level_roughness_penalty=sim_cfg.boundary_soft_level_roughness_penalty,
-            boundary_level_smoothing_alpha=sim_cfg.boundary_level_smoothing_alpha,
-            boundary_level_search_span_fraction=sim_cfg.boundary_level_search_span_fraction,
-            boundary_continuity_weight_radii=sim_cfg.boundary_continuity_weight_radii,
-            boundary_continuity_weight_mean_radius=sim_cfg.boundary_continuity_weight_mean_radius,
-            boundary_continuity_weight_center=sim_cfg.boundary_continuity_weight_center,
-            boundary_continuity_weight_area=sim_cfg.boundary_continuity_weight_area,
-            boundary_continuity_weight_level=sim_cfg.boundary_continuity_weight_level,
-            gpu_device=gpu_device,
-        )
-        result = sim.reset(
-            ip=np.asarray([candidate.reset.ip[0]], dtype=float),
-            pfc_currents=candidate.currents[0:1, : sim_cfg.pfc.n_coils],
-            sol_currents=candidate.currents[0:1, sim_cfg.pfc.n_coils :],
-        )
-        ip_rows = [float(result.state.Ip.detach().cpu().numpy()[0])]
-        radii_rows = [result.boundary.radii.detach().cpu().numpy()[0].astype(float)]
-        found_rows = [bool(result.boundary.found.detach().cpu().numpy()[0])]
-        for step in range(candidate.currents.shape[0] - 1):
-            result = sim.step_currents(candidate.currents[step + 1 : step + 2])
-            ip_rows.append(float(result.state.Ip.detach().cpu().numpy()[0]))
-            radii_rows.append(result.boundary.radii.detach().cpu().numpy()[0].astype(float))
-            found_rows.append(bool(result.boundary.found.detach().cpu().numpy()[0]))
-        ip = np.asarray(ip_rows, dtype=float)
-        radii = np.stack(radii_rows, axis=0).astype(float)
-        found = np.asarray(found_rows, dtype=bool)
-        ok, reason, distance = base._rollout_ok(
-            ip=ip,
-            radii=radii,
-            found=found,
-            currents=candidate.currents,
-            envelope=envelope,
-            state_feature_distance_limit=float(state_feature_distance_limit),
-        )
-        if not ok:
-            rejected.append(_parent_reject(candidate, reason, distance))
-            print(
-                f"[long-parent-sim] processed={idx + 1}/{len(candidates)} "
-                f"accepted={len(accepted)} rejected={len(rejected)} last={reason}",
-                flush=True,
+    groups: dict[int, list[ParentCandidate]] = {}
+    for candidate in candidates:
+        groups.setdefault(int(candidate.action.shape[0]), []).append(candidate)
+    processed = 0
+    for steps, group in sorted(groups.items()):
+        for start in range(0, len(group), int(batch_size)):
+            batch = group[start : start + int(batch_size)]
+            bsz = len(batch)
+            sim = BatchedGpuTokamakSimulator(
+                grid=sim_cfg.grid,
+                pfc=sim_cfg.pfc,
+                sol=sim_cfg.sol,
+                settings=sim_cfg.physics,
+                batch_size=bsz,
+                angles_rad=theta,
+                limiter_shape=sim_cfg.limiter_shape,
+                boundary_mode=sim_cfg.boundary_mode,
+                boundary_base_mode=sim_cfg.boundary_base_mode,
+                boundary_legacy_precision_index2=sim_cfg.boundary_legacy_precision_index2,
+                boundary_soft_level_selection=sim_cfg.boundary_soft_level_selection,
+                boundary_soft_level_candidates=sim_cfg.boundary_soft_level_candidates,
+                boundary_soft_level_temperature=sim_cfg.boundary_soft_level_temperature,
+                boundary_soft_level_radius_weight=sim_cfg.boundary_soft_level_radius_weight,
+                boundary_soft_level_missing_penalty=sim_cfg.boundary_soft_level_missing_penalty,
+                boundary_soft_level_roughness_penalty=sim_cfg.boundary_soft_level_roughness_penalty,
+                boundary_level_smoothing_alpha=sim_cfg.boundary_level_smoothing_alpha,
+                boundary_level_search_span_fraction=sim_cfg.boundary_level_search_span_fraction,
+                boundary_continuity_weight_radii=sim_cfg.boundary_continuity_weight_radii,
+                boundary_continuity_weight_mean_radius=sim_cfg.boundary_continuity_weight_mean_radius,
+                boundary_continuity_weight_center=sim_cfg.boundary_continuity_weight_center,
+                boundary_continuity_weight_area=sim_cfg.boundary_continuity_weight_area,
+                boundary_continuity_weight_level=sim_cfg.boundary_continuity_weight_level,
+                gpu_device=gpu_device,
             )
-            continue
-        accepted.append(
-            ParentRollout(
-                candidate=candidate,
-                ip=ip.astype(np.float32),
-                radii=radii.astype(np.float32),
-                found=found,
-                state_feature_distance=float(distance),
+            ip0 = np.asarray([c.reset.ip[0] for c in batch], dtype=float)
+            current0 = np.stack([c.currents[0] for c in batch], axis=0)
+            result = sim.reset(
+                ip=ip0,
+                pfc_currents=current0[:, : sim_cfg.pfc.n_coils],
+                sol_currents=current0[:, sim_cfg.pfc.n_coils :],
             )
-        )
-        print(
-            f"[long-parent-sim] processed={idx + 1}/{len(candidates)} "
-            f"accepted={len(accepted)} rejected={len(rejected)}",
-            flush=True,
-        )
+            ip_rows = [result.state.Ip.detach().cpu().numpy().astype(float)]
+            radii_rows = [result.boundary.radii.detach().cpu().numpy().astype(float)]
+            found_rows = [result.boundary.found.detach().cpu().numpy().astype(bool)]
+            for step in range(steps):
+                next_current = np.stack([c.currents[step + 1] for c in batch], axis=0)
+                result = sim.step_currents(next_current)
+                ip_rows.append(result.state.Ip.detach().cpu().numpy().astype(float))
+                radii_rows.append(result.boundary.radii.detach().cpu().numpy().astype(float))
+                found_rows.append(result.boundary.found.detach().cpu().numpy().astype(bool))
+            ip_arr = np.stack(ip_rows, axis=1)
+            radii_arr = np.stack(radii_rows, axis=1)
+            found_arr = np.stack(found_rows, axis=1)
+            for row, candidate in enumerate(batch):
+                processed += 1
+                ip = ip_arr[row].astype(float)
+                radii = radii_arr[row].astype(float)
+                found = found_arr[row].astype(bool)
+                ok, reason, distance = base._rollout_ok(
+                    ip=ip,
+                    radii=radii,
+                    found=found,
+                    currents=candidate.currents,
+                    envelope=envelope,
+                    state_feature_distance_limit=float(state_feature_distance_limit),
+                )
+                if not ok:
+                    rejected.append(_parent_reject(candidate, reason, distance))
+                    print(
+                        f"[long-parent-sim] processed={processed}/{len(candidates)} "
+                        f"accepted={len(accepted)} rejected={len(rejected)} last={reason}",
+                        flush=True,
+                    )
+                    continue
+                accepted.append(
+                    ParentRollout(
+                        candidate=candidate,
+                        ip=ip.astype(np.float32),
+                        radii=radii.astype(np.float32),
+                        found=found,
+                        state_feature_distance=float(distance),
+                    )
+                )
+                print(
+                    f"[long-parent-sim] processed={processed}/{len(candidates)} "
+                    f"accepted={len(accepted)} rejected={len(rejected)}",
+                    flush=True,
+                )
     return accepted, rejected
 
 
@@ -612,8 +1186,7 @@ def _write_parent_rollouts(parents: list[ParentRollout], path: Path) -> None:
         mode=np.asarray([p.candidate.mode for p in parents]),
         reset_shot_id=np.asarray([p.candidate.reset.shot_id for p in parents]),
         reset_source_index=np.asarray([p.candidate.reset.start for p in parents], dtype=np.int64),
-        template_shot_id=np.asarray([p.candidate.template.shot_id for p in parents]),
-        template_start=np.asarray([p.candidate.template_start for p in parents], dtype=np.int64),
+        style_source=np.asarray([p.candidate.style_source for p in parents]),
         length=lengths,
         ip=ip,
         mean_radius=mean_radius,
@@ -629,8 +1202,7 @@ def _write_parent_rejections(path: Path, rows: list[dict[str, object]]) -> None:
         "split",
         "reset_shot_id",
         "reset_source_index",
-        "template_shot_id",
-        "template_start",
+        "style_source",
         "steps",
         "mode",
         "reason",
@@ -659,8 +1231,7 @@ def _parent_reject(candidate: ParentCandidate, reason: str, distance: float) -> 
         "split": candidate.split,
         "reset_shot_id": candidate.reset.shot_id,
         "reset_source_index": candidate.reset.start,
-        "template_shot_id": candidate.template.shot_id,
-        "template_start": candidate.template_start,
+        "style_source": candidate.style_source,
         "steps": int(candidate.action.shape[0]),
         "mode": candidate.mode,
         "reason": reason,
@@ -727,12 +1298,13 @@ def _summary(
             "parent_count": int(args.parent_count),
             "parent_min_steps": int(args.parent_min_steps),
             "parent_max_steps": int(args.parent_max_steps),
+            "parent_lengths": [int(v) for v in args.parent_lengths],
             "window_steps": int(args.steps),
             "window_stride": int(args.window_stride),
             "max_windows": int(args.max_windows),
             "seed": int(args.seed),
-            "template_scale_min": float(args.template_scale_min),
-            "template_scale_max": float(args.template_scale_max),
+            "level_scale_min": float(args.level_scale_min),
+            "level_scale_max": float(args.level_scale_max),
             "residual_action_rms": float(args.residual_action_rms),
         },
     }

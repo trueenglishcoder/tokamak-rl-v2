@@ -33,6 +33,7 @@ export ACTUATOR_PARENT_MIN_STEPS=${ACTUATOR_PARENT_MIN_STEPS:-1000}
 export ACTUATOR_PARENT_MAX_STEPS=${ACTUATOR_PARENT_MAX_STEPS:-1500}
 export ACTUATOR_WINDOW_STRIDE=${ACTUATOR_WINDOW_STRIDE:-1}
 export ACTUATOR_MAX_WINDOWS=${ACTUATOR_MAX_WINDOWS:-0}
+export ACTUATOR_PARENT_BATCH_SIZE=${ACTUATOR_PARENT_BATCH_SIZE:-16}
 
 for path in "${SOURCE_CONFIG}" "${TRIM_MACHINE_CONFIG_SOURCE}"; do
   if [[ ! -f "${path}" ]]; then
@@ -95,6 +96,7 @@ srun \
       --parent-max-steps "${ACTUATOR_PARENT_MAX_STEPS}" \
       --window-stride "${ACTUATOR_WINDOW_STRIDE}" \
       --max-windows "${ACTUATOR_MAX_WINDOWS}" \
+      --batch-size "${ACTUATOR_PARENT_BATCH_SIZE}" \
       --gpu-device cuda:0 \
       --plots
   '

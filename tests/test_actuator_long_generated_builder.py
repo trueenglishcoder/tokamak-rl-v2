@@ -25,10 +25,6 @@ class _Reset:
     currents = np.zeros((1, 9), dtype=float)
 
 
-class _Template:
-    shot_id = "3857"
-
-
 class _Envelope:
     ip_min = 0.0
     ip_max = 1.0e6
@@ -44,10 +40,9 @@ def _fake_parent(builder, steps: int = 105):
         parent_id=3,
         split="train",
         reset=_Reset(),
-        template=_Template(),
-        template_start=12,
-        mode="template_scaled",
+        mode="synthetic_ladder_jdot",
         scale=1.0,
+        style_source="train",
         currents=np.zeros((steps + 1, 9), dtype=float),
         action=np.zeros((steps, 9), dtype=float),
     )
