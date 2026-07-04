@@ -87,10 +87,15 @@ def test_synthetic_long_preview_cycles_named_parent_modes() -> None:
 
 
 def test_synthetic_long_boundary_motion_rejects_flat_parent() -> None:
-    real = SimpleNamespace(radii_mean_range_p70=0.02, radii_angle_range_p70=0.025)
+    real = SimpleNamespace(
+        radii_mean_range_p70=0.02,
+        radii_angle_range_p70=0.025,
+        radii_mean_safe_span=0.25,
+        radii_angle_safe_span=0.20,
+    )
     flat = np.full((1201, 32), 0.6, dtype=float)
     moving = flat.copy()
-    moving += np.linspace(0.0, 0.035, moving.shape[0]).reshape(-1, 1)
+    moving += np.linspace(0.0, 0.10, moving.shape[0]).reshape(-1, 1)
 
     assert _check_boundary_motion(real, flat) == "boundary_motion_too_small"
     assert _check_boundary_motion(real, moving) is None
