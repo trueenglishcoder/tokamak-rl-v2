@@ -36,6 +36,7 @@ class RealSpace:
     radii_high: np.ndarray
     current_low: np.ndarray
     current_high: np.ndarray
+    ip_rate_abs_p99: float
     action_abs_p99: np.ndarray
     action_jump_abs_p99: np.ndarray
 
@@ -243,6 +244,7 @@ def _load_real_space(
     time_flat = np.repeat(time_s, point_count) + point_offset.astype(np.float64) * float(dt)
     action_flat = action.reshape(-1, action.shape[-1])
     jdot_flat = jdot.reshape(-1, jdot.shape[-1])
+    ip_rate = np.diff(ip, axis=1).reshape(-1) / float(dt)
     action_jump = np.diff(action, axis=1).reshape(-1, action.shape[-1])
     cloud_idx = _sample_indices(features.shape[0], max_rows=max_cloud_rows, rng=rng)
     feature_cloud = features[cloud_idx]
@@ -277,6 +279,7 @@ def _load_real_space(
         radii_high=np.max(radii_flat, axis=0) + float(radii_margin_m),
         current_low=np.min(current_flat, axis=0) - current_envelope_margin * current_limits,
         current_high=np.max(current_flat, axis=0) + current_envelope_margin * current_limits,
+        ip_rate_abs_p99=float(np.percentile(np.abs(ip_rate), 99.0) * float(wiggle_room)),
         action_abs_p99=np.percentile(np.abs(action_flat), 99.5, axis=0) * float(wiggle_room),
         action_jump_abs_p99=np.percentile(np.abs(action_jump), 99.5, axis=0) * float(wiggle_room),
     )
@@ -382,19 +385,150 @@ def _maybe_print_progress(
 
 def _sample_feature_trajectory(*, real: RealSpace, start: np.ndarray, steps: int, rng: np.random.Generator) -> np.ndarray:
     dims = start.shape[0]
-    segment_count = int(rng.integers(5, 10))
-    cuts = np.sort(rng.choice(np.arange(90, steps - 90), size=max(0, segment_count - 1), replace=False))
-    edges = np.concatenate([[0], cuts, [steps]])
+    ip_profile, edges = _sample_ip_profile(real=real, start_ip=float(start[0]), steps=steps, rng=rng)
     features = np.empty((steps + 1, dims), dtype=np.float64)
     features[0] = start
+    features[:, 0] = ip_profile
     current = start.copy()
+    current[0] = ip_profile[0]
     for lo, hi in zip(edges[:-1], edges[1:]):
         duration = max(1, int(hi - lo))
-        target = _sample_safe_waypoint(real=real, current=current, duration=duration, rng=rng)
+        target = _sample_safe_waypoint(
+            real=real,
+            current=current,
+            duration=duration,
+            target_ip=float(ip_profile[hi]),
+            rng=rng,
+        )
         segment = _interpolate_waypoint(current, target, duration)
+        segment[:, 0] = ip_profile[lo : hi + 1]
         features[lo + 1 : hi + 1] = segment[1:]
         current = target
+        current[0] = ip_profile[hi]
     return features
+
+
+def _sample_ip_profile(
+    *,
+    real: RealSpace,
+    start_ip: float,
+    steps: int,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray]:
+    low = float(real.feature_low[0])
+    high = float(real.feature_high[0])
+    start_ip = float(np.clip(start_ip, low, high))
+    max_rate = max(1.0e5, float(real.ip_rate_abs_p99))
+
+    mode = str(
+        rng.choice(
+            np.asarray(["hold", "ramp", "hold_ramp", "ramp_hold", "ramp_hold_reverse"]),
+            p=np.asarray([0.08, 0.34, 0.20, 0.28, 0.10]),
+        )
+    )
+    edges = _ip_segment_edges(mode=mode, steps=int(steps), rng=rng)
+    profile = np.empty((int(steps) + 1,), dtype=np.float64)
+    profile[0] = start_ip
+    current = start_ip
+    first_direction = _choose_ip_direction(current=current, low=low, high=high, rng=rng)
+
+    for segment_idx, (lo, hi) in enumerate(zip(edges[:-1], edges[1:])):
+        duration = max(1, int(hi - lo))
+        kind = _ip_segment_kind(mode=mode, segment_idx=segment_idx, segment_count=len(edges) - 1)
+        direction = first_direction
+        if mode == "ramp_hold_reverse" and segment_idx == len(edges) - 2:
+            direction = -first_direction
+        if kind == "hold":
+            end = _sample_ip_hold_endpoint(current=current, low=low, high=high, max_rate=max_rate, duration=duration, rng=rng)
+        else:
+            end = _sample_ip_ramp_endpoint(
+                current=current,
+                low=low,
+                high=high,
+                max_rate=max_rate,
+                duration=duration,
+                direction=direction,
+                rng=rng,
+            )
+        profile[lo : hi + 1] = np.linspace(current, end, duration + 1, dtype=np.float64)
+        current = float(end)
+
+    return np.clip(profile, low, high), edges
+
+
+def _ip_segment_edges(*, mode: str, steps: int, rng: np.random.Generator) -> np.ndarray:
+    if mode in {"hold", "ramp"} or steps < 360:
+        return np.asarray([0, steps], dtype=np.int64)
+    min_seg = min(max(150, steps // 7), max(1, steps // 3))
+    if mode in {"hold_ramp", "ramp_hold"}:
+        cut = int(rng.integers(min_seg, steps - min_seg + 1))
+        return np.asarray([0, cut, steps], dtype=np.int64)
+    cut1 = int(rng.integers(min_seg, steps - 2 * min_seg + 1))
+    cut2 = int(rng.integers(cut1 + min_seg, steps - min_seg + 1))
+    return np.asarray([0, cut1, cut2, steps], dtype=np.int64)
+
+
+def _ip_segment_kind(*, mode: str, segment_idx: int, segment_count: int) -> str:
+    if mode == "hold":
+        return "hold"
+    if mode == "ramp":
+        return "ramp"
+    if mode == "hold_ramp":
+        return "hold" if segment_idx == 0 else "ramp"
+    if mode == "ramp_hold":
+        return "ramp" if segment_idx == 0 else "hold"
+    if mode == "ramp_hold_reverse":
+        if segment_idx == 0 or segment_idx == segment_count - 1:
+            return "ramp"
+        return "hold"
+    return "ramp"
+
+
+def _choose_ip_direction(*, current: float, low: float, high: float, rng: np.random.Generator) -> int:
+    up_room = max(0.0, high - current)
+    down_room = max(0.0, current - low)
+    if up_room < 5000.0 and down_room < 5000.0:
+        return 1
+    if up_room < 5000.0:
+        return -1
+    if down_room < 5000.0:
+        return 1
+    p_up = 0.25 + 0.5 * up_room / max(up_room + down_room, 1.0)
+    return 1 if rng.random() < p_up else -1
+
+
+def _sample_ip_hold_endpoint(
+    *,
+    current: float,
+    low: float,
+    high: float,
+    max_rate: float,
+    duration: int,
+    rng: np.random.Generator,
+) -> float:
+    return float(np.clip(current, low, high))
+
+
+def _sample_ip_ramp_endpoint(
+    *,
+    current: float,
+    low: float,
+    high: float,
+    max_rate: float,
+    duration: int,
+    direction: int,
+    rng: np.random.Generator,
+) -> float:
+    direction = 1 if int(direction) >= 0 else -1
+    room = (high - current) if direction > 0 else (current - low)
+    if room <= 5000.0:
+        return _sample_ip_hold_endpoint(current=current, low=low, high=high, max_rate=max_rate, duration=duration, rng=rng)
+    duration_s = float(duration) * 0.001
+    rate = float(rng.uniform(0.35, 0.85) * max_rate)
+    max_delta = min(room, rate * duration_s)
+    min_delta = min(max_delta, max(8000.0, 0.35 * max_delta))
+    delta = float(rng.uniform(min_delta, max_delta)) if max_delta > 1000.0 else 0.0
+    return float(np.clip(current + direction * delta, low, high))
 
 
 def _sample_safe_waypoint(
@@ -402,6 +536,7 @@ def _sample_safe_waypoint(
     real: RealSpace,
     current: np.ndarray,
     duration: int,
+    target_ip: float,
     rng: np.random.Generator,
 ) -> np.ndarray:
     current_n = (current - real.feature_center) / real.feature_scale
@@ -411,16 +546,23 @@ def _sample_safe_waypoint(
     # state sampled from the real cloud rather than independently sampled axes.
     max_dist = np.clip(0.20 + 0.004 * float(duration), 0.45, 1.75)
     min_dist = 0.04 if rng.random() > 0.18 else 0.0
-    candidates = np.flatnonzero((dist >= min_dist) & (dist <= max_dist))
+    ip_tol = max(12000.0, 0.07 * (float(real.feature_high[0]) - float(real.feature_low[0])))
+    ip_mask = np.abs(real.features[:, 0] - float(target_ip)) <= ip_tol
+    candidates = np.flatnonzero((dist >= min_dist) & (dist <= max_dist) & ip_mask)
+    if candidates.size == 0:
+        ip_tol = max(25000.0, 0.14 * (float(real.feature_high[0]) - float(real.feature_low[0])))
+        ip_mask = np.abs(real.features[:, 0] - float(target_ip)) <= ip_tol
+        candidates = np.flatnonzero((dist >= min_dist) & (dist <= max_dist) & ip_mask)
     if candidates.size == 0:
         candidates = np.argsort(dist)[: min(128, dist.shape[0])]
     idx = int(rng.choice(candidates))
     target = real.features[idx].copy()
+    target[0] = float(target_ip)
 
     # Make it new without leaving the local safe manifold: perturb only a small
     # distance in normalized feature space, then clip to the safe bounds.
     perturb_n = rng.normal(0.0, 0.025, size=current.shape[0])
-    perturb_n[0] *= 0.5
+    perturb_n[0] = 0.0
     target = target + perturb_n * real.feature_scale
     return np.minimum(np.maximum(target, real.feature_low), real.feature_high)
 

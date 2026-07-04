@@ -8,6 +8,7 @@ from scripts.build_t15_synthetic_long30_trim50_plain_gpu1e6_oracle_windows impor
     WINDOW_STEPS,
     _windows_from_parent,
 )
+from scripts.build_t15_synthetic_long_preview import _sample_ip_profile
 
 
 def test_windows_from_parent_uses_overlapping_100_step_windows() -> None:
@@ -34,3 +35,26 @@ def test_windows_from_parent_uses_overlapping_100_step_windows() -> None:
     assert rows[0]["pfc0"].shape == (6,)
     assert rows[0]["sol0"].shape == (3,)
     assert rows[-1]["ip_target"][0] == parent["ip"][steps - WINDOW_STEPS]
+
+
+def test_synthetic_long_ip_profile_is_piecewise_ramp_or_hold() -> None:
+    real = SimpleNamespace(
+        feature_low=np.asarray([150000.0]),
+        feature_high=np.asarray([420000.0]),
+        ip_rate_abs_p99=900000.0,
+    )
+    rng = np.random.default_rng(123)
+
+    for _ in range(32):
+        profile, edges = _sample_ip_profile(real=real, start_ip=260000.0, steps=1200, rng=rng)
+        diff = np.diff(profile)
+        active = np.abs(diff) > 1.0
+        signs = np.sign(diff[active])
+        sign_changes = int(np.sum(signs[1:] != signs[:-1])) if signs.size > 1 else 0
+
+        assert profile.shape == (1201,)
+        assert edges[0] == 0
+        assert edges[-1] == 1200
+        assert np.all(profile >= real.feature_low[0])
+        assert np.all(profile <= real.feature_high[0])
+        assert sign_changes <= 1
