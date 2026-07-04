@@ -346,6 +346,7 @@ def _generate_previews(
             steps=steps,
             mode=mode,
             dt=dt,
+            wiggle_room=wiggle_room,
             rng=rng,
         )
         reason = _check_features(real, features)
@@ -402,6 +403,7 @@ def _sample_coupled_trajectory(
     steps: int,
     mode: str | None = None,
     dt: float,
+    wiggle_room: float,
     rng: np.random.Generator,
 ) -> tuple[np.ndarray, np.ndarray]:
     dims = start_feature.shape[0]
@@ -424,6 +426,7 @@ def _sample_coupled_trajectory(
             duration=duration,
             target_ip=float(ip_profile[hi]),
             dt=dt,
+            wiggle_room=wiggle_room,
             rng=rng,
         )
         feature_segment = _interpolate_waypoint(current_feature, target_feature, duration)
@@ -612,6 +615,7 @@ def _sample_safe_waypoint(
     duration: int,
     target_ip: float,
     dt: float,
+    wiggle_room: float,
     rng: np.random.Generator,
 ) -> tuple[np.ndarray, np.ndarray]:
     current_n = (current_feature - real.feature_center) / real.feature_scale
@@ -623,7 +627,18 @@ def _sample_safe_waypoint(
     mean_delta = np.abs(mean_delta_signed)
     angle_delta = np.mean(np.abs(real.radii_cloud - current_radii.reshape(1, -1)), axis=1)
     current_delta = np.abs(real.currents - current_current.reshape(1, -1))
-    reachable_delta = 0.60 * real.derivative_limits.reshape(1, -1) * float(dt) * float(duration)
+    alpha_step = _max_interpolation_step_fraction(int(duration))
+    alpha_second = _max_interpolation_second_fraction(int(duration))
+    derivative_limits = real.derivative_limits.reshape(1, -1)
+    action_limit = np.maximum(real.action_abs_p99.reshape(1, -1), 0.05) * float(wiggle_room)
+    action_jump_limit = np.maximum(real.action_jump_abs_p99.reshape(1, -1), 0.03) * float(wiggle_room)
+    hard_reachable = derivative_limits * float(dt) / alpha_step
+    action_reachable = action_limit * derivative_limits * float(dt) / alpha_step
+    if alpha_second > 0.0:
+        jump_reachable = action_jump_limit * derivative_limits * float(dt) / alpha_second
+        reachable_delta = 0.88 * np.minimum(np.minimum(hard_reachable, action_reachable), jump_reachable)
+    else:
+        reachable_delta = 0.88 * np.minimum(hard_reachable, action_reachable)
     current_reachable = np.all(current_delta <= reachable_delta, axis=1)
 
     # Longer segments should move the visible boundary envelope on a real-shot
@@ -712,6 +727,21 @@ def _interpolate_waypoint(start: np.ndarray, target: np.ndarray, duration: int) 
     # readable while avoiding a hard derivative corner at every waypoint.
     bend = 0.5 - 0.5 * np.cos(np.pi * alpha)
     return start.reshape(1, -1) + bend * (target - start).reshape(1, -1)
+
+
+def _max_interpolation_step_fraction(duration: int) -> float:
+    duration = max(1, int(duration))
+    alpha = 0.5 - 0.5 * np.cos(np.pi * np.linspace(0.0, 1.0, duration + 1, dtype=np.float64))
+    return max(float(np.max(np.diff(alpha))), 1.0e-12)
+
+
+def _max_interpolation_second_fraction(duration: int) -> float:
+    duration = max(1, int(duration))
+    alpha = 0.5 - 0.5 * np.cos(np.pi * np.linspace(0.0, 1.0, duration + 1, dtype=np.float64))
+    diff = np.diff(alpha)
+    if diff.shape[0] < 2:
+        return 0.0
+    return float(np.max(np.abs(np.diff(diff))))
 
 
 def _check_features(real: RealSpace, features: np.ndarray) -> str | None:
