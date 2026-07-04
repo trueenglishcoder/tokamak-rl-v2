@@ -477,7 +477,44 @@ def _sample_ip_profile(
         profile[lo : hi + 1] = np.linspace(current, end, duration + 1, dtype=np.float64)
         current = float(end)
 
+    profile = _round_ip_bends(profile=profile, edges=edges, low=low, high=high)
     return np.clip(profile, low, high), edges
+
+
+def _round_ip_bends(*, profile: np.ndarray, edges: np.ndarray, low: float, high: float) -> np.ndarray:
+    """Round segment joins by smoothing dIp/dt, while preserving endpoints."""
+    if profile.shape[0] < 16 or edges.shape[0] <= 2:
+        return np.clip(profile, low, high)
+
+    slopes = np.diff(profile.astype(np.float64, copy=False))
+    if slopes.size < 8 or float(np.max(np.abs(slopes))) < 1.0:
+        return np.clip(profile, low, high)
+
+    raw_width = max(31, min(121, int(profile.shape[0] // 12)))
+    width = raw_width + 1 if raw_width % 2 == 0 else raw_width
+    width = min(width, slopes.size if slopes.size % 2 == 1 else max(1, slopes.size - 1))
+    if width < 5:
+        return np.clip(profile, low, high)
+
+    kernel = np.hanning(width).astype(np.float64)
+    kernel_sum = float(np.sum(kernel))
+    if kernel_sum <= 0.0:
+        return np.clip(profile, low, high)
+    kernel /= kernel_sum
+
+    pad = width // 2
+    smoothed_slopes = np.convolve(np.pad(slopes, (pad, pad), mode="edge"), kernel, mode="valid")[: slopes.shape[0]]
+    out = profile[0] + np.concatenate([[0.0], np.cumsum(smoothed_slopes)])
+
+    # Keep the exact generated endpoint after rounding. The correction is
+    # distributed smoothly over the full shot, so it does not reintroduce the
+    # hard derivative corner that the smoothing removed.
+    endpoint_error = float(out[-1] - profile[-1])
+    if abs(endpoint_error) > 1.0e-9:
+        out -= endpoint_error * np.linspace(0.0, 1.0, out.shape[0], dtype=np.float64)
+    out[0] = profile[0]
+    out[-1] = profile[-1]
+    return np.clip(out, low, high)
 
 
 def _ip_segment_edges(*, mode: str, steps: int, rng: np.random.Generator) -> np.ndarray:

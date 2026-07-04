@@ -60,6 +60,21 @@ def test_synthetic_long_ip_profile_is_piecewise_ramp_or_hold() -> None:
         assert sign_changes <= 1
 
 
+def test_synthetic_long_ip_profile_rounds_segment_bends() -> None:
+    real = SimpleNamespace(
+        feature_low=np.asarray([150000.0]),
+        feature_high=np.asarray([420000.0]),
+        ip_rate_abs_p99=900000.0,
+    )
+    rng = np.random.default_rng(11)
+
+    profile, _ = _sample_ip_profile(real=real, start_ip=260000.0, steps=1200, mode="ramp_hold", rng=rng)
+    slope = np.diff(profile)
+    slope_jump = np.abs(np.diff(slope))
+
+    assert float(np.max(slope_jump)) < 0.25 * float(np.max(np.abs(slope)))
+
+
 def test_synthetic_long_preview_cycles_named_parent_modes() -> None:
     assert [_parent_mode_for_index(i) for i in range(6)] == [
         "ramp_hold",
