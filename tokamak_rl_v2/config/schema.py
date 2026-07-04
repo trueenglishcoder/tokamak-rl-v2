@@ -72,13 +72,10 @@ class IpReferenceConfig:
         "segmented_profile",
         "single_segment_profile",
         "replay_window",
-        "generated_segment_profile",
-        "feasible_generated_window",
         "hold_boundary_eval_profile",
         "hold_boundary_eval_cut_profile",
     ] = "segmented"
     limits_path: Path | None = None
-    feasible_reference_dir: Path | None = None
     start_mode: Literal["reset_ip"] = "reset_ip"
     parent_steps: int = 0
     plateau_min_fraction: float = 0.25
@@ -104,13 +101,10 @@ class BoundaryReferenceConfig:
         "rate_limited_parameters",
         "hold_reset_boundary",
         "t15_replay_segment_conditioned",
-        "generated_parameter_profile",
-        "feasible_generated_window",
     ] = "static_initial_parameters"
     rate_limits: dict[str, float] = field(default_factory=dict)
     replay_reference_dir: Path | None = None
     envelope_path: Path | None = None
-    feasible_reference_dir: Path | None = None
     segment_min_steps: int = 30
 
 

@@ -15,7 +15,6 @@ import numpy as np
 
 TARGET_FILENAMES = (
     "t15_replay_window_oracle_targets.npz",
-    "t15_feasible_generated_trim50_idealized_0p1s_targets.npz",
 )
 
 
@@ -53,8 +52,7 @@ class TargetLibrary:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Compare replay-window target libraries. Intended to diagnose why "
-            "idealized/generated targets train differently from the old real replay-window pipeline."
+            "Compare replay-window target libraries against the canonical real replay-window pipeline."
         )
     )
     parser.add_argument("--reference-name", default="old_real")
@@ -65,8 +63,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--candidate-target", type=Path, required=True)
     parser.add_argument("--candidate-initial", type=Path)
     parser.add_argument("--candidate-config", type=Path)
-    parser.add_argument("--reference-mode", help="Optional mode filter, e.g. real or perturbed.")
-    parser.add_argument("--candidate-mode", help="Optional mode filter, e.g. real or perturbed.")
+    parser.add_argument("--reference-mode", help="Optional mode filter when the library stores one.")
+    parser.add_argument("--candidate-mode", help="Optional mode filter when the library stores one.")
     parser.add_argument("--reference-split", help="Optional split filter, e.g. train or holdout.")
     parser.add_argument("--candidate-split", help="Optional split filter, e.g. train or holdout.")
     parser.add_argument("--out-dir", type=Path, required=True)
@@ -647,7 +645,7 @@ def render_report(
             "",
             "- `nearest_reference_window_distance` is computed from endpoint `Ip` and all 32 endpoint boundary-radii deltas, normalized by the reference p99 scales.",
             "- For oracle replay-window libraries, currents are reconstructed from initial currents plus stored normalized `real_jdot_action`.",
-            "- For generated libraries with `coil_witness`, current and Jdot metrics describe the witness/open-loop trajectory used to generate the target, not necessarily what the learned policy did.",
+            "- For libraries with `coil_witness`, current and Jdot metrics describe that stored witness/open-loop trajectory, not necessarily what the learned policy did.",
             "- This is a data-distribution audit. It does not run LQR or closed-loop policy simulations.",
             "",
         ]

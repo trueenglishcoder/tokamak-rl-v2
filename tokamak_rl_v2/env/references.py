@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from functools import lru_cache
-import json
 from pathlib import Path
 
 import numpy as np
@@ -13,27 +11,6 @@ from tokamak_rl_v2.config.schema import BoundaryReferenceConfig, InitialRanges, 
 from tokamak_rl_v2.env.t15_reference_limits import T15ReferenceLimits, load_reference_limits
 
 PARAMETER_ORDER = ("R0", "Z0", "A0", "kappa", "delta")
-GENERATED_IP_MODES = (
-    "hold",
-    "ramp_up",
-    "ramp_down",
-    "hold_then_up",
-    "hold_then_down",
-    "up_then_hold",
-    "down_then_hold",
-)
-GENERATED_RAMP_MODES = tuple(mode for mode in GENERATED_IP_MODES if mode != "hold")
-GENERATED_BOUNDARY_KEYS = ("A0", "elongation_excess", "delta")
-GENERATED_BOUNDARY_COMBOS = (
-    (),
-    ("A0",),
-    ("elongation_excess",),
-    ("delta",),
-    ("A0", "elongation_excess"),
-    ("A0", "delta"),
-    ("elongation_excess", "delta"),
-    ("A0", "elongation_excess", "delta"),
-)
 
 
 def _as_numpy(value, *, dtype=None) -> np.ndarray:
@@ -43,58 +20,6 @@ def _as_numpy(value, *, dtype=None) -> np.ndarray:
             return arr.astype(dtype, copy=False)
         return arr
     return np.asarray(value, dtype=dtype)
-
-
-@lru_cache(maxsize=16)
-def load_generated_envelope(path: str | Path) -> GeneratedEnvelope:
-    source = Path(path).expanduser().resolve()
-    raw = json.loads(source.read_text(encoding="utf-8"))
-    ip = raw.get("ip", {})
-    boundary = raw.get("boundary", {})
-    a0 = boundary.get("A0", {})
-    e = boundary.get("elongation_excess", {})
-    delta = boundary.get("delta", {})
-    out = GeneratedEnvelope(
-        ip_min_a=float(ip["min_a"]),
-        ip_max_a=float(ip["max_a"]),
-        ip_abs_rate_max_aps=float(ip["abs_rate_max_aps"]),
-        A0_min_m=float(a0["min"]),
-        A0_max_m=float(a0["max"]),
-        A0_abs_rate_max_mps=float(a0["abs_rate_max"]),
-        elongation_excess_min=float(e["min"]),
-        elongation_excess_max=float(e["max"]),
-        kappa_abs_rate_max_1ps=float(e["abs_rate_max"]),
-        delta_min=float(delta["min"]),
-        delta_max=float(delta["max"]),
-        delta_abs_rate_max_1ps=float(delta["abs_rate_max"]),
-    )
-    for name in (
-        "ip_min_a",
-        "ip_max_a",
-        "ip_abs_rate_max_aps",
-        "A0_min_m",
-        "A0_max_m",
-        "A0_abs_rate_max_mps",
-        "elongation_excess_min",
-        "elongation_excess_max",
-        "kappa_abs_rate_max_1ps",
-        "delta_min",
-        "delta_max",
-        "delta_abs_rate_max_1ps",
-    ):
-        value = float(getattr(out, name))
-        if not np.isfinite(value):
-            raise ValueError(f"generated envelope {source} contains non-finite {name}")
-    if out.ip_max_a <= out.ip_min_a:
-        raise ValueError(f"generated envelope {source} has invalid Ip bounds")
-    if out.A0_max_m <= out.A0_min_m:
-        raise ValueError(f"generated envelope {source} has invalid A0 bounds")
-    if out.elongation_excess_max < out.elongation_excess_min or out.delta_max < out.delta_min:
-        raise ValueError(f"generated envelope {source} has invalid shape bounds")
-    for name in ("ip_abs_rate_max_aps", "A0_abs_rate_max_mps", "kappa_abs_rate_max_1ps", "delta_abs_rate_max_1ps"):
-        if float(getattr(out, name)) <= 0.0:
-            raise ValueError(f"generated envelope {source} has non-positive {name}")
-    return out
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,37 +36,6 @@ class HoldBoundaryEvalCutSample:
     ip: np.ndarray
     parent_ip: np.ndarray
     cut_start_step: int
-
-
-@dataclass(frozen=True, slots=True)
-class GeneratedEnvelope:
-    ip_min_a: float
-    ip_max_a: float
-    ip_abs_rate_max_aps: float
-    A0_min_m: float
-    A0_max_m: float
-    A0_abs_rate_max_mps: float
-    elongation_excess_min: float
-    elongation_excess_max: float
-    kappa_abs_rate_max_1ps: float
-    delta_min: float
-    delta_max: float
-    delta_abs_rate_max_1ps: float
-
-
-@dataclass(frozen=True, slots=True)
-class GeneratedSegmentProfileSample:
-    ip: np.ndarray
-    mode: str
-    segment_lengths: tuple[int, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class GeneratedBoundaryProfileSample:
-    parameters: np.ndarray
-    combo: tuple[str, ...]
-    directions: dict[str, int]
-    modes: dict[str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -413,75 +307,6 @@ class T15ReplayBoundaryLibrary:
         )
 
 
-class FeasibleGeneratedTargetLibrary:
-    """Prebuilt coupled Ip/boundary target windows for generated training."""
-
-    def __init__(self, root: str | Path, *, theta_count: int) -> None:
-        self.root = Path(root).expanduser().resolve()
-        self.theta_count = int(theta_count)
-        if self.theta_count <= 0:
-            raise ValueError("theta_count must be positive")
-        if self.root.is_dir():
-            path = self.root / "t15_feasible_generated_trim50_idealized_0p1s_targets.npz"
-        else:
-            path = self.root
-        if not path.exists():
-            raise FileNotFoundError(f"feasible generated target library does not exist: {path}")
-        self.path = path
-        with np.load(path, allow_pickle=False) as data:
-            required = {"ip_ref", "params_ref", "radii_ref", "zone", "shot_id", "source_index", "split"}
-            missing = sorted(required - set(data.files))
-            if missing:
-                raise ValueError(f"{path} missing feasible target arrays: {', '.join(missing)}")
-            self.ip_ref = np.asarray(data["ip_ref"], dtype=float)
-            self.params_ref = np.asarray(data["params_ref"], dtype=float)
-            self.radii_ref = np.asarray(data["radii_ref"], dtype=float)
-            self.zone = np.asarray(data["zone"]).astype(str).reshape(-1)
-            self.shot_id = np.asarray(data["shot_id"]).astype(str).reshape(-1)
-            self.source_index = np.asarray(data["source_index"], dtype=np.int64).reshape(-1)
-            self.split = np.asarray(data["split"]).astype(str).reshape(-1)
-        count = int(self.ip_ref.shape[0])
-        if count <= 0:
-            raise ValueError(f"{path} contains no feasible target windows")
-        if self.ip_ref.ndim != 2:
-            raise ValueError(f"{path} ip_ref must have shape [N, T+1]")
-        if self.params_ref.ndim != 3 or self.params_ref.shape[0] != count or self.params_ref.shape[2] != 5:
-            raise ValueError(f"{path} params_ref must have shape [N, T+1, 5]")
-        if self.radii_ref.ndim != 3 or self.radii_ref.shape[0] != count or self.radii_ref.shape[2] < self.theta_count:
-            raise ValueError(f"{path} radii_ref must have shape [N, T+1, >=theta_count]")
-        if self.params_ref.shape[1] != self.ip_ref.shape[1] or self.radii_ref.shape[1] != self.ip_ref.shape[1]:
-            raise ValueError(f"{path} ip_ref, params_ref, and radii_ref must have matching time dimension")
-        for name, arr in (("ip_ref", self.ip_ref), ("params_ref", self.params_ref), ("radii_ref", self.radii_ref)):
-            if not np.all(np.isfinite(arr)):
-                raise ValueError(f"{path} contains non-finite {name}")
-        if not np.all(self.radii_ref[:, :, : self.theta_count] > 0.0):
-            raise ValueError(f"{path} contains non-positive radii_ref values")
-        for name, arr in (("zone", self.zone), ("shot_id", self.shot_id), ("source_index", self.source_index), ("split", self.split)):
-            if arr.shape != (count,):
-                raise ValueError(f"{path} {name} must have one value per row")
-
-    def __len__(self) -> int:
-        return int(self.ip_ref.shape[0])
-
-    def rows(self, indices: np.ndarray | list[int] | tuple[int, ...], *, steps: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        idx = np.asarray(indices, dtype=np.int64).reshape(-1)
-        if idx.size == 0:
-            raise ValueError("feasible target row lookup requires at least one index")
-        if np.any((idx < 0) | (idx >= len(self))):
-            raise IndexError("feasible generated target row index out of range")
-        wanted = int(steps) + 1
-        if self.ip_ref.shape[1] != wanted:
-            raise ValueError(
-                f"feasible generated targets have {self.ip_ref.shape[1] - 1} steps, "
-                f"but environment requested {int(steps)}"
-            )
-        return (
-            self.ip_ref[idx].astype(float, copy=True),
-            self.params_ref[idx].astype(float, copy=True),
-            self.radii_ref[idx, :, : self.theta_count].astype(float, copy=True),
-        )
-
-
 def boundary_points_from_parameters(parameters: Tensor, theta: Tensor) -> Tensor:
     R0 = parameters[..., 0][..., None]
     Z0 = parameters[..., 1][..., None]
@@ -520,8 +345,6 @@ def generate_reference_batch(
     source_indices: np.ndarray | None = None,
     source_times_s: np.ndarray | None = None,
     boundary_replay_library: T15ReplayBoundaryLibrary | None = None,
-    feasible_target_library: FeasibleGeneratedTargetLibrary | None = None,
-    target_indices: np.ndarray | None = None,
     boundary_center: tuple[float, float] | np.ndarray | None = None,
 ) -> ReferenceBatch:
     dev = torch.device(device)
@@ -535,7 +358,6 @@ def generate_reference_batch(
     shot_id_arr = None if shot_ids is None else np.asarray(shot_ids).reshape(-1)
     source_index_arr = None if source_indices is None else np.asarray(source_indices).reshape(-1)
     source_time_arr = None if source_times_s is None else np.asarray(source_times_s, dtype=float).reshape(-1)
-    target_index_arr = None if target_indices is None else np.asarray(target_indices, dtype=np.int64).reshape(-1)
     if config.boundary.kind == "t15_replay_segment_conditioned":
         if shot_id_arr is None or shot_id_arr.shape[0] != B:
             raise ValueError("t15_replay_segment_conditioned requires one shot id per reset")
@@ -554,27 +376,6 @@ def generate_reference_batch(
             raise ValueError("replay_window Ip requires one shot id per reset")
         if boundary_replay_library is None:
             raise ValueError("replay_window Ip requires a T15ReplayBoundaryLibrary")
-    if config.ip.kind == "feasible_generated_window" or config.boundary.kind == "feasible_generated_window":
-        if config.ip.kind != "feasible_generated_window" or config.boundary.kind != "feasible_generated_window":
-            raise ValueError("feasible_generated_window must be used for both Ip and boundary")
-        if feasible_target_library is None:
-            raise ValueError("feasible_generated_window requires a FeasibleGeneratedTargetLibrary")
-        if target_index_arr is None or target_index_arr.shape[0] != B:
-            raise ValueError("feasible_generated_window requires one target index per reset")
-        ip_np, params_np, radii_np = feasible_target_library.rows(target_index_arr, steps=int(steps))
-        params_t = torch.as_tensor(params_np, dtype=torch.float64, device=dev)
-        radii = torch.as_tensor(radii_np, dtype=torch.float64, device=dev)
-        points = boundary_points_from_parameters(params_t, theta)
-        computed_radii = radii_from_points(points, params_t[..., 0:2])
-        if not torch.allclose(radii, computed_radii, rtol=1.0e-4, atol=1.0e-5):
-            radii = computed_radii
-        return ReferenceBatch(
-            ip=torch.as_tensor(ip_np, dtype=torch.float64, device=dev),
-            parameters=params_t,
-            points=points,
-            radii=radii,
-            theta=theta,
-        )
 
     for b in range(B):
         if config.ip.kind == "hold_reset":
@@ -595,14 +396,6 @@ def generate_reference_batch(
                 rng,
                 dt=float(config.t_step),
             )
-        elif config.ip.kind == "generated_segment_profile":
-            ip[b] = sample_generated_segment_profile(
-                config.ip,
-                float(initial_ip_np[b]),
-                int(steps),
-                rng,
-                dt=float(config.t_step),
-            ).ip
         elif config.ip.kind == "hold_boundary_eval_profile":
             ip[b] = _hold_boundary_eval_profile_ip(
                 config.ip,
@@ -705,139 +498,6 @@ def _segmented_ip(cfg: IpReferenceConfig, start: float, steps: int, rng: np.rand
         previous_ramp_direction = ramp_direction
         k += int(seg_len)
     return values
-
-
-def sample_generated_segment_profile(
-    cfg: IpReferenceConfig,
-    start: float,
-    steps: int,
-    rng: np.random.Generator,
-    *,
-    dt: float,
-    forced_mode: str | None = None,
-) -> GeneratedSegmentProfileSample:
-    if cfg.limits_path is None:
-        raise ValueError("generated_segment_profile requires limits_path")
-    envelope = load_generated_envelope(cfg.limits_path)
-    lo = float(envelope.ip_min_a)
-    hi = float(envelope.ip_max_a)
-    rate_max = float(envelope.ip_abs_rate_max_aps)
-    start_ip = float(start)
-    if not (lo <= start_ip <= hi):
-        raise ValueError(f"generated_segment_profile reset Ip {start_ip:g} is outside bounds [{lo:g}, {hi:g}]")
-    step_count = int(steps)
-    mixed_min_steps = _generated_mixed_min_steps(cfg, step_count)
-    if step_count < 2 * mixed_min_steps:
-        raise ValueError(
-            "generated_segment_profile episode is too short for mixed modes: "
-            f"steps={step_count}, segment_min_steps={mixed_min_steps}"
-        )
-    if forced_mode is not None and forced_mode not in GENERATED_IP_MODES:
-        raise ValueError(f"unknown generated Ip mode: {forced_mode}")
-
-    for _attempt in range(1024):
-        mode = forced_mode or str(GENERATED_IP_MODES[int(rng.integers(0, len(GENERATED_IP_MODES)))])
-        out = np.full((step_count + 1,), start_ip, dtype=float)
-        lengths: tuple[int, ...]
-        if mode == "hold":
-            return GeneratedSegmentProfileSample(ip=out, mode=mode, segment_lengths=(step_count,))
-        if mode in {"ramp_up", "ramp_down"}:
-            direction = 1 if mode == "ramp_up" else -1
-            ramp_shape = "linear"
-            delta = _sample_generated_delta(
-                current=start_ip,
-                direction=direction,
-                lo=lo,
-                hi=hi,
-                rate_max=rate_max,
-                steps=step_count,
-                dt=dt,
-                ramp_peak_factor=_ramp_peak_factor(ramp_shape),
-                rng=rng,
-            )
-            if delta is None:
-                continue
-            out = _shaped_ramp(start_ip, start_ip + direction * delta, step_count, shape=ramp_shape)
-            lengths = (step_count,)
-        else:
-            first_len = int(rng.integers(mixed_min_steps, step_count - mixed_min_steps + 1))
-            second_len = step_count - first_len
-            if mode.startswith("hold_then_"):
-                direction = 1 if mode.endswith("_up") else -1
-                ramp_steps = second_len
-                ramp_shape = "ease_in" if bool(cfg.smooth_ramps) else "linear"
-                delta = _sample_generated_delta(
-                    current=start_ip,
-                    direction=direction,
-                    lo=lo,
-                    hi=hi,
-                    rate_max=rate_max,
-                    steps=ramp_steps,
-                    dt=dt,
-                    ramp_peak_factor=_ramp_peak_factor(ramp_shape),
-                    rng=rng,
-                )
-                if delta is None:
-                    continue
-                out[: first_len + 1] = start_ip
-                out[first_len:] = _shaped_ramp(start_ip, start_ip + direction * delta, ramp_steps, shape=ramp_shape)
-                lengths = (first_len, second_len)
-            else:
-                direction = 1 if mode.startswith("up_") else -1
-                ramp_steps = first_len
-                ramp_shape = "ease_out" if bool(cfg.smooth_ramps) else "linear"
-                delta = _sample_generated_delta(
-                    current=start_ip,
-                    direction=direction,
-                    lo=lo,
-                    hi=hi,
-                    rate_max=rate_max,
-                    steps=ramp_steps,
-                    dt=dt,
-                    ramp_peak_factor=_ramp_peak_factor(ramp_shape),
-                    rng=rng,
-                )
-                if delta is None:
-                    continue
-                ramp = _shaped_ramp(start_ip, start_ip + direction * delta, ramp_steps, shape=ramp_shape)
-                out[: ramp_steps + 1] = ramp
-                out[ramp_steps:] = ramp[-1]
-                lengths = (first_len, second_len)
-        if (
-            np.all(np.isfinite(out))
-            and np.nanmin(out) >= lo - 1.0e-9
-            and np.nanmax(out) <= hi + 1.0e-9
-            and _reference_signed_rate_ok(out, max_positive_rate=rate_max, max_negative_abs_rate=rate_max, dt=dt)
-        ):
-            return GeneratedSegmentProfileSample(ip=out, mode=mode, segment_lengths=lengths)
-    raise ValueError("failed to sample a generated_segment_profile Ip reference")
-
-
-def _generated_mixed_min_steps(cfg: IpReferenceConfig, steps: int) -> int:
-    return max(1, int(cfg.segment_min_steps))
-
-
-def _sample_generated_delta(
-    *,
-    current: float,
-    direction: int,
-    lo: float,
-    hi: float,
-    rate_max: float,
-    steps: int,
-    dt: float,
-    ramp_peak_factor: float,
-    rng: np.random.Generator,
-) -> float | None:
-    if int(direction) > 0:
-        room = max(float(hi) - float(current), 0.0)
-    else:
-        room = max(float(current) - float(lo), 0.0)
-    delta_high = min(room, float(rate_max) * float(dt) * float(steps) / max(float(ramp_peak_factor), 1.0e-12))
-    if not np.isfinite(delta_high) or delta_high <= 1.0e-6:
-        return None
-    delta_low = min(delta_high, max(1.0e-6, 0.10 * delta_high))
-    return float(rng.uniform(delta_low, delta_high))
 
 
 def _segmented_profile_ip(
@@ -1395,8 +1055,6 @@ def _boundary_params(cfg: BoundaryReferenceConfig, start: np.ndarray, steps: int
     out = np.repeat(start.reshape(1, 5), steps + 1, axis=0)
     if cfg.kind == "static_initial_parameters":
         return out
-    if cfg.kind == "generated_parameter_profile":
-        return sample_generated_boundary_parameters(cfg, start, steps, rng, dt=dt).parameters
     if cfg.kind != "rate_limited_parameters":
         raise ValueError(f"unknown boundary reference kind: {cfg.kind}")
     # Rate-limited generation around the initial handover parameters. Bounds are
@@ -1410,237 +1068,3 @@ def _boundary_params(cfg: BoundaryReferenceConfig, start: np.ndarray, steps: int
         out[k] = prev
     return out
 
-
-def _generated_mode_direction(mode: str) -> int:
-    if mode in {"ramp_up", "hold_then_up", "up_then_hold"}:
-        return 1
-    if mode in {"ramp_down", "hold_then_down", "down_then_hold"}:
-        return -1
-    raise ValueError(f"generated ramp mode has no direction: {mode}")
-
-
-def _opposite_generated_mode(mode: str) -> str:
-    mapping = {
-        "ramp_up": "ramp_down",
-        "ramp_down": "ramp_up",
-        "hold_then_up": "hold_then_down",
-        "hold_then_down": "hold_then_up",
-        "up_then_hold": "down_then_hold",
-        "down_then_hold": "up_then_hold",
-    }
-    try:
-        return mapping[mode]
-    except KeyError as exc:
-        raise ValueError(f"unknown generated ramp mode: {mode}") from exc
-
-
-def _generated_mode_series(
-    *,
-    current: float,
-    mode: str,
-    lo: float,
-    hi: float,
-    rate_max: float,
-    steps: int,
-    mixed_min_steps: int,
-    rng: np.random.Generator,
-    dt: float,
-    smooth: bool,
-) -> tuple[np.ndarray, int, tuple[int, ...]] | None:
-    step_count = int(steps)
-    direction = _generated_mode_direction(mode)
-    if mode in {"ramp_up", "ramp_down"}:
-        ramp_shape = "linear"
-        delta = _sample_generated_delta(
-            current=current,
-            direction=direction,
-            lo=lo,
-            hi=hi,
-            rate_max=rate_max,
-            steps=step_count,
-            dt=dt,
-            ramp_peak_factor=_ramp_peak_factor(ramp_shape),
-            rng=rng,
-        )
-        if delta is None:
-            return None
-        series = _shaped_ramp(current, current + float(direction) * float(delta), step_count, shape=ramp_shape)
-        return series, direction, (step_count,)
-
-    first_len = int(rng.integers(mixed_min_steps, step_count - mixed_min_steps + 1))
-    second_len = step_count - first_len
-    if mode.startswith("hold_then_"):
-        ramp_steps = second_len
-        ramp_shape = "ease_in" if bool(smooth) else "linear"
-        delta = _sample_generated_delta(
-            current=current,
-            direction=direction,
-            lo=lo,
-            hi=hi,
-            rate_max=rate_max,
-            steps=ramp_steps,
-            dt=dt,
-            ramp_peak_factor=_ramp_peak_factor(ramp_shape),
-            rng=rng,
-        )
-        if delta is None:
-            return None
-        series = np.full((step_count + 1,), float(current), dtype=float)
-        series[first_len:] = _shaped_ramp(
-            current,
-            current + float(direction) * float(delta),
-            ramp_steps,
-            shape=ramp_shape,
-        )
-        return series, direction, (first_len, second_len)
-
-    ramp_steps = first_len
-    ramp_shape = "ease_out" if bool(smooth) else "linear"
-    delta = _sample_generated_delta(
-        current=current,
-        direction=direction,
-        lo=lo,
-        hi=hi,
-        rate_max=rate_max,
-        steps=ramp_steps,
-        dt=dt,
-        ramp_peak_factor=_ramp_peak_factor(ramp_shape),
-        rng=rng,
-    )
-    if delta is None:
-        return None
-    ramp = _shaped_ramp(current, current + float(direction) * float(delta), ramp_steps, shape=ramp_shape)
-    series = np.full((step_count + 1,), float(ramp[-1]), dtype=float)
-    series[: ramp_steps + 1] = ramp
-    return series, direction, (first_len, second_len)
-
-
-def sample_generated_boundary_parameters(
-    cfg: BoundaryReferenceConfig,
-    start: np.ndarray,
-    steps: int,
-    rng: np.random.Generator,
-    *,
-    dt: float,
-    forced_combo: tuple[str, ...] | None = None,
-    forced_directions: dict[str, int] | None = None,
-    forced_modes: dict[str, str] | None = None,
-) -> GeneratedBoundaryProfileSample:
-    if cfg.envelope_path is None:
-        raise ValueError("generated_parameter_profile requires envelope_path")
-    envelope = load_generated_envelope(cfg.envelope_path)
-    start_arr = np.asarray(start, dtype=float).reshape(5)
-    if not np.all(np.isfinite(start_arr)):
-        raise ValueError("generated_parameter_profile start parameters must be finite")
-    step_count = int(steps)
-    if step_count <= 0:
-        raise ValueError("generated_parameter_profile requires at least one step")
-    mixed_min_steps = max(1, int(cfg.segment_min_steps))
-    if step_count < 2 * mixed_min_steps:
-        raise ValueError(
-            "generated_parameter_profile episode is too short for mixed modes: "
-            f"steps={step_count}, segment_min_steps={mixed_min_steps}"
-        )
-    if forced_combo is not None:
-        combo = tuple(str(v) for v in forced_combo)
-        if combo not in GENERATED_BOUNDARY_COMBOS:
-            raise ValueError(f"unknown generated boundary combo: {combo}")
-    else:
-        combo = tuple(GENERATED_BOUNDARY_COMBOS[int(rng.integers(0, len(GENERATED_BOUNDARY_COMBOS)))])
-
-    start_state = {
-        "A0": float(start_arr[2]),
-        "elongation_excess": max(float(start_arr[3]) - 1.0, 0.0),
-        "delta": float(start_arr[4]),
-    }
-    bounds = {
-        "A0": (float(envelope.A0_min_m), float(envelope.A0_max_m), float(envelope.A0_abs_rate_max_mps)),
-        "elongation_excess": (float(envelope.elongation_excess_min), float(envelope.elongation_excess_max), float(envelope.kappa_abs_rate_max_1ps)),
-        "delta": (float(envelope.delta_min), float(envelope.delta_max), float(envelope.delta_abs_rate_max_1ps)),
-    }
-    out = np.repeat(start_arr.reshape(1, 5), step_count + 1, axis=0)
-    if not combo:
-        return GeneratedBoundaryProfileSample(parameters=out, combo=combo, directions={}, modes={})
-
-    for _attempt in range(1024):
-        values: dict[str, np.ndarray] = {}
-        directions: dict[str, int] = {}
-        modes: dict[str, str] = {}
-        ok = True
-        for key in combo:
-            lo, hi, rate_max = bounds[key]
-            current = float(np.clip(start_state[key], lo, hi))
-            if forced_modes is not None and key in forced_modes:
-                mode = str(forced_modes[key])
-                if mode not in GENERATED_RAMP_MODES:
-                    raise ValueError(f"unknown generated boundary mode for {key}: {mode}")
-                forced_direction = (forced_directions or {}).get(key)
-                if forced_direction is not None and int(forced_direction) != _generated_mode_direction(mode):
-                    raise ValueError(f"forced mode and direction disagree for {key}: {mode}, {forced_direction}")
-            elif forced_directions is not None and key in forced_directions:
-                wanted_direction = int(forced_directions[key])
-                candidates = [m for m in GENERATED_RAMP_MODES if _generated_mode_direction(m) == wanted_direction]
-                mode = str(candidates[int(rng.integers(0, len(candidates)))])
-            else:
-                mode = str(GENERATED_RAMP_MODES[int(rng.integers(0, len(GENERATED_RAMP_MODES)))])
-
-            sampled = _generated_mode_series(
-                current=current,
-                mode=mode,
-                lo=lo,
-                hi=hi,
-                rate_max=rate_max,
-                steps=step_count,
-                mixed_min_steps=mixed_min_steps,
-                rng=rng,
-                dt=dt,
-                smooth=True,
-            )
-            if sampled is None:
-                mode = _opposite_generated_mode(mode)
-                sampled = _generated_mode_series(
-                    current=current,
-                    mode=mode,
-                    lo=lo,
-                    hi=hi,
-                    rate_max=rate_max,
-                    steps=step_count,
-                    mixed_min_steps=mixed_min_steps,
-                    rng=rng,
-                    dt=dt,
-                    smooth=True,
-                )
-            if sampled is None:
-                ok = False
-                break
-            series, direction, _lengths = sampled
-            if not _reference_signed_rate_ok(series, max_positive_rate=rate_max, max_negative_abs_rate=rate_max, dt=dt):
-                ok = False
-                break
-            values[key] = series
-            directions[key] = direction
-            modes[key] = mode
-        if not ok:
-            continue
-        sample = out.copy()
-        for key in GENERATED_BOUNDARY_KEYS:
-            if key not in values:
-                values[key] = np.full((step_count + 1,), start_state[key], dtype=float)
-        sample[:, 0] = start_arr[0]
-        sample[:, 1] = start_arr[1]
-        sample[:, 2] = values["A0"]
-        sample[:, 3] = 1.0 + values["elongation_excess"]
-        sample[:, 4] = values["delta"]
-        if (
-            np.all(np.isfinite(sample))
-            and np.nanmin(sample[:, 2]) >= envelope.A0_min_m - 1.0e-9
-            and np.nanmax(sample[:, 2]) <= envelope.A0_max_m + 1.0e-9
-            and np.nanmin(sample[:, 3] - 1.0) >= envelope.elongation_excess_min - 1.0e-9
-            and np.nanmax(sample[:, 3] - 1.0) <= envelope.elongation_excess_max + 1.0e-9
-            and np.nanmin(sample[:, 4]) >= envelope.delta_min - 1.0e-9
-            and np.nanmax(sample[:, 4]) <= envelope.delta_max + 1.0e-9
-            and np.allclose(sample[:, 0], start_arr[0])
-            and np.allclose(sample[:, 1], start_arr[1])
-        ):
-            return GeneratedBoundaryProfileSample(parameters=sample, combo=combo, directions=directions, modes=modes)
-    raise ValueError("failed to sample generated_parameter_profile boundary parameters")

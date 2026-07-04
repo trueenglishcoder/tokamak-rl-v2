@@ -189,7 +189,7 @@ def _reference(raw: Mapping[str, Any], base: Path) -> ReferenceConfig:
     _reject_unknown_keys(ip_raw, set(IpReferenceConfig.__dataclass_fields__), prefix="reference.ip")
     _reject_unknown_keys(b_raw, set(BoundaryReferenceConfig.__dataclass_fields__), prefix="reference.boundary")
     kind = str(ip_raw.get("kind", "segmented")).lower()
-    if kind in {"segmented_profile", "single_segment_profile", "replay_window", "generated_segment_profile", "feasible_generated_window", "hold_boundary_eval_profile", "hold_boundary_eval_cut_profile"}:
+    if kind in {"segmented_profile", "single_segment_profile", "replay_window", "hold_boundary_eval_profile", "hold_boundary_eval_cut_profile"}:
         min_value = float(ip_raw.get("min", 1.0))
         max_value = float(ip_raw.get("max", min_value))
         rate_limit = float(ip_raw.get("rate_limit", 1.0))
@@ -199,8 +199,6 @@ def _reference(raw: Mapping[str, Any], base: Path) -> ReferenceConfig:
         rate_limit = float(ip_raw["rate_limit"])
     replay_reference_raw = b_raw.get("replay_reference_dir")
     envelope_raw = b_raw.get("envelope_path")
-    ip_feasible_raw = ip_raw.get("feasible_reference_dir")
-    boundary_feasible_raw = b_raw.get("feasible_reference_dir", ip_feasible_raw)
     return ReferenceConfig(
         duration_s=float(raw.get("duration_s", 1.0)),
         t_step=float(raw.get("t_step", 0.001)),
@@ -215,7 +213,6 @@ def _reference(raw: Mapping[str, Any], base: Path) -> ReferenceConfig:
             hold_probability=float(ip_raw.get("hold_probability", 0.35)),
             kind=kind,
             limits_path=None if ip_raw.get("limits_path") is None else _resolve(base, ip_raw.get("limits_path")),
-            feasible_reference_dir=None if ip_feasible_raw is None else _resolve(base, ip_feasible_raw),
             start_mode=str(ip_raw.get("start_mode", "reset_ip")),
             parent_steps=int(ip_raw.get("parent_steps", 0)),
             plateau_min_fraction=float(ip_raw.get("plateau_min_fraction", 0.25)),
@@ -238,7 +235,6 @@ def _reference(raw: Mapping[str, Any], base: Path) -> ReferenceConfig:
             rate_limits={str(k): float(v) for k, v in _mapping(b_raw.get("rate_limits", {}), "rate_limits").items()},
             replay_reference_dir=None if replay_reference_raw is None else _resolve(base, replay_reference_raw),
             envelope_path=None if envelope_raw is None else _resolve(base, envelope_raw),
-            feasible_reference_dir=None if boundary_feasible_raw is None else _resolve(base, boundary_feasible_raw),
             segment_min_steps=int(b_raw.get("segment_min_steps", 30)),
         ),
     )
@@ -339,11 +335,11 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
         raise ValueError("sim.reset_source=csv_initial_states requires sim.csv_initial_state_library")
     if cfg.sim.csv_initial_state_split not in {"train", "holdout", "all"}:
         raise ValueError("sim.csv_initial_state_split must be train, holdout, or all")
-    csv_boundary_kinds = {"hold_reset_boundary", "t15_replay_segment_conditioned", "generated_parameter_profile", "feasible_generated_window"}
+    csv_boundary_kinds = {"hold_reset_boundary", "t15_replay_segment_conditioned"}
     if cfg.sim.reset_source == "csv_initial_states" and cfg.reference.boundary.kind not in csv_boundary_kinds:
         raise ValueError(
             "sim.reset_source=csv_initial_states requires reference.boundary.kind="
-            "hold_reset_boundary, t15_replay_segment_conditioned, generated_parameter_profile, or feasible_generated_window"
+            "hold_reset_boundary or t15_replay_segment_conditioned"
         )
     if cfg.sim.initial_ranges is not None:
         expected = {"R0", "Z0", "A0", "kappa", "delta"}
@@ -355,10 +351,10 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
     if int(cfg.reference.theta_count) <= 0:
         raise ValueError("reference.theta_count must be positive")
     ip = cfg.reference.ip
-    profile_kinds = {"segmented_profile", "single_segment_profile", "generated_segment_profile", "hold_boundary_eval_profile", "hold_boundary_eval_cut_profile"}
-    if ip.kind not in {"segmented", "hold_reset", "segmented_profile", "single_segment_profile", "replay_window", "generated_segment_profile", "feasible_generated_window", "hold_boundary_eval_profile", "hold_boundary_eval_cut_profile"}:
+    profile_kinds = {"segmented_profile", "single_segment_profile", "hold_boundary_eval_profile", "hold_boundary_eval_cut_profile"}
+    if ip.kind not in {"segmented", "hold_reset", "segmented_profile", "single_segment_profile", "replay_window", "hold_boundary_eval_profile", "hold_boundary_eval_cut_profile"}:
         raise ValueError("reference.ip.kind is unsupported")
-    if ip.kind not in profile_kinds | {"replay_window", "feasible_generated_window"}:
+    if ip.kind not in profile_kinds | {"replay_window"}:
         if not (math.isfinite(ip.min) and math.isfinite(ip.max) and ip.max >= ip.min):
             raise ValueError("reference.ip min/max are invalid")
         if _range_crosses_or_touches_zero(float(ip.min), float(ip.max)):
@@ -379,16 +375,6 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
                 raise ValueError("reference.ip segmented_profile step bounds are invalid")
             if ip.segment_count_min < 2 or ip.segment_count_max < ip.segment_count_min:
                 raise ValueError("reference.ip segmented_profile count bounds are invalid")
-        if ip.kind == "generated_segment_profile":
-            if int(ip.segment_min_steps) <= 0:
-                raise ValueError("reference.ip generated_segment_profile requires positive segment_min_steps")
-            if int(cfg.sim.max_episode_steps) < 2 * int(ip.segment_min_steps):
-                raise ValueError(
-                    "reference.ip generated_segment_profile requires max_episode_steps >= "
-                    "2 * segment_min_steps for mixed modes"
-                )
-            if not bool(ip.smooth_ramps):
-                raise ValueError("reference.ip generated_segment_profile requires smooth_ramps=true")
         if ip.kind in {"hold_boundary_eval_profile", "hold_boundary_eval_cut_profile"}:
             if ip.segment_min_steps <= 0 or ip.segment_max_steps < ip.segment_min_steps:
                 raise ValueError(f"reference.ip {ip.kind} step bounds are invalid")
@@ -432,14 +418,7 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
                 raise ValueError(f"reference.ip.{name} must be non-negative")
         if int(ip.hold_max_steps) < int(ip.hold_min_steps):
             raise ValueError("reference.ip hold step bounds are invalid")
-    if ip.kind == "feasible_generated_window":
-        if ip.feasible_reference_dir is None:
-            raise ValueError("reference.ip.kind=feasible_generated_window requires feasible_reference_dir")
-        if not ip.feasible_reference_dir.exists():
-            raise ValueError(f"reference.ip.feasible_reference_dir does not exist: {ip.feasible_reference_dir}")
-        if cfg.sim.reset_source != "csv_initial_states":
-            raise ValueError("reference.ip.kind=feasible_generated_window requires csv initial states")
-    if ip.kind not in profile_kinds | {"replay_window", "feasible_generated_window"}:
+    if ip.kind not in profile_kinds | {"replay_window"}:
         if not math.isfinite(ip.rate_limit) or ip.rate_limit < 0.0:
             raise ValueError("reference.ip.rate_limit must be finite and non-negative")
         if ip.segment_min_steps <= 0 or ip.segment_max_steps < ip.segment_min_steps:
@@ -453,37 +432,10 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
         "rate_limited_parameters",
         "hold_reset_boundary",
         "t15_replay_segment_conditioned",
-        "generated_parameter_profile",
-        "feasible_generated_window",
     }:
         raise ValueError("reference.boundary.kind is unsupported")
-    if cfg.reference.boundary.kind in {"hold_reset_boundary", "t15_replay_segment_conditioned", "generated_parameter_profile", "feasible_generated_window"} and int(cfg.reference.theta_count) != int(cfg.sim.angles):
+    if cfg.reference.boundary.kind in {"hold_reset_boundary", "t15_replay_segment_conditioned"} and int(cfg.reference.theta_count) != int(cfg.sim.angles):
         raise ValueError("reference.theta_count must equal sim.angles for sampled boundary references")
-    if cfg.reference.boundary.kind == "feasible_generated_window":
-        if cfg.reference.boundary.feasible_reference_dir is None:
-            raise ValueError("reference.boundary.kind=feasible_generated_window requires feasible_reference_dir")
-        if not cfg.reference.boundary.feasible_reference_dir.exists():
-            raise ValueError(f"reference.boundary.feasible_reference_dir does not exist: {cfg.reference.boundary.feasible_reference_dir}")
-        if cfg.reference.ip.kind != "feasible_generated_window":
-            raise ValueError("reference.boundary.kind=feasible_generated_window requires reference.ip.kind=feasible_generated_window")
-        if cfg.reference.ip.feasible_reference_dir != cfg.reference.boundary.feasible_reference_dir:
-            raise ValueError("feasible_generated_window Ip and boundary must use the same feasible_reference_dir")
-        if cfg.sim.reset_source != "csv_initial_states":
-            raise ValueError("reference.boundary.kind=feasible_generated_window requires csv initial states with params0")
-    if cfg.reference.boundary.kind == "generated_parameter_profile":
-        if cfg.reference.boundary.envelope_path is None:
-            raise ValueError("reference.boundary.kind=generated_parameter_profile requires envelope_path")
-        if not cfg.reference.boundary.envelope_path.exists():
-            raise ValueError(f"reference.boundary.envelope_path does not exist: {cfg.reference.boundary.envelope_path}")
-        if cfg.sim.reset_source != "csv_initial_states":
-            raise ValueError("reference.boundary.kind=generated_parameter_profile requires csv initial states with params0")
-        if int(cfg.reference.boundary.segment_min_steps) <= 0:
-            raise ValueError("reference.boundary generated_parameter_profile requires positive segment_min_steps")
-        if int(cfg.sim.max_episode_steps) < 2 * int(cfg.reference.boundary.segment_min_steps):
-            raise ValueError(
-                "reference.boundary generated_parameter_profile requires max_episode_steps >= "
-                "2 * segment_min_steps for mixed modes"
-            )
     if cfg.reference.boundary.kind == "t15_replay_segment_conditioned":
         replay_dir = cfg.reference.boundary.replay_reference_dir
         if replay_dir is None:
@@ -588,19 +540,13 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
             raise ValueError("training.production_mode requires jdot_command action contract without delta-Jdot limits")
         if not cfg.sim.terminate_on_boundary_loss or not cfg.sim.terminate_on_current_limit:
             raise ValueError("training.production_mode requires boundary and current terminations")
-        if is_t15_new_data and cfg.reference.ip.kind not in {"segmented_profile", "single_segment_profile", "replay_window", "generated_segment_profile", "feasible_generated_window"}:
-            raise ValueError("T15MD_new_data production requires reference.ip.kind=segmented_profile, single_segment_profile, replay_window, generated_segment_profile, or feasible_generated_window")
+        if is_t15_new_data and cfg.reference.ip.kind not in {"segmented_profile", "single_segment_profile", "replay_window"}:
+            raise ValueError("T15MD_new_data production requires reference.ip.kind=segmented_profile, single_segment_profile, or replay_window")
         if config_name == "T15MD_4pfc.toml" and cfg.reference.ip.kind != "replay_window":
             raise ValueError("T15MD_4pfc production requires reference.ip.kind=replay_window")
         if cfg.reference.ip.kind == "single_segment_profile":
             if cfg.reference.boundary.kind != "hold_reset_boundary":
                 raise ValueError("training.production_mode single_segment_profile requires reference.boundary.kind=hold_reset_boundary")
-        elif cfg.reference.ip.kind == "generated_segment_profile":
-            if cfg.reference.boundary.kind != "generated_parameter_profile":
-                raise ValueError("training.production_mode generated_segment_profile requires reference.boundary.kind=generated_parameter_profile")
-        elif cfg.reference.ip.kind == "feasible_generated_window":
-            if cfg.reference.boundary.kind != "feasible_generated_window":
-                raise ValueError("training.production_mode feasible_generated_window requires reference.boundary.kind=feasible_generated_window")
         elif cfg.reference.boundary.kind != "t15_replay_segment_conditioned":
             raise ValueError("training.production_mode requires reference.boundary.kind=t15_replay_segment_conditioned")
         if cfg.reference.ip.kind == "replay_window" and cfg.observation.actor_kind != "controller_state_v6":

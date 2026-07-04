@@ -1561,27 +1561,6 @@ def test_t15_replay_boundary_reference_accepts_cuda_reset_radii(tmp_path: Path) 
     assert torch.allclose(batch.radii.cpu(), torch.tensor([[[10.0, 20.0], [10.1, 20.1], [10.2, 20.2]]], dtype=torch.float64))
 
 
-def test_actuator_legality_analysis_reports_delta_jdot_plus_twenty_percent(tmp_path: Path) -> None:
-    from scripts.analyze_t15_actuator_legality import analyze
-
-    coils = tmp_path / "coils"
-    coils.mkdir()
-    rows = [
-        [0.000, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        [0.001, 0.0, 20.0, 0.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        [0.002, 0.0, 10.0, 0.0, 40.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        [0.003, 0.0, 0.0, 0.0, 80.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-    ]
-    with (coils / "t15md_0001_coils.csv").open("w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f, delimiter=";")
-        writer.writerows(rows)
-
-    result = analyze(tmp_path, min_dt_s=0.0005)
-    limits = result["recommended_limits"]["delta_derivative_aps_plus_20pct"]
-    assert limits["pfc"][0] == pytest.approx(24000.0)
-    assert limits["sol"][1] == pytest.approx(36000.0)
-
-
 def test_hold_reset_ip_reference_uses_actual_reset_ip() -> None:
     cfg = load_experiment_config(CONFIG)
     hold_ip = replace(

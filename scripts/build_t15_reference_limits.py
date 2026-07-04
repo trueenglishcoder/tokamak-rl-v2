@@ -12,7 +12,7 @@ SHOT_RE = re.compile(r"t15md_(\d+)_ip\.csv$")
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Build aggregate T15 Ip bounds/rates for generated RL references.")
+    ap = argparse.ArgumentParser(description="Build aggregate T15 Ip bounds/rates for T15 reference diagnostics.")
     ap.add_argument("--data-root", default="../tokamak-sim/data/t15_data_new")
     ap.add_argument("--ip-glob", default="ip/t15md_*_ip.csv")
     ap.add_argument("--delimiter", default=";")
