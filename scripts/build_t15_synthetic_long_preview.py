@@ -34,7 +34,6 @@ class RealSpace:
     current_high: np.ndarray
     action_abs_p99: np.ndarray
     action_jump_abs_p99: np.ndarray
-    step_deltas: np.ndarray
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -210,18 +209,9 @@ def _load_real_space(
     action_flat = action.reshape(-1, action.shape[-1])
     jdot_flat = jdot.reshape(-1, jdot.shape[-1])
     action_jump = np.diff(action, axis=1).reshape(-1, action.shape[-1])
-    feature_steps = np.concatenate(
-        [
-            np.diff(ip, axis=1).reshape(-1, 1),
-            np.diff(((radii.reshape(-1, radii.shape[-1]) - radii_mean) @ components.T).reshape(ip.shape[0], ip.shape[1], -1), axis=1).reshape(-1, components.shape[0]),
-        ],
-        axis=1,
-    )
-
     cloud_idx = _sample_indices(features.shape[0], max_rows=max_cloud_rows, rng=rng)
     feature_cloud = features[cloud_idx]
     current_cloud = current_flat[cloud_idx]
-    step_delta_cloud = _sample_rows(feature_steps, max_rows=max_cloud_rows, rng=rng)
     feature_center = np.median(feature_cloud, axis=0)
     feature_scale = np.percentile(np.abs(feature_cloud - feature_center.reshape(1, -1)), 90, axis=0)
     feature_scale = np.where(np.isfinite(feature_scale) & (feature_scale > 1.0e-12), feature_scale, 1.0)
@@ -249,7 +239,6 @@ def _load_real_space(
         current_high=np.max(current_flat, axis=0) + current_envelope_margin * current_limits,
         action_abs_p99=np.percentile(np.abs(action_flat), 99.5, axis=0) * float(wiggle_room),
         action_jump_abs_p99=np.percentile(np.abs(action_jump), 99.5, axis=0) * float(wiggle_room),
-        step_deltas=step_delta_cloud * float(wiggle_room),
     )
 
 
@@ -302,7 +291,7 @@ def _generate_previews(
             reject_counts[reason] = reject_counts.get(reason, 0) + 1
             continue
         currents = _estimate_currents(real=real, features=features, knn=int(knn))
-        currents = _smooth_currents(currents, width=9)
+        currents = _smooth_currents(currents, width=31)
         reason = _check_currents(real, currents, dt=dt, wiggle_room=wiggle_room)
         if reason is not None:
             reject_counts[reason] = reject_counts.get(reason, 0) + 1
@@ -322,55 +311,56 @@ def _generate_previews(
 
 def _sample_feature_trajectory(*, real: RealSpace, start: np.ndarray, steps: int, rng: np.random.Generator) -> np.ndarray:
     dims = start.shape[0]
-    slopes = np.zeros((steps, dims), dtype=np.float64)
     segment_count = int(rng.integers(5, 10))
     cuts = np.sort(rng.choice(np.arange(90, steps - 90), size=max(0, segment_count - 1), replace=False))
     edges = np.concatenate([[0], cuts, [steps]])
-    for lo, hi in zip(edges[:-1], edges[1:]):
-        duration = max(1, int(hi - lo))
-        # Sample a coupled observed local step, but stretch it into a smoother long segment.
-        step_delta = _sample_real_step_delta(real=real, rng=rng)
-        scale = rng.uniform(0.25, 0.95)
-        if rng.random() < 0.18:
-            scale *= -0.7
-        slopes[lo:hi] = step_delta.reshape(1, -1) * scale
-        if duration > 160 and rng.random() < 0.35:
-            drift = _sample_real_step_delta(real=real, rng=rng) * rng.uniform(0.05, 0.25)
-            ramp = np.linspace(0.0, 1.0, duration).reshape(-1, 1)
-            slopes[lo:hi] += ramp * drift.reshape(1, -1)
-    # Smooth only internal slope transitions. The episode edges are untouched.
-    slopes = _blend_internal_transitions(slopes, edges=edges, width=24)
     features = np.empty((steps + 1, dims), dtype=np.float64)
     features[0] = start
-    features[1:] = start.reshape(1, -1) + np.cumsum(slopes, axis=0)
+    current = start.copy()
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        duration = max(1, int(hi - lo))
+        target = _sample_safe_waypoint(real=real, current=current, duration=duration, rng=rng)
+        segment = _interpolate_waypoint(current, target, duration)
+        features[lo + 1 : hi + 1] = segment[1:]
+        current = target
     return features
 
 
-def _sample_real_step_delta(*, real: RealSpace, rng: np.random.Generator) -> np.ndarray:
-    idx = int(rng.integers(0, real.step_deltas.shape[0]))
-    delta = real.step_deltas[idx].copy()
-    delta *= rng.uniform(0.65, 1.15)
-    if rng.random() < 0.08:
-        # Small global sign inversion gives extra coverage while preserving the
-        # coupled direction vector across Ip and the boundary PCA coordinates.
-        delta *= -0.75
-    return delta
+def _sample_safe_waypoint(
+    *,
+    real: RealSpace,
+    current: np.ndarray,
+    duration: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    cloud_n = (real.features - real.feature_center.reshape(1, -1)) / real.feature_scale.reshape(1, -1)
+    current_n = (current - real.feature_center) / real.feature_scale
+    dist = np.sqrt(np.sum((cloud_n - current_n.reshape(1, -1)) ** 2, axis=1))
+
+    # Longer segments may travel farther, but the target is always a coupled
+    # state sampled from the real cloud rather than independently sampled axes.
+    max_dist = np.clip(0.20 + 0.004 * float(duration), 0.45, 1.75)
+    min_dist = 0.04 if rng.random() > 0.18 else 0.0
+    candidates = np.flatnonzero((dist >= min_dist) & (dist <= max_dist))
+    if candidates.size == 0:
+        candidates = np.argsort(dist)[: min(128, dist.shape[0])]
+    idx = int(rng.choice(candidates))
+    target = real.features[idx].copy()
+
+    # Make it new without leaving the local safe manifold: perturb only a small
+    # distance in normalized feature space, then clip to the safe bounds.
+    perturb_n = rng.normal(0.0, 0.025, size=current.shape[0])
+    perturb_n[0] *= 0.5
+    target = target + perturb_n * real.feature_scale
+    return np.minimum(np.maximum(target, real.feature_low), real.feature_high)
 
 
-def _blend_internal_transitions(slopes: np.ndarray, *, edges: np.ndarray, width: int) -> np.ndarray:
-    out = slopes.copy()
-    w = max(2, int(width))
-    for edge in edges[1:-1]:
-        edge = int(edge)
-        lo = max(0, edge - w)
-        hi = min(out.shape[0], edge + w)
-        if hi <= lo + 2:
-            continue
-        left = out[lo].copy()
-        right = out[hi - 1].copy()
-        alpha = np.linspace(0.0, 1.0, hi - lo).reshape(-1, 1)
-        out[lo:hi] = (1.0 - alpha) * left.reshape(1, -1) + alpha * right.reshape(1, -1)
-    return out
+def _interpolate_waypoint(start: np.ndarray, target: np.ndarray, duration: int) -> np.ndarray:
+    alpha = np.linspace(0.0, 1.0, int(duration) + 1, dtype=np.float64).reshape(-1, 1)
+    # Linear in the middle with eased bends at the joins. This keeps long shots
+    # readable while avoiding a hard derivative corner at every waypoint.
+    bend = 0.5 - 0.5 * np.cos(np.pi * alpha)
+    return start.reshape(1, -1) + bend * (target - start).reshape(1, -1)
 
 
 def _check_features(real: RealSpace, features: np.ndarray) -> str | None:
