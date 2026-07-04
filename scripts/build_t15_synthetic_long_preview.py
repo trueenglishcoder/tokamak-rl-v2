@@ -39,6 +39,10 @@ class RealSpace:
     ip_rate_abs_p99: float
     action_abs_p99: np.ndarray
     action_jump_abs_p99: np.ndarray
+    boundary_delta_norm_p70: float
+    boundary_delta_norm_p90: float
+    radii_mean_range_p70: float
+    radii_angle_range_p70: float
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -253,6 +257,11 @@ def _load_real_space(
     feature_scale = np.percentile(np.abs(feature_cloud - feature_center.reshape(1, -1)), 90, axis=0)
     feature_scale = np.where(np.isfinite(feature_scale) & (feature_scale > 1.0e-12), feature_scale, 1.0)
     features_norm = (feature_cloud - feature_center.reshape(1, -1)) / feature_scale.reshape(1, -1)
+    coeffs_seq = coeffs.reshape(ip.shape[0], ip.shape[1], coeffs.shape[-1])
+    coeff_scale = feature_scale[1:].reshape(1, -1)
+    coeff_delta_norm = np.sqrt(np.sum(((coeffs_seq[:, -1, :] - coeffs_seq[:, 0, :]) / coeff_scale) ** 2, axis=1))
+    radii_mean_range = np.ptp(np.mean(radii, axis=2), axis=1)
+    radii_angle_range = np.mean(np.ptp(radii, axis=1), axis=1)
 
     low_q = max(0.0, 0.002 / max(float(wiggle_room), 1.0))
     high_q = 1.0 - low_q
@@ -282,6 +291,10 @@ def _load_real_space(
         ip_rate_abs_p99=float(np.percentile(np.abs(ip_rate), 99.0) * float(wiggle_room)),
         action_abs_p99=np.percentile(np.abs(action_flat), 99.5, axis=0) * float(wiggle_room),
         action_jump_abs_p99=np.percentile(np.abs(action_jump), 99.5, axis=0) * float(wiggle_room),
+        boundary_delta_norm_p70=float(np.percentile(coeff_delta_norm, 70.0)),
+        boundary_delta_norm_p90=float(np.percentile(coeff_delta_norm, 90.0)),
+        radii_mean_range_p70=float(np.percentile(radii_mean_range, 70.0)),
+        radii_angle_range_p70=float(np.percentile(radii_angle_range, 70.0)),
     )
 
 
@@ -334,6 +347,11 @@ def _generate_previews(
             continue
         radii = _features_to_radii(real, features)
         reason = _check_radii(real, radii)
+        if reason is not None:
+            reject_counts[reason] = reject_counts.get(reason, 0) + 1
+            _maybe_print_progress(attempts, accepted, reject_counts, progress_every=progress_every)
+            continue
+        reason = _check_boundary_motion(real, radii)
         if reason is not None:
             reject_counts[reason] = reject_counts.get(reason, 0) + 1
             _maybe_print_progress(attempts, accepted, reject_counts, progress_every=progress_every)
@@ -605,22 +623,37 @@ def _sample_safe_waypoint(
     rng: np.random.Generator,
 ) -> np.ndarray:
     current_n = (current - real.feature_center) / real.feature_scale
-    dist = np.sqrt(np.sum((real.features_norm - current_n.reshape(1, -1)) ** 2, axis=1))
+    boundary_dist = np.sqrt(np.sum((real.features_norm[:, 1:] - current_n.reshape(1, -1)[:, 1:]) ** 2, axis=1))
 
-    # Longer segments may travel farther, but the target is always a coupled
-    # state sampled from the real cloud rather than independently sampled axes.
-    max_dist = np.clip(0.20 + 0.004 * float(duration), 0.45, 1.75)
-    min_dist = 0.04 if rng.random() > 0.18 else 0.0
+    # Longer segments should move the boundary on a real-shot scale. The target
+    # remains a coupled state from the real cloud; we only bias which real
+    # coupled state is selected so long synthetic shots are not boundary-flat.
+    duration_scale = np.sqrt(max(1.0, float(duration)) / 100.0)
+    target_dist = float(np.clip(real.boundary_delta_norm_p70 * duration_scale, 0.35, 2.40))
+    min_dist = 0.35 * target_dist
+    max_dist = max(min_dist + 0.05, 1.85 * target_dist)
     ip_tol = max(12000.0, 0.07 * (float(real.feature_high[0]) - float(real.feature_low[0])))
     ip_mask = np.abs(real.features[:, 0] - float(target_ip)) <= ip_tol
-    candidates = np.flatnonzero((dist >= min_dist) & (dist <= max_dist) & ip_mask)
+    candidates = np.flatnonzero((boundary_dist >= min_dist) & (boundary_dist <= max_dist) & ip_mask)
     if candidates.size == 0:
         ip_tol = max(25000.0, 0.14 * (float(real.feature_high[0]) - float(real.feature_low[0])))
         ip_mask = np.abs(real.features[:, 0] - float(target_ip)) <= ip_tol
-        candidates = np.flatnonzero((dist >= min_dist) & (dist <= max_dist) & ip_mask)
+        candidates = np.flatnonzero((boundary_dist >= min_dist) & (boundary_dist <= max_dist) & ip_mask)
     if candidates.size == 0:
-        candidates = np.argsort(dist)[: min(128, dist.shape[0])]
-    idx = int(rng.choice(candidates))
+        pool = np.flatnonzero(ip_mask)
+        if pool.size == 0:
+            pool = np.arange(boundary_dist.shape[0], dtype=np.int64)
+        order = pool[np.argsort(boundary_dist[pool])[::-1]]
+        candidates = order[: min(256, order.shape[0])]
+    candidate_dist = boundary_dist[candidates]
+    spread = max(0.15, 0.45 * target_dist)
+    weights = np.exp(-0.5 * ((candidate_dist - target_dist) / spread) ** 2)
+    weights *= np.maximum(candidate_dist, 1.0e-3)
+    weight_sum = float(np.sum(weights))
+    if not np.isfinite(weight_sum) or weight_sum <= 0.0:
+        idx = int(rng.choice(candidates))
+    else:
+        idx = int(rng.choice(candidates, p=weights / weight_sum))
     target = real.features[idx].copy()
     target[0] = float(target_ip)
 
@@ -662,6 +695,16 @@ def _check_radii(real: RealSpace, radii: np.ndarray) -> str | None:
         return "radii_below_safe_space"
     if np.any(radii > real.radii_high.reshape(1, -1)):
         return "radii_above_safe_space"
+    return None
+
+
+def _check_boundary_motion(real: RealSpace, radii: np.ndarray) -> str | None:
+    mean_range = float(np.ptp(np.mean(radii, axis=1)))
+    angle_range = float(np.mean(np.ptp(radii, axis=0)))
+    required_mean = max(0.018, 0.80 * float(real.radii_mean_range_p70))
+    required_angle = max(0.022, 0.80 * float(real.radii_angle_range_p70))
+    if mean_range < required_mean and angle_range < required_angle:
+        return "boundary_motion_too_small"
     return None
 
 
@@ -794,6 +837,10 @@ def _write_summary(
             "feature_high": real.feature_high.tolist(),
             "radii_low_min": float(np.min(real.radii_low)),
             "radii_high_max": float(np.max(real.radii_high)),
+            "boundary_delta_norm_p70": float(real.boundary_delta_norm_p70),
+            "boundary_delta_norm_p90": float(real.boundary_delta_norm_p90),
+            "radii_mean_range_p70": float(real.radii_mean_range_p70),
+            "radii_angle_range_p70": float(real.radii_angle_range_p70),
             "current_limits": real.current_limits.tolist(),
             "derivative_limits": real.derivative_limits.tolist(),
         },
