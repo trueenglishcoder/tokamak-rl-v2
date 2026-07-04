@@ -63,6 +63,14 @@ class ResetPoint:
 
 
 @dataclass(frozen=True, slots=True)
+class MoveSample:
+    shot: str
+    start: int
+    dx: np.ndarray
+    dcoils: np.ndarray
+
+
+@dataclass(frozen=True, slots=True)
 class ParentTarget:
     parent_id: int
     source_shot: str
@@ -124,8 +132,8 @@ def main() -> int:
     parser.add_argument("--current-usage-cap", type=float, default=0.75)
     parser.add_argument("--endpoint-distance-min", type=float, default=0.006)
     parser.add_argument("--endpoint-distance-max", type=float, default=0.11)
-    parser.add_argument("--endpoint-mix-min", type=float, default=0.35)
-    parser.add_argument("--endpoint-mix-max", type=float, default=0.95)
+    parser.add_argument("--endpoint-mix-min", type=float, default=0.92)
+    parser.add_argument("--endpoint-mix-max", type=float, default=1.05)
     parser.add_argument("--hold-probability", type=float, default=0.22)
     parser.add_argument("--max-attempts-per-parent", type=int, default=500)
     parser.add_argument("--seed", type=int, default=20260704)
@@ -167,7 +175,8 @@ def main() -> int:
     if not all_points:
         raise SystemExit("no real replay rows survived the conservative safe-state reset filter")
     state_space = _state_space_from_points(all_points, limits=limits)
-    move_space = _move_space_from_sources(sources, steps=window_steps, limits=limits)
+    move_samples = _move_samples_from_sources(sources, steps=window_steps, limits=limits)
+    move_space = _move_space_from_samples(move_samples, limits=limits)
     envelope = _build_envelope(sources=sources, theta=theta, limits=limits)
 
     split_counts = _split_parent_counts(int(args.parent_count), points=all_points)
@@ -195,6 +204,7 @@ def main() -> int:
                 limits=limits,
                 envelope=envelope,
                 state_space=state_space,
+                move_samples=move_samples,
                 state_distance_limit=float(args.state_distance_limit),
                 current_usage_cap=float(args.current_usage_cap),
                 max_attempts_per_parent=int(args.max_attempts_per_parent),
@@ -214,6 +224,14 @@ def main() -> int:
     )
     if not windows:
         raise SystemExit(f"no generated long-parent windows were accepted; window_rejections={dict(window_rejections)}")
+    moving_windows = sum(1 for w in windows if w.move_distance > 1.0e-8)
+    nonflat_ip_windows = sum(1 for w in windows if w.difficulty_bin != "flat")
+    if moving_windows == 0 or nonflat_ip_windows == 0:
+        raise SystemExit(
+            "generated long-parent dataset collapsed to flat windows; "
+            f"moving_windows={moving_windows}, nonflat_ip_windows={nonflat_ip_windows}, "
+            f"window_rejections={dict(window_rejections)}"
+        )
 
     _write_libraries(
         windows,
@@ -333,7 +351,11 @@ def _state_space_from_points(points: list[ResetPoint], *, limits: simple.Limits)
 
 
 def _move_space_from_sources(sources: list[SourceShot], *, steps: int, limits: simple.Limits) -> dict[str, object]:
-    values = []
+    return _move_space_from_samples(_move_samples_from_sources(sources, steps=steps, limits=limits), limits=limits)
+
+
+def _move_samples_from_sources(sources: list[SourceShot], *, steps: int, limits: simple.Limits) -> list[MoveSample]:
+    samples: list[MoveSample] = []
     for source in sources:
         if source.x.shape[0] <= int(steps):
             continue
@@ -341,15 +363,23 @@ def _move_space_from_sources(sources: list[SourceShot], *, steps: int, limits: s
             end = start + int(steps)
             if not _x_inside_safe_bounds(source.x[start]) or not _x_inside_safe_bounds(source.x[end]):
                 continue
-            values.append(
-                simple._move_features(
-                    source.x[end] - source.x[start],
-                    source.coils[end] - source.coils[start],
-                    limits=limits,
+            dx = source.x[end] - source.x[start]
+            dcoils = source.coils[end] - source.coils[start]
+            samples.append(
+                MoveSample(
+                    shot=source.shot,
+                    start=int(start),
+                    dx=np.asarray(dx, dtype=float),
+                    dcoils=np.asarray(dcoils, dtype=float),
                 )
             )
-    if not values:
+    if not samples:
         raise ValueError("could not build 100-step real move-space from source shots")
+    return samples
+
+
+def _move_space_from_samples(samples: list[MoveSample], *, limits: simple.Limits) -> dict[str, object]:
+    values = [simple._move_features(s.dx, s.dcoils, limits=limits) for s in samples]
     arr = np.asarray(values, dtype=float)
     tree = simple.cKDTree(arr) if simple.cKDTree is not None else None
     return {"values": arr, "tree": tree}
@@ -404,6 +434,7 @@ def _generate_parents(
     limits: simple.Limits,
     envelope: dict[str, np.ndarray | float],
     state_space: dict[str, object],
+    move_samples: list[MoveSample],
     state_distance_limit: float,
     current_usage_cap: float,
     max_attempts_per_parent: int,
@@ -411,10 +442,12 @@ def _generate_parents(
 ) -> list[ParentTarget]:
     if not points:
         raise RuntimeError("no reset points for split")
-    point_features = np.asarray([simple._state_features(p.x, p.coils, limits=limits) for p in points], dtype=float)
     by_shot: dict[str, list[ResetPoint]] = {}
     for point in points:
         by_shot.setdefault(point.shot, []).append(point)
+    split_move_samples = [sample for sample in move_samples if sample.shot in by_shot]
+    if not split_move_samples:
+        raise RuntimeError("no real 100-step move primitives are available for this split")
     shots = sorted(by_shot, key=int)
     shot_cycle = np.resize(np.asarray(shots, dtype=object), max(int(count), len(shots)))
     rng.shuffle(shot_cycle)
@@ -431,7 +464,7 @@ def _generate_parents(
             parent_id=first_parent_id + len(accepted),
             parent_steps=parent_steps,
             points=points,
-            point_features=point_features,
+            move_samples=split_move_samples,
             rng=rng,
             segment_min_steps=segment_min_steps,
             segment_max_steps=segment_max_steps,
@@ -483,7 +516,7 @@ def _make_parent(
     parent_id: int,
     parent_steps: int,
     points: list[ResetPoint],
-    point_features: np.ndarray,
+    move_samples: list[MoveSample],
     rng: np.random.Generator,
     segment_min_steps: int,
     segment_max_steps: int,
@@ -507,26 +540,32 @@ def _make_parent(
     current_x = reset.x.copy()
     current_coils = reset.coils.copy()
     last_was_hold = False
-    for _ in knots[1:]:
+    point_features = np.asarray([simple._state_features(p.x, p.coils, limits=limits) for p in points], dtype=float)
+    for knot in knots[1:]:
         do_hold = rng.random() < float(hold_probability) and not last_was_hold
         if do_hold:
             next_x = current_x.copy()
             next_coils = current_coils.copy()
             last_was_hold = True
         else:
-            endpoint = _choose_endpoint(
+            move = _choose_move_sample(
                 current_x=current_x,
                 current_coils=current_coils,
                 points=points,
                 point_features=point_features,
+                move_samples=move_samples,
                 rng=rng,
                 limits=limits,
                 distance_min=endpoint_distance_min,
                 distance_max=endpoint_distance_max,
             )
             mix = float(rng.uniform(float(endpoint_mix_min), float(endpoint_mix_max)))
-            next_x = current_x + mix * (endpoint.x - current_x)
-            next_coils = current_coils + mix * (endpoint.coils - current_coils)
+            seg_steps = int(knot)
+            prev_step = int(knots[len(way_x) - 1])
+            span = max(float(seg_steps - prev_step), 1.0)
+            scale = mix * span / 100.0
+            next_x = current_x + scale * move.dx
+            next_coils = current_coils + scale * move.dcoils
             last_was_hold = False
         way_x.append(next_x)
         way_coils.append(next_coils)
@@ -562,6 +601,50 @@ def _make_parent(
         coils=coils,
         state_distance_p95=float("nan"),
     )
+
+
+def _choose_move_sample(
+    *,
+    current_x: np.ndarray,
+    current_coils: np.ndarray,
+    points: list[ResetPoint],
+    point_features: np.ndarray,
+    move_samples: list[MoveSample],
+    rng: np.random.Generator,
+    limits: simple.Limits,
+    distance_min: float,
+    distance_max: float,
+) -> MoveSample:
+    # Pick a real 100-step move primitive, but apply it from the current
+    # synthetic state. This keeps the segment slope in the real replay move
+    # family without copying a long source trajectory. The nearest-state check
+    # prevents walking off the safe replay manifold.
+    del points
+    order = rng.choice(np.arange(len(move_samples)), size=min(512, len(move_samples)), replace=False)
+    eligible: list[tuple[float, MoveSample]] = []
+    fallback: list[tuple[float, MoveSample]] = []
+    for idx in order:
+        sample = move_samples[int(idx)]
+        endpoint_x = current_x + sample.dx
+        endpoint_coils = current_coils + sample.dcoils
+        if not _x_inside_safe_bounds(endpoint_x):
+            continue
+        endpoint_feature = simple._state_features(endpoint_x, endpoint_coils, limits=limits)
+        manifold_distance = float(np.sqrt(np.min(np.sum((point_features - endpoint_feature[None, :]) ** 2, axis=1))))
+        move_distance = float(np.linalg.norm(simple._move_features(sample.dx, sample.dcoils, limits=limits)))
+        if move_distance >= float(distance_min):
+            fallback.append((manifold_distance, sample))
+        if manifold_distance <= float(distance_max) and move_distance >= float(distance_min):
+            eligible.append((manifold_distance, sample))
+    if eligible:
+        eligible.sort(key=lambda item: item[0])
+        top = eligible[: min(64, len(eligible))]
+        return top[int(rng.integers(0, len(top)))][1]
+    if fallback:
+        fallback.sort(key=lambda item: item[0])
+        top = fallback[: min(64, len(fallback))]
+        return top[int(rng.integers(0, len(top)))][1]
+    return move_samples[int(rng.integers(0, len(move_samples)))]
 
 
 def _choose_endpoint(
@@ -877,6 +960,8 @@ def _summary(
         "difficulty_bins": dict(sorted(Counter(w.difficulty_bin for w in windows).items())),
         "parent_rejections": dict(sorted(parent_rejections.items())),
         "window_rejections": dict(sorted(window_rejections.items())),
+        "moving_windows": int(sum(1 for w in windows if w.move_distance > 1.0e-8)),
+        "nonflat_ip_windows": int(sum(1 for w in windows if w.difficulty_bin != "flat")),
         "state_distance_p95_max": float(max(p.state_distance_p95 for p in parents)),
         "move_distance_p95": float(np.percentile([w.move_distance for w in windows], 95.0)),
         "safe_state_bounds": {
@@ -898,8 +983,9 @@ def _summary(
         },
         "note": (
             "Synthetic parents no longer reuse long real source segments. Each parent starts from a real safe reset row, "
-            "then moves through piecewise-linear waypoints sampled from the replay-derived safe state space. Dense 100-step "
-            "cuts are retained only when their endpoint move is near a real 100-step replay move."
+            "then moves through piecewise-linear waypoints generated by applying real-sized 100-step replay move primitives "
+            "from the safe state space. Dense 100-step cuts are retained only when their endpoint move is near a real "
+            "100-step replay move."
         ),
     }
 

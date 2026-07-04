@@ -72,7 +72,8 @@ def test_long_target_builder_writes_dense_oracle_windows_without_duplicate_keys(
     envelope = builder._build_envelope(sources=sources, theta=theta, limits=limits)
     points = builder._safe_reset_points_from_sources(sources, limits=limits, current_usage_cap=1.0)
     state_space = builder._state_space_from_points(points, limits=limits)
-    move_space = builder._move_space_from_sources(sources, steps=100, limits=limits)
+    move_samples = builder._move_samples_from_sources(sources, steps=100, limits=limits)
+    move_space = builder._move_space_from_samples(move_samples, limits=limits)
     rejections = builder.Counter()
     parents = []
     rng = np.random.default_rng(7)
@@ -97,6 +98,7 @@ def test_long_target_builder_writes_dense_oracle_windows_without_duplicate_keys(
                 limits=limits,
                 envelope=envelope,
                 state_space=state_space,
+                move_samples=move_samples,
                 state_distance_limit=10.0,
                 current_usage_cap=1.0,
                 max_attempts_per_parent=10,
@@ -115,6 +117,8 @@ def test_long_target_builder_writes_dense_oracle_windows_without_duplicate_keys(
     )
     assert len(windows) == 42
     assert {w.parent.source_shot for w in windows} == {"3856", "3864"}
+    assert any(w.difficulty_bin != "flat" for w in windows)
+    assert any(w.move_distance > 0.0 for w in windows)
 
     initial = tmp_path / "initial.npz"
     targets = tmp_path / "targets.npz"
