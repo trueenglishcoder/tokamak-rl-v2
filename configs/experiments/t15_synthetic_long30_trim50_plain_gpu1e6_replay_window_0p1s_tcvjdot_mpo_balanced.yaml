@@ -1,0 +1,132 @@
+{
+  "name": "t15_synthetic_long30_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle",
+  "sim": {
+    "config_path": "../../../tokamak-sim/runs/t15md_trim50_plain_gpu_1e6_setup/T15MD_new_data_trim50_plain_gpu_1e6_3856.toml",
+    "compute_backend": "gpu",
+    "gpu_device": "cuda:0",
+    "angles": 32,
+    "max_episode_steps": 100,
+    "reset_source": "csv_initial_states",
+    "csv_initial_state_library": "../../data/processed/t15_synthetic_long30_trim50_plain_gpu1e6_replay_window_0p1s_oracle_initial_states.npz",
+    "csv_initial_state_split": "train",
+    "current_safety_limits": {
+      "pfc_currents": {
+        "pfc0": 198365.72,
+        "pfc1": 345047.416,
+        "pfc2": 164882.78,
+        "pfc3": 204574.776,
+        "pfc4": 606866.803,
+        "pfc5": 2138757.022
+      },
+      "sol_currents": {
+        "sol0": 4760890.355,
+        "sol1": 13912524.5,
+        "sol2": 4771978.708
+      }
+    },
+    "current_limit_scale": 1.0,
+    "derivative_limit_scale": 1.0,
+    "action_scale": 1.0,
+    "action_contract": "jdot_command",
+    "terminate_on_boundary_loss": true,
+    "terminate_on_current_limit": true,
+    "current_termination_over_limit_a": 5000.0,
+    "current_termination_grace_steps": 1,
+    "current_hard_termination_fraction": 1.2,
+    "current_saturation_fraction": 1.0
+  },
+  "reference": {
+    "duration_s": 0.1,
+    "t_step": 0.001,
+    "theta_count": 32,
+    "seed": 11,
+    "ip": {
+      "kind": "replay_window"
+    },
+    "boundary": {
+      "kind": "t15_replay_segment_conditioned",
+      "replay_reference_dir": "../../data/processed/t15_synthetic_long30_trim50_plain_gpu1e6_replay_window_0p1s_oracle_targets"
+    }
+  },
+  "observation": {
+    "actor_kind": "controller_state_v6",
+    "critic_kind": "compact_training_state_v2",
+    "target_preview_steps": 10,
+    "target_preview_stride": 10,
+    "ip_rate_scale_aps": 500000.0,
+    "boundary_rate_scale_mps": 1.0
+  },
+  "reward": {
+    "kind": "tcv_derivative",
+    "shape_mean_scale_m": 0.03,
+    "shape_max_scale_m": 0.08,
+    "ip_scale_a": 25000.0,
+    "boundary_missing_error_m": 1.0,
+    "boundary_missing_weight": 20.0,
+    "shape_mean_weight": 3.2,
+    "shape_max_weight": 0.8,
+    "ip_weight": 1.8,
+    "current_weight": 0.75,
+    "derivative_weight": 0.1875,
+    "current_usage_weight": 0.0,
+    "derivative_usage_weight": 0.0,
+    "action_weight": 0.0,
+    "delta_action_weight": 0.0,
+    "current_soft_fraction": 0.9,
+    "current_bad_fraction": 1.0,
+    "derivative_soft_fraction": 0.9,
+    "derivative_bad_fraction": 1.1,
+    "terminal_reward": -20.0,
+    "terminal_remaining_cost": 0.0,
+    "actuator_saturation_weight": 0.1875,
+    "reward_scale": 0.01,
+    "smoothmax_alpha": -5.0
+  },
+  "randomization": {
+    "enabled": false
+  },
+  "network": {
+    "hidden_dim": 256,
+    "critic_hidden_dim": 256,
+    "critic_mlp_hidden_dim": 256,
+    "actor_initial_std": 0.2
+  },
+  "learner": {
+    "discount": 0.99,
+    "unroll_length": 100,
+    "batch_size": 32,
+    "replay_capacity_episodes": 1024,
+    "actor_lr": 0.0003,
+    "critic_lr": 0.0003,
+    "kl_lr": 0.0003,
+    "action_samples": 64,
+    "min_replay_sequence_length": 100,
+    "actor_update_chunk_size": 2048,
+    "temperature": 1.0,
+    "mean_kl_epsilon": 0.01,
+    "std_kl_epsilon": 0.0001,
+    "target_update_tau": 0.005,
+    "rollout_chunk_length": 100,
+    "updates_per_rollout_chunk": 64
+  },
+  "training": {
+    "steps": 100000000,
+    "num_envs": 2048,
+    "device": "auto",
+    "seed": 1,
+    "output_dir": "../../outputs/t15_synthetic_long30_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle",
+    "save_checkpoints": true,
+    "checkpoint_interval_steps": 1000000,
+    "eval_interval_steps": 500000,
+    "eval_episodes": 128,
+    "eval_max_steps": 100,
+    "actor_workers": 1,
+    "distributed_mode": "local_replay",
+    "production_mode": true,
+    "early_stop_patience_evals": 0,
+    "early_stop_min_delta": 0.0,
+    "milestone_checkpoint_interval_steps": 1000000,
+    "eval_checkpoint_top_k": 10,
+    "keep_latest_checkpoint": true
+  }
+}

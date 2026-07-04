@@ -22,6 +22,19 @@ compact_training_state_v2 critic input
 TCV-derivative reward
 ```
 
+## Supported Synthetic Experiment
+
+```text
+train_t15_synthetic_long30_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_100m.sbatch
+```
+
+This is the current synthetic-long experiment. It first builds 30 new
+1.0-1.5 s synthetic training parents plus one synthetic holdout parent inside
+the Slurm container, cuts them into overlapping 100-step replay windows, and
+then delegates to the same 8-GPU training script used by the real trim50
+production path. The only intended differences are dataset paths, run name, and
+W&B project name.
+
 ## Diagnostics
 
 ```text
@@ -29,11 +42,10 @@ eval_hold_boundary_8gpu_800x500.sbatch
 eval_hold_boundary_cut900_seg300_8gpu_800x500.sbatch
 ```
 
-Generated/idealized/actuator/perturbed/simple-manifold/long-target jobs were
-removed from the active tree because they repeatedly produced confusing,
-non-production launch paths. If one of those experiments is resurrected, it
-should come back as a clearly named branch or archived experiment with a fresh
-README and preflight.
+Old generated/idealized/actuator/perturbed/simple-manifold/long-target jobs
+were removed from the active tree because they repeatedly produced confusing,
+non-production launch paths. New synthetic work should stay behind the explicit
+`synthetic_long30` naming unless it is promoted or retired.
 
 ## Command Hygiene
 

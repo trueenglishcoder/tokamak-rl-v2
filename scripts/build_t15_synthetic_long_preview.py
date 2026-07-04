@@ -26,6 +26,7 @@ class RealSpace:
     pca_components: np.ndarray
     feature_center: np.ndarray
     feature_scale: np.ndarray
+    features_norm: np.ndarray
     feature_low: np.ndarray
     feature_high: np.ndarray
     radii_low: np.ndarray
@@ -67,9 +68,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--safe-split", default="train", help="Use this split from the real library, or 'all'.")
     parser.add_argument("--radii-margin-m", type=float, default=0.025)
     parser.add_argument("--current-envelope-margin", type=float, default=0.08)
-    parser.add_argument("--max-cloud-rows", type=int, default=50000)
+    parser.add_argument("--max-cloud-rows", type=int, default=20000)
     parser.add_argument("--knn", type=int, default=24)
     parser.add_argument("--max-attempts", type=int, default=2000)
+    parser.add_argument("--progress-every", type=int, default=25)
     parser.add_argument("--plot", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args(argv)
 
@@ -81,6 +83,10 @@ def main(argv: list[str] | None = None) -> int:
     rng = np.random.default_rng(int(args.seed))
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    print(
+        f"[synthetic-preview] loading safe space from {target_path} split={args.safe_split}",
+        flush=True,
+    )
     real = _load_real_space(
         target_path=target_path,
         initial_path=initial_path,
@@ -93,6 +99,12 @@ def main(argv: list[str] | None = None) -> int:
         safe_split=str(args.safe_split),
         rng=rng,
     )
+    print(
+        "[synthetic-preview] "
+        f"safe cloud rows={real.features.shape[0]} pca={real.pca_components.shape[0]} "
+        f"current dims={real.currents.shape[1]}",
+        flush=True,
+    )
     trajectories, reject_counts = _generate_previews(
         real=real,
         examples=int(args.examples),
@@ -102,6 +114,7 @@ def main(argv: list[str] | None = None) -> int:
         wiggle_room=float(args.wiggle_room),
         knn=int(args.knn),
         max_attempts=int(args.max_attempts),
+        progress_every=int(args.progress_every),
         rng=rng,
     )
     if not trajectories:
@@ -215,6 +228,7 @@ def _load_real_space(
     feature_center = np.median(feature_cloud, axis=0)
     feature_scale = np.percentile(np.abs(feature_cloud - feature_center.reshape(1, -1)), 90, axis=0)
     feature_scale = np.where(np.isfinite(feature_scale) & (feature_scale > 1.0e-12), feature_scale, 1.0)
+    features_norm = (feature_cloud - feature_center.reshape(1, -1)) / feature_scale.reshape(1, -1)
 
     low_q = max(0.0, 0.002 / max(float(wiggle_room), 1.0))
     high_q = 1.0 - low_q
@@ -231,6 +245,7 @@ def _load_real_space(
         pca_components=components,
         feature_center=feature_center,
         feature_scale=feature_scale,
+        features_norm=features_norm,
         feature_low=np.quantile(features, low_q, axis=0),
         feature_high=np.quantile(features, high_q, axis=0),
         radii_low=np.min(radii_flat, axis=0) - float(radii_margin_m),
@@ -271,6 +286,7 @@ def _generate_previews(
     wiggle_room: float,
     knn: int,
     max_attempts: int,
+    progress_every: int,
     rng: np.random.Generator,
 ) -> tuple[list[dict[str, np.ndarray | int]], dict[str, int]]:
     accepted: list[dict[str, np.ndarray | int]] = []
@@ -284,17 +300,20 @@ def _generate_previews(
         reason = _check_features(real, features)
         if reason is not None:
             reject_counts[reason] = reject_counts.get(reason, 0) + 1
+            _maybe_print_progress(attempts, accepted, reject_counts, progress_every=progress_every)
             continue
         radii = _features_to_radii(real, features)
         reason = _check_radii(real, radii)
         if reason is not None:
             reject_counts[reason] = reject_counts.get(reason, 0) + 1
+            _maybe_print_progress(attempts, accepted, reject_counts, progress_every=progress_every)
             continue
         currents = _estimate_currents(real=real, features=features, knn=int(knn))
         currents = _smooth_currents(currents, width=31)
         reason = _check_currents(real, currents, dt=dt, wiggle_room=wiggle_room)
         if reason is not None:
             reject_counts[reason] = reject_counts.get(reason, 0) + 1
+            _maybe_print_progress(attempts, accepted, reject_counts, progress_every=progress_every)
             continue
         accepted.append(
             {
@@ -306,7 +325,29 @@ def _generate_previews(
                 "jdot": np.diff(currents, axis=0) / float(dt),
             }
         )
+        print(
+            f"[synthetic-preview] accepted={len(accepted)}/{examples} attempts={attempts} steps={steps}",
+            flush=True,
+        )
+    _maybe_print_progress(attempts, accepted, reject_counts, progress_every=1)
     return accepted, reject_counts
+
+
+def _maybe_print_progress(
+    attempts: int,
+    accepted: list[dict[str, np.ndarray | int]],
+    reject_counts: dict[str, int],
+    *,
+    progress_every: int,
+) -> None:
+    every = max(1, int(progress_every))
+    if attempts <= 0 or attempts % every != 0:
+        return
+    top = ", ".join(f"{k}={v}" for k, v in sorted(reject_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:4])
+    print(
+        f"[synthetic-preview] attempts={attempts} accepted={len(accepted)} rejects: {top or 'none'}",
+        flush=True,
+    )
 
 
 def _sample_feature_trajectory(*, real: RealSpace, start: np.ndarray, steps: int, rng: np.random.Generator) -> np.ndarray:
@@ -333,9 +374,8 @@ def _sample_safe_waypoint(
     duration: int,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    cloud_n = (real.features - real.feature_center.reshape(1, -1)) / real.feature_scale.reshape(1, -1)
     current_n = (current - real.feature_center) / real.feature_scale
-    dist = np.sqrt(np.sum((cloud_n - current_n.reshape(1, -1)) ** 2, axis=1))
+    dist = np.sqrt(np.sum((real.features_norm - current_n.reshape(1, -1)) ** 2, axis=1))
 
     # Longer segments may travel farther, but the target is always a coupled
     # state sampled from the real cloud rather than independently sampled axes.
@@ -390,12 +430,11 @@ def _check_radii(real: RealSpace, radii: np.ndarray) -> str | None:
 
 def _estimate_currents(*, real: RealSpace, features: np.ndarray, knn: int) -> np.ndarray:
     query = (features - real.feature_center.reshape(1, -1)) / real.feature_scale.reshape(1, -1)
-    cloud = (real.features - real.feature_center.reshape(1, -1)) / real.feature_scale.reshape(1, -1)
     out = np.empty((features.shape[0], real.currents.shape[1]), dtype=np.float64)
-    k = max(1, min(int(knn), cloud.shape[0]))
+    k = max(1, min(int(knn), real.features_norm.shape[0]))
     for start in range(0, query.shape[0], 128):
         block = query[start : start + 128]
-        dist2 = np.sum((block[:, None, :] - cloud[None, :, :]) ** 2, axis=2)
+        dist2 = np.sum((block[:, None, :] - real.features_norm[None, :, :]) ** 2, axis=2)
         idx = np.argpartition(dist2, kth=k - 1, axis=1)[:, :k]
         local_dist = np.take_along_axis(dist2, idx, axis=1)
         weights = 1.0 / (local_dist + 1.0e-6)
