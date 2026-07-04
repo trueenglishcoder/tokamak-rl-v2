@@ -24,7 +24,6 @@ export SYNTHETIC_MIN_STEPS=${SYNTHETIC_MIN_STEPS:-1000}
 export SYNTHETIC_MAX_STEPS=${SYNTHETIC_MAX_STEPS:-1500}
 export SYNTHETIC_SEED=${SYNTHETIC_SEED:-37}
 export SYNTHETIC_WIGGLE_ROOM=${SYNTHETIC_WIGGLE_ROOM:-1.15}
-export SYNTHETIC_MAX_ATTEMPTS_PER_PARENT=${SYNTHETIC_MAX_ATTEMPTS_PER_PARENT:-3000}
 
 if [[ ! -f "${REAL_RESET_LIBRARY}" ]]; then
   echo "missing canonical real reset library: ${REAL_RESET_LIBRARY}" >&2
@@ -56,8 +55,7 @@ srun \
       --min-steps "${SYNTHETIC_MIN_STEPS}" \
       --max-steps "${SYNTHETIC_MAX_STEPS}" \
       --seed "${SYNTHETIC_SEED}" \
-      --wiggle-room "${SYNTHETIC_WIGGLE_ROOM}" \
-      --max-attempts-per-parent "${SYNTHETIC_MAX_ATTEMPTS_PER_PARENT}"
+      --wiggle-room "${SYNTHETIC_WIGGLE_ROOM}"
   '
 
 test -f "${RESET_LIBRARY}"

@@ -80,9 +80,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--radii-margin-m", type=float, default=0.025)
     parser.add_argument("--current-envelope-margin", type=float, default=0.08)
     parser.add_argument("--max-cloud-rows", type=int, default=20000)
-    parser.add_argument("--knn", type=int, default=24)
-    parser.add_argument("--max-attempts", type=int, default=2000)
-    parser.add_argument("--progress-every", type=int, default=25)
     parser.add_argument("--plot", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args(argv)
 
@@ -123,9 +120,6 @@ def main(argv: list[str] | None = None) -> int:
         max_steps=int(args.max_steps),
         dt=float(args.dt),
         wiggle_room=float(args.wiggle_room),
-        knn=int(args.knn),
-        max_attempts=int(args.max_attempts),
-        progress_every=int(args.progress_every),
         rng=rng,
     )
     if not trajectories:
@@ -336,45 +330,37 @@ def _generate_previews(
     max_steps: int,
     dt: float,
     wiggle_room: float,
-    knn: int,
-    max_attempts: int,
-    progress_every: int,
     rng: np.random.Generator,
 ) -> tuple[list[dict[str, np.ndarray | int]], dict[str, int]]:
     accepted: list[dict[str, np.ndarray | int]] = []
     reject_counts: dict[str, int] = {}
-    attempts = 0
-    while len(accepted) < int(examples) and attempts < int(max_attempts):
-        attempts += 1
+    for parent_idx in range(int(examples)):
         steps = int(rng.integers(int(min_steps), int(max_steps) + 1))
         start_idx = int(rng.integers(0, real.features.shape[0]))
         start_current = real.currents[start_idx].copy()
-        mode = _parent_mode_for_index(len(accepted))
-        features = _sample_feature_trajectory(real=real, start=real.features[start_idx], steps=steps, mode=mode, rng=rng)
+        mode = _parent_mode_for_index(parent_idx)
+        features, currents = _sample_coupled_trajectory(
+            real=real,
+            start_feature=real.features[start_idx],
+            start_current=start_current,
+            steps=steps,
+            mode=mode,
+            dt=dt,
+            rng=rng,
+        )
         reason = _check_features(real, features)
         if reason is not None:
-            reject_counts[reason] = reject_counts.get(reason, 0) + 1
-            _maybe_print_progress(attempts, accepted, reject_counts, progress_every=progress_every)
-            continue
+            raise RuntimeError(f"constructed synthetic parent {parent_idx} failed feature check: {reason}")
         radii = _features_to_radii(real, features)
         reason = _check_radii(real, radii)
         if reason is not None:
-            reject_counts[reason] = reject_counts.get(reason, 0) + 1
-            _maybe_print_progress(attempts, accepted, reject_counts, progress_every=progress_every)
-            continue
+            raise RuntimeError(f"constructed synthetic parent {parent_idx} failed radii check: {reason}")
         reason = _check_boundary_motion(real, radii)
         if reason is not None:
-            reject_counts[reason] = reject_counts.get(reason, 0) + 1
-            _maybe_print_progress(attempts, accepted, reject_counts, progress_every=progress_every)
-            continue
-        currents = _estimate_currents(real=real, features=features, knn=int(knn))
-        currents = _align_currents_to_start(currents, start_current=start_current)
-        currents = _smooth_currents(currents, width=31)
+            raise RuntimeError(f"constructed synthetic parent {parent_idx} failed boundary-motion check: {reason}")
         reason = _check_currents(real, currents, dt=dt, wiggle_room=wiggle_room)
         if reason is not None:
-            reject_counts[reason] = reject_counts.get(reason, 0) + 1
-            _maybe_print_progress(attempts, accepted, reject_counts, progress_every=progress_every)
-            continue
+            raise RuntimeError(f"constructed synthetic parent {parent_idx} failed current check: {reason}")
         accepted.append(
             {
                 "steps": steps,
@@ -390,10 +376,9 @@ def _generate_previews(
             }
         )
         print(
-            f"[synthetic-preview] accepted={len(accepted)}/{examples} attempts={attempts} mode={mode} steps={steps}",
+            f"[synthetic-preview] constructed={len(accepted)}/{examples} mode={mode} steps={steps}",
             flush=True,
         )
-    _maybe_print_progress(attempts, accepted, reject_counts, progress_every=1)
     return accepted, reject_counts
 
 
@@ -409,53 +394,47 @@ def _parent_mode_for_index(index: int) -> str:
     return modes[int(index) % len(modes)]
 
 
-def _maybe_print_progress(
-    attempts: int,
-    accepted: list[dict[str, np.ndarray | int]],
-    reject_counts: dict[str, int],
-    *,
-    progress_every: int,
-) -> None:
-    every = max(1, int(progress_every))
-    if attempts <= 0 or attempts % every != 0:
-        return
-    top = ", ".join(f"{k}={v}" for k, v in sorted(reject_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:4])
-    print(
-        f"[synthetic-preview] attempts={attempts} accepted={len(accepted)} rejects: {top or 'none'}",
-        flush=True,
-    )
-
-
-def _sample_feature_trajectory(
+def _sample_coupled_trajectory(
     *,
     real: RealSpace,
-    start: np.ndarray,
+    start_feature: np.ndarray,
+    start_current: np.ndarray,
     steps: int,
     mode: str | None = None,
+    dt: float,
     rng: np.random.Generator,
-) -> np.ndarray:
-    dims = start.shape[0]
-    ip_profile, edges = _sample_ip_profile(real=real, start_ip=float(start[0]), steps=steps, mode=mode, rng=rng)
+) -> tuple[np.ndarray, np.ndarray]:
+    dims = start_feature.shape[0]
+    current_dims = start_current.shape[0]
+    ip_profile, edges = _sample_ip_profile(real=real, start_ip=float(start_feature[0]), steps=steps, mode=mode, rng=rng)
     features = np.empty((steps + 1, dims), dtype=np.float64)
-    features[0] = start
+    currents = np.empty((steps + 1, current_dims), dtype=np.float64)
+    features[0] = start_feature
     features[:, 0] = ip_profile
-    current = start.copy()
-    current[0] = ip_profile[0]
+    currents[0] = start_current
+    current_feature = start_feature.copy()
+    current_feature[0] = ip_profile[0]
+    current_current = start_current.copy()
     for lo, hi in zip(edges[:-1], edges[1:]):
         duration = max(1, int(hi - lo))
-        target = _sample_safe_waypoint(
+        target_feature, target_current = _sample_safe_waypoint(
             real=real,
-            current=current,
+            current_feature=current_feature,
+            current_current=current_current,
             duration=duration,
             target_ip=float(ip_profile[hi]),
+            dt=dt,
             rng=rng,
         )
-        segment = _interpolate_waypoint(current, target, duration)
-        segment[:, 0] = ip_profile[lo : hi + 1]
-        features[lo + 1 : hi + 1] = segment[1:]
-        current = target
-        current[0] = ip_profile[hi]
-    return features
+        feature_segment = _interpolate_waypoint(current_feature, target_feature, duration)
+        current_segment = _interpolate_waypoint(current_current, target_current, duration)
+        feature_segment[:, 0] = ip_profile[lo : hi + 1]
+        features[lo + 1 : hi + 1] = feature_segment[1:]
+        currents[lo + 1 : hi + 1] = current_segment[1:]
+        current_feature = target_feature
+        current_feature[0] = ip_profile[hi]
+        current_current = target_current
+    return features, currents
 
 
 def _sample_ip_profile(
@@ -628,19 +607,24 @@ def _sample_ip_ramp_endpoint(
 def _sample_safe_waypoint(
     *,
     real: RealSpace,
-    current: np.ndarray,
+    current_feature: np.ndarray,
+    current_current: np.ndarray,
     duration: int,
     target_ip: float,
+    dt: float,
     rng: np.random.Generator,
-) -> np.ndarray:
-    current_n = (current - real.feature_center) / real.feature_scale
+) -> tuple[np.ndarray, np.ndarray]:
+    current_n = (current_feature - real.feature_center) / real.feature_scale
     boundary_dist = np.sqrt(np.sum((real.features_norm[:, 1:] - current_n.reshape(1, -1)[:, 1:]) ** 2, axis=1))
-    current_radii = _features_to_radii(real, current.reshape(1, -1))[0]
+    current_radii = _features_to_radii(real, current_feature.reshape(1, -1))[0]
     cloud_mean = np.mean(real.radii_cloud, axis=1)
     current_mean = float(np.mean(current_radii))
     mean_delta_signed = cloud_mean - current_mean
     mean_delta = np.abs(mean_delta_signed)
     angle_delta = np.mean(np.abs(real.radii_cloud - current_radii.reshape(1, -1)), axis=1)
+    current_delta = np.abs(real.currents - current_current.reshape(1, -1))
+    reachable_delta = 0.60 * real.derivative_limits.reshape(1, -1) * float(dt) * float(duration)
+    current_reachable = np.all(current_delta <= reachable_delta, axis=1)
 
     # Longer segments should move the visible boundary envelope on a real-shot
     # scale. Candidate states still come from the real safe cloud; this selects
@@ -671,15 +655,30 @@ def _sample_safe_waypoint(
     ip_mask = np.abs(real.features[:, 0] - float(target_ip)) <= ip_tol
     direction_mask = mean_delta_signed * direction > min_mean_delta
     movement_mask = (mean_delta >= min_mean_delta) | (angle_delta >= min_angle_delta)
-    candidates = np.flatnonzero((boundary_dist >= min_dist) & (boundary_dist <= max_dist) & ip_mask & movement_mask & direction_mask)
+    candidates = np.flatnonzero(
+        (boundary_dist >= min_dist)
+        & (boundary_dist <= max_dist)
+        & ip_mask
+        & movement_mask
+        & direction_mask
+        & current_reachable
+    )
     if candidates.size == 0:
         ip_tol = max(25000.0, 0.14 * (float(real.feature_high[0]) - float(real.feature_low[0])))
         ip_mask = np.abs(real.features[:, 0] - float(target_ip)) <= ip_tol
-        candidates = np.flatnonzero((boundary_dist >= min_dist) & (boundary_dist <= max_dist) & ip_mask & movement_mask)
+        candidates = np.flatnonzero(
+            (boundary_dist >= min_dist)
+            & (boundary_dist <= max_dist)
+            & ip_mask
+            & movement_mask
+            & current_reachable
+        )
     if candidates.size == 0:
-        pool = np.flatnonzero(ip_mask)
+        pool = np.flatnonzero(ip_mask & current_reachable)
         if pool.size == 0:
-            pool = np.arange(boundary_dist.shape[0], dtype=np.int64)
+            pool = np.flatnonzero(current_reachable)
+        if pool.size == 0:
+            raise RuntimeError("no reachable current waypoint exists for synthetic segment")
         score = mean_delta[pool] / max(target_mean_delta, 1.0e-6) + angle_delta[pool] / max(target_angle_delta, 1.0e-6)
         order = pool[np.argsort(score)[::-1]]
         candidates = order[: min(256, order.shape[0])]
@@ -699,10 +698,12 @@ def _sample_safe_waypoint(
 
     # Make it new without leaving the local safe manifold: perturb only a small
     # distance in normalized feature space, then clip to the safe bounds.
-    perturb_n = rng.normal(0.0, 0.025, size=current.shape[0])
+    perturb_n = rng.normal(0.0, 0.025, size=current_feature.shape[0])
     perturb_n[0] = 0.0
     target = target + perturb_n * real.feature_scale
-    return np.minimum(np.maximum(target, real.feature_low), real.feature_high)
+    target = np.minimum(np.maximum(target, real.feature_low), real.feature_high)
+    target_current = real.currents[idx].copy()
+    return target, target_current
 
 
 def _interpolate_waypoint(start: np.ndarray, target: np.ndarray, duration: int) -> np.ndarray:
@@ -746,46 +747,6 @@ def _check_boundary_motion(real: RealSpace, radii: np.ndarray) -> str | None:
     if mean_range < required_mean and angle_range < required_angle:
         return "boundary_motion_too_small"
     return None
-
-
-def _estimate_currents(*, real: RealSpace, features: np.ndarray, knn: int) -> np.ndarray:
-    query = (features - real.feature_center.reshape(1, -1)) / real.feature_scale.reshape(1, -1)
-    out = np.empty((features.shape[0], real.currents.shape[1]), dtype=np.float64)
-    k = max(1, min(int(knn), real.features_norm.shape[0]))
-    for start in range(0, query.shape[0], 128):
-        block = query[start : start + 128]
-        dist2 = np.sum((block[:, None, :] - real.features_norm[None, :, :]) ** 2, axis=2)
-        idx = np.argpartition(dist2, kth=k - 1, axis=1)[:, :k]
-        local_dist = np.take_along_axis(dist2, idx, axis=1)
-        weights = 1.0 / (local_dist + 1.0e-6)
-        weights /= np.sum(weights, axis=1, keepdims=True)
-        out[start : start + block.shape[0]] = np.sum(real.currents[idx] * weights[:, :, None], axis=1)
-    return out
-
-
-def _align_currents_to_start(currents: np.ndarray, *, start_current: np.ndarray) -> np.ndarray:
-    out = np.asarray(currents, dtype=np.float64).copy()
-    start = np.asarray(start_current, dtype=np.float64).reshape(1, -1)
-    if out.ndim != 2 or start.shape[1] != out.shape[1]:
-        raise ValueError(f"current shape mismatch: currents={out.shape} start={start.shape}")
-    out += start - out[:1]
-    out[0] = start[0]
-    return out
-
-
-def _smooth_currents(currents: np.ndarray, *, width: int) -> np.ndarray:
-    width = max(1, int(width))
-    if width <= 1:
-        return currents
-    pad = width // 2
-    kernel = np.ones((width,), dtype=np.float64) / float(width)
-    padded = np.pad(currents, ((pad, pad), (0, 0)), mode="edge")
-    out = np.empty_like(currents)
-    for c in range(currents.shape[1]):
-        out[:, c] = np.convolve(padded[:, c], kernel, mode="valid")[: currents.shape[0]]
-    out[0] = currents[0]
-    out[-1] = currents[-1]
-    return out
 
 
 def _check_currents(real: RealSpace, currents: np.ndarray, *, dt: float, wiggle_room: float) -> str | None:

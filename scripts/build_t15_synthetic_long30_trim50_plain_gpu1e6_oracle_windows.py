@@ -71,9 +71,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--radii-margin-m", type=float, default=0.025)
     parser.add_argument("--current-envelope-margin", type=float, default=0.08)
     parser.add_argument("--max-cloud-rows", type=int, default=20000)
-    parser.add_argument("--knn", type=int, default=24)
-    parser.add_argument("--max-attempts-per-parent", type=int, default=2000)
-    parser.add_argument("--progress-every", type=int, default=25)
     parser.add_argument("--plot-examples", type=int, default=8)
     args = parser.parse_args(argv)
 
@@ -198,9 +195,6 @@ def _make_parents(
         max_steps=int(args.max_steps),
         dt=DT,
         wiggle_room=float(args.wiggle_room),
-        knn=int(args.knn),
-        max_attempts=int(args.max_attempts_per_parent) * int(count),
-        progress_every=int(args.progress_every),
         rng=rng,
     )
     if len(parents) != int(count):
