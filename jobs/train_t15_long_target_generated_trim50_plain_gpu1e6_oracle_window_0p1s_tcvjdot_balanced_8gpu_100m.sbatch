@@ -32,8 +32,9 @@ export PARENT_COUNT=${PARENT_COUNT:-12}
 export PARENT_MIN_STEPS=${PARENT_MIN_STEPS:-1000}
 export PARENT_MAX_STEPS=${PARENT_MAX_STEPS:-1200}
 export PARENT_STRIDE=${PARENT_STRIDE:-1}
-export PERTURB_FRACTION=${PERTURB_FRACTION:-0.035}
-export STATE_DISTANCE_LIMIT=${STATE_DISTANCE_LIMIT:-0.18}
+export STATE_DISTANCE_LIMIT=${STATE_DISTANCE_LIMIT:-0.08}
+export MOVE_DISTANCE_LIMIT=${MOVE_DISTANCE_LIMIT:-0.08}
+export CURRENT_USAGE_CAP=${CURRENT_USAGE_CAP:-0.75}
 
 export CONFIG_NAME=${CONFIG_NAME:-t15_long_target_generated_trim50_plain_gpu1e6_oracle_window_0p1s_tcvjdot_balanced_8gpu_100m}
 export RUN_NAME=${RUN_NAME:-t15_long_target_generated_trim50_plain_gpu1e6_oracle_window_0p1s_tcvjdot_balanced_8gpu_100m_${SLURM_JOB_ID:-manual}}
@@ -85,8 +86,9 @@ if [[ ! -f "${RESET_LIBRARY}" || ! -f "${GENERATED_TARGETS}" || ! -f "${ORACLE_T
         --parent-min-steps "${PARENT_MIN_STEPS}" \
         --parent-max-steps "${PARENT_MAX_STEPS}" \
         --parent-stride "${PARENT_STRIDE}" \
-        --perturb-fraction "${PERTURB_FRACTION}" \
         --state-distance-limit "${STATE_DISTANCE_LIMIT}" \
+        --move-distance-limit "${MOVE_DISTANCE_LIMIT}" \
+        --current-usage-cap "${CURRENT_USAGE_CAP}" \
         --out-dir "${GENERATED_TARGET_DIR}" \
         --initial-states-out "${RESET_LIBRARY}" \
         --targets-out "${GENERATED_TARGETS}" \

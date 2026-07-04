@@ -34,7 +34,7 @@ def _source(builder, shot: str, split: str, offset: float) -> object:
     step = np.arange(n, dtype=float)
     frac = step / float(n - 1)
     time_s = 0.05 + 0.001 * step
-    ip = 140000.0 + offset + 180000.0 * frac
+    ip = 145000.0 + offset + 120000.0 * frac
     a0 = 0.46 + 0.05 * frac
     e = 0.14 + 0.04 * frac
     delta = 0.08 + 0.03 * frac
@@ -53,7 +53,15 @@ def _source(builder, shot: str, split: str, offset: float) -> object:
             -8.0e4 + 1.0e4 * frac,
         ]
     )
-    return builder.SourceShot(shot=shot, split=split, time_s=time_s, x=x, params=params, coils=coils)
+    return builder.SourceShot(
+        shot=shot,
+        split=split,
+        time_s=time_s,
+        source_index=np.arange(n, dtype=np.int64),
+        x=x,
+        params=params,
+        coils=coils,
+    )
 
 
 def test_long_target_builder_writes_dense_oracle_windows_without_duplicate_keys(tmp_path: Path) -> None:
@@ -61,47 +69,52 @@ def test_long_target_builder_writes_dense_oracle_windows_without_duplicate_keys(
     sources = [_source(builder, "3856", "train", 0.0), _source(builder, "3864", "holdout", 5000.0)]
     limits = builder.simple.Limits(pfc_current=1.0e7, sol_current=1.0e7, pfc_deriv=1.0e8, sol_deriv=1.0e8)
     theta = np.linspace(-np.pi, np.pi, 32, endpoint=False, dtype=float)
-    real_x = np.concatenate([s.x for s in sources], axis=0)
-    real_params = np.concatenate([s.params for s in sources], axis=0)
-    real_radii = np.concatenate([builder.simple._radii_from_params(s.params, theta) for s in sources], axis=0)
-    real_coils = np.concatenate([s.coils for s in sources], axis=0)
-    envelope = builder._build_envelope(
-        real_x=real_x,
-        real_params=real_params,
-        real_radii=real_radii,
-        real_coils=real_coils,
-        limits=limits,
-    )
-    state_space = builder._state_space_from_sources(sources, limits=limits)
+    envelope = builder._build_envelope(sources=sources, theta=theta, limits=limits)
+    points = builder._safe_reset_points_from_sources(sources, limits=limits, current_usage_cap=1.0)
+    state_space = builder._state_space_from_points(points, limits=limits)
+    move_space = builder._move_space_from_sources(sources, steps=100, limits=limits)
     rejections = builder.Counter()
     parents = []
     rng = np.random.default_rng(7)
     for split, first_id in (("train", 0), ("holdout", 1)):
         parents.extend(
             builder._generate_parents(
-                [s for s in sources if s.split == split],
+                [p for p in points if p.split == split],
                 count=1,
                 first_parent_id=first_id,
                 rng=rng,
-                window_steps=100,
                 parent_min_steps=120,
                 parent_max_steps=120,
+                segment_min_steps=50,
+                segment_max_steps=70,
                 join_blend_steps=4,
-                perturb_fraction=0.0,
-                scale_min=1.0,
-                scale_max=1.0,
+                endpoint_distance_min=0.001,
+                endpoint_distance_max=10.0,
+                endpoint_mix_min=0.2,
+                endpoint_mix_max=0.4,
+                hold_probability=0.0,
                 theta=theta,
                 limits=limits,
                 envelope=envelope,
                 state_space=state_space,
-                state_distance_limit=1.0e-9,
+                state_distance_limit=10.0,
+                current_usage_cap=1.0,
                 max_attempts_per_parent=10,
                 rejections=rejections,
             )
         )
 
-    windows = builder._cut_parents(parents, window_steps=100, stride=1)
+    windows = builder._cut_parents(
+        parents,
+        window_steps=100,
+        stride=1,
+        move_space=move_space,
+        limits=limits,
+        move_distance_limit=10.0,
+        rejections=builder.Counter(),
+    )
     assert len(windows) == 42
+    assert {w.parent.source_shot for w in windows} == {"3856", "3864"}
 
     initial = tmp_path / "initial.npz"
     targets = tmp_path / "targets.npz"
