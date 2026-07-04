@@ -325,7 +325,8 @@ def _generate_previews(
         steps = int(rng.integers(int(min_steps), int(max_steps) + 1))
         start_idx = int(rng.integers(0, real.features.shape[0]))
         start_current = real.currents[start_idx].copy()
-        features = _sample_feature_trajectory(real=real, start=real.features[start_idx], steps=steps, rng=rng)
+        mode = _parent_mode_for_index(len(accepted))
+        features = _sample_feature_trajectory(real=real, start=real.features[start_idx], steps=steps, mode=mode, rng=rng)
         reason = _check_features(real, features)
         if reason is not None:
             reject_counts[reason] = reject_counts.get(reason, 0) + 1
@@ -348,6 +349,7 @@ def _generate_previews(
         accepted.append(
             {
                 "steps": steps,
+                "mode": mode,
                 "features": features,
                 "ip": features[:, 0],
                 "radii": radii,
@@ -359,11 +361,23 @@ def _generate_previews(
             }
         )
         print(
-            f"[synthetic-preview] accepted={len(accepted)}/{examples} attempts={attempts} steps={steps}",
+            f"[synthetic-preview] accepted={len(accepted)}/{examples} attempts={attempts} mode={mode} steps={steps}",
             flush=True,
         )
     _maybe_print_progress(attempts, accepted, reject_counts, progress_every=1)
     return accepted, reject_counts
+
+
+def _parent_mode_for_index(index: int) -> str:
+    modes = (
+        "ramp_hold",
+        "hold_ramp",
+        "ramp_hold_reverse",
+        "ramp_rate_change",
+        "hold_ramp_hold",
+        "ramp",
+    )
+    return modes[int(index) % len(modes)]
 
 
 def _maybe_print_progress(
@@ -383,9 +397,16 @@ def _maybe_print_progress(
     )
 
 
-def _sample_feature_trajectory(*, real: RealSpace, start: np.ndarray, steps: int, rng: np.random.Generator) -> np.ndarray:
+def _sample_feature_trajectory(
+    *,
+    real: RealSpace,
+    start: np.ndarray,
+    steps: int,
+    mode: str | None = None,
+    rng: np.random.Generator,
+) -> np.ndarray:
     dims = start.shape[0]
-    ip_profile, edges = _sample_ip_profile(real=real, start_ip=float(start[0]), steps=steps, rng=rng)
+    ip_profile, edges = _sample_ip_profile(real=real, start_ip=float(start[0]), steps=steps, mode=mode, rng=rng)
     features = np.empty((steps + 1, dims), dtype=np.float64)
     features[0] = start
     features[:, 0] = ip_profile
@@ -413,6 +434,7 @@ def _sample_ip_profile(
     real: RealSpace,
     start_ip: float,
     steps: int,
+    mode: str | None = None,
     rng: np.random.Generator,
 ) -> tuple[np.ndarray, np.ndarray]:
     low = float(real.feature_low[0])
@@ -420,12 +442,14 @@ def _sample_ip_profile(
     start_ip = float(np.clip(start_ip, low, high))
     max_rate = max(1.0e5, float(real.ip_rate_abs_p99))
 
-    mode = str(
-        rng.choice(
-            np.asarray(["hold", "ramp", "hold_ramp", "ramp_hold", "ramp_hold_reverse"]),
-            p=np.asarray([0.08, 0.34, 0.20, 0.28, 0.10]),
+    if mode is None:
+        mode = str(
+            rng.choice(
+                np.asarray(["ramp_hold", "hold_ramp", "ramp_hold_reverse", "ramp_rate_change", "hold_ramp_hold", "ramp"]),
+                p=np.asarray([0.24, 0.20, 0.18, 0.18, 0.12, 0.08]),
+            )
         )
-    )
+    mode = str(mode)
     edges = _ip_segment_edges(mode=mode, steps=int(steps), rng=rng)
     profile = np.empty((int(steps) + 1,), dtype=np.float64)
     profile[0] = start_ip
@@ -460,7 +484,7 @@ def _ip_segment_edges(*, mode: str, steps: int, rng: np.random.Generator) -> np.
     if mode in {"hold", "ramp"} or steps < 360:
         return np.asarray([0, steps], dtype=np.int64)
     min_seg = min(max(150, steps // 7), max(1, steps // 3))
-    if mode in {"hold_ramp", "ramp_hold"}:
+    if mode in {"hold_ramp", "ramp_hold", "ramp_rate_change"}:
         cut = int(rng.integers(min_seg, steps - min_seg + 1))
         return np.asarray([0, cut, steps], dtype=np.int64)
     cut1 = int(rng.integers(min_seg, steps - 2 * min_seg + 1))
@@ -477,6 +501,10 @@ def _ip_segment_kind(*, mode: str, segment_idx: int, segment_count: int) -> str:
         return "hold" if segment_idx == 0 else "ramp"
     if mode == "ramp_hold":
         return "ramp" if segment_idx == 0 else "hold"
+    if mode == "ramp_rate_change":
+        return "ramp"
+    if mode == "hold_ramp_hold":
+        return "ramp" if segment_idx == 1 else "hold"
     if mode == "ramp_hold_reverse":
         if segment_idx == 0 or segment_idx == segment_count - 1:
             return "ramp"
@@ -668,6 +696,7 @@ def _write_preview_npz(path: Path, trajectories: list[dict[str, np.ndarray | int
         path,
         schema=np.asarray("t15_synthetic_long_preview_v1"),
         steps=np.asarray([int(t["steps"]) for t in trajectories], dtype=np.int64),
+        mode=np.asarray([str(t.get("mode", "")) for t in trajectories]),
         reset_shot_id=np.asarray([int(t.get("reset_shot_id", -1)) for t in trajectories], dtype=np.int64),
         reset_source_index=np.asarray([int(t.get("reset_source_index", -1)) for t in trajectories], dtype=np.int64),
         reset_time_s=np.asarray([float(t.get("reset_time_s", np.nan)) for t in trajectories], dtype=np.float64),
@@ -697,9 +726,12 @@ def _write_summary(
     args: argparse.Namespace,
 ) -> dict[str, object]:
     accepted_steps = [int(t["steps"]) for t in trajectories]
+    mode_counts: dict[str, int] = {}
     action_max = []
     current_usage = []
     for t in trajectories:
+        mode = str(t.get("mode", ""))
+        mode_counts[mode] = mode_counts.get(mode, 0) + 1
         currents = np.asarray(t["currents"], dtype=np.float64)
         jdot = np.asarray(t["jdot"], dtype=np.float64)
         action = jdot / real.derivative_limits.reshape(1, -1)
@@ -712,6 +744,7 @@ def _write_summary(
         "safe_split": str(args.safe_split),
         "accepted": len(trajectories),
         "requested": int(args.examples),
+        "mode_counts": dict(sorted(mode_counts.items())),
         "reject_counts": dict(sorted(reject_counts.items())),
         "steps": {
             "min": int(np.min(accepted_steps)),
@@ -755,11 +788,26 @@ def _write_report(path: Path, summary: dict[str, object]) -> None:
         f"- Mean max normalized action: {summary['accepted_action_abs_max']['mean']:.4f}",
         f"- Max normalized action: {summary['accepted_action_abs_max']['max']:.4f}",
         "",
-        "## Rejections",
+        "## Modes",
         "",
-        "| reason | count |",
+        "| mode | count |",
         "|---|---:|",
     ]
+    modes = summary.get("mode_counts", {})
+    if isinstance(modes, dict) and modes:
+        for key, value in modes.items():
+            lines.append(f"| `{key}` | {value} |")
+    else:
+        lines.append("| none | 0 |")
+    lines.extend(
+        [
+            "",
+            "## Rejections",
+            "",
+            "| reason | count |",
+            "|---|---:|",
+        ]
+    )
     rejects = summary.get("reject_counts", {})
     if isinstance(rejects, dict) and rejects:
         for key, value in rejects.items():

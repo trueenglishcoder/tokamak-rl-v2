@@ -8,7 +8,7 @@ from scripts.build_t15_synthetic_long30_trim50_plain_gpu1e6_oracle_windows impor
     WINDOW_STEPS,
     _windows_from_parent,
 )
-from scripts.build_t15_synthetic_long_preview import _sample_ip_profile
+from scripts.build_t15_synthetic_long_preview import _parent_mode_for_index, _sample_ip_profile
 
 
 def test_windows_from_parent_uses_overlapping_100_step_windows() -> None:
@@ -58,3 +58,14 @@ def test_synthetic_long_ip_profile_is_piecewise_ramp_or_hold() -> None:
         assert np.all(profile >= real.feature_low[0])
         assert np.all(profile <= real.feature_high[0])
         assert sign_changes <= 1
+
+
+def test_synthetic_long_preview_cycles_named_parent_modes() -> None:
+    assert [_parent_mode_for_index(i) for i in range(6)] == [
+        "ramp_hold",
+        "hold_ramp",
+        "ramp_hold_reverse",
+        "ramp_rate_change",
+        "hold_ramp_hold",
+        "ramp",
+    ]

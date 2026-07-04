@@ -333,6 +333,7 @@ def _parent_summary(
     return {
         "parent_id": int(parent_id),
         "split": str(split),
+        "mode": str(parent.get("mode", "")),
         "steps": int(parent["steps"]),
         "windows": int(window_count),
         "ip_min": float(np.min(np.asarray(parent["ip"], dtype=np.float64))),
