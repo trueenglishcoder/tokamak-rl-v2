@@ -18,6 +18,9 @@ class RealSpace:
     radii: np.ndarray
     features: np.ndarray
     currents: np.ndarray
+    source_shot_id: np.ndarray
+    source_index: np.ndarray
+    source_time_s: np.ndarray
     jdot: np.ndarray
     action: np.ndarray
     current_limits: np.ndarray
@@ -186,6 +189,17 @@ def _load_real_space(
         action = np.asarray(target["real_jdot_action"], dtype=np.float64)
         current_limits = np.asarray(target["current_limits"], dtype=np.float64)
         derivative_limits = np.asarray(target["derivative_limits"], dtype=np.float64)
+        shot_id = np.asarray(target["shot_id"], dtype=np.int64) if "shot_id" in target.files else np.arange(ip.shape[0])
+        source_index = (
+            np.asarray(target["source_index"], dtype=np.int64)
+            if "source_index" in target.files
+            else np.zeros((ip.shape[0],), dtype=np.int64)
+        )
+        time_s = (
+            np.asarray(target["time_s"], dtype=np.float64)
+            if "time_s" in target.files
+            else np.zeros((ip.shape[0],), dtype=np.float64)
+        )
         pfc0 = np.asarray(init["pfc0"], dtype=np.float64)
         sol0 = np.asarray(init["sol0"], dtype=np.float64)
         split = np.asarray(target["split"]).astype(str) if "split" in target.files else np.full(ip.shape[0], "")
@@ -203,6 +217,9 @@ def _load_real_space(
         ip = ip[mask]
         radii = radii[mask]
         action = action[mask]
+        shot_id = shot_id[mask]
+        source_index = source_index[mask]
+        time_s = time_s[mask]
         pfc0 = pfc0[mask]
         sol0 = sol0[mask]
 
@@ -219,6 +236,11 @@ def _load_real_space(
     features = np.concatenate([ip.reshape(-1, 1), coeffs], axis=1)
 
     current_flat = currents.reshape(-1, currents.shape[-1])
+    point_count = ip.shape[1]
+    point_offset = np.tile(np.arange(point_count, dtype=np.int64), ip.shape[0])
+    shot_flat = np.repeat(shot_id, point_count)
+    source_index_flat = np.repeat(source_index, point_count) + point_offset
+    time_flat = np.repeat(time_s, point_count) + point_offset.astype(np.float64) * float(dt)
     action_flat = action.reshape(-1, action.shape[-1])
     jdot_flat = jdot.reshape(-1, jdot.shape[-1])
     action_jump = np.diff(action, axis=1).reshape(-1, action.shape[-1])
@@ -237,6 +259,9 @@ def _load_real_space(
         radii=radii,
         features=feature_cloud,
         currents=current_cloud,
+        source_shot_id=shot_flat[cloud_idx],
+        source_index=source_index_flat[cloud_idx],
+        source_time_s=time_flat[cloud_idx],
         jdot=jdot_flat,
         action=action_flat,
         current_limits=current_limits,
@@ -296,6 +321,7 @@ def _generate_previews(
         attempts += 1
         steps = int(rng.integers(int(min_steps), int(max_steps) + 1))
         start_idx = int(rng.integers(0, real.features.shape[0]))
+        start_current = real.currents[start_idx].copy()
         features = _sample_feature_trajectory(real=real, start=real.features[start_idx], steps=steps, rng=rng)
         reason = _check_features(real, features)
         if reason is not None:
@@ -309,6 +335,7 @@ def _generate_previews(
             _maybe_print_progress(attempts, accepted, reject_counts, progress_every=progress_every)
             continue
         currents = _estimate_currents(real=real, features=features, knn=int(knn))
+        currents = _align_currents_to_start(currents, start_current=start_current)
         currents = _smooth_currents(currents, width=31)
         reason = _check_currents(real, currents, dt=dt, wiggle_room=wiggle_room)
         if reason is not None:
@@ -323,6 +350,9 @@ def _generate_previews(
                 "radii": radii,
                 "currents": currents,
                 "jdot": np.diff(currents, axis=0) / float(dt),
+                "reset_shot_id": int(real.source_shot_id[start_idx]),
+                "reset_source_index": int(real.source_index[start_idx]),
+                "reset_time_s": float(real.source_time_s[start_idx]),
             }
         )
         print(
@@ -443,6 +473,16 @@ def _estimate_currents(*, real: RealSpace, features: np.ndarray, knn: int) -> np
     return out
 
 
+def _align_currents_to_start(currents: np.ndarray, *, start_current: np.ndarray) -> np.ndarray:
+    out = np.asarray(currents, dtype=np.float64).copy()
+    start = np.asarray(start_current, dtype=np.float64).reshape(1, -1)
+    if out.ndim != 2 or start.shape[1] != out.shape[1]:
+        raise ValueError(f"current shape mismatch: currents={out.shape} start={start.shape}")
+    out += start - out[:1]
+    out[0] = start[0]
+    return out
+
+
 def _smooth_currents(currents: np.ndarray, *, width: int) -> np.ndarray:
     width = max(1, int(width))
     if width <= 1:
@@ -486,6 +526,9 @@ def _write_preview_npz(path: Path, trajectories: list[dict[str, np.ndarray | int
         path,
         schema=np.asarray("t15_synthetic_long_preview_v1"),
         steps=np.asarray([int(t["steps"]) for t in trajectories], dtype=np.int64),
+        reset_shot_id=np.asarray([int(t.get("reset_shot_id", -1)) for t in trajectories], dtype=np.int64),
+        reset_source_index=np.asarray([int(t.get("reset_source_index", -1)) for t in trajectories], dtype=np.int64),
+        reset_time_s=np.asarray([float(t.get("reset_time_s", np.nan)) for t in trajectories], dtype=np.float64),
         ip=np.asarray([_pad_2d(np.asarray(t["ip"], dtype=np.float64), max_len=max(int(x["steps"]) + 1 for x in trajectories)) for t in trajectories]),
         radii=np.asarray([_pad_2d(np.asarray(t["radii"], dtype=np.float64), max_len=max(int(x["steps"]) + 1 for x in trajectories)) for t in trajectories]),
         currents=np.asarray([_pad_2d(np.asarray(t["currents"], dtype=np.float64), max_len=max(int(x["steps"]) + 1 for x in trajectories)) for t in trajectories]),

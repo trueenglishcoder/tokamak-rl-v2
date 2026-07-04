@@ -25,15 +25,18 @@ TCV-derivative reward
 ## Supported Synthetic Experiment
 
 ```text
+build_t15_synthetic_long30_trim50_plain_gpu1e6_replay_window_0p1s_1gpu.sbatch
 train_t15_synthetic_long30_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_100m.sbatch
 ```
 
-This is the current synthetic-long experiment. It first builds 30 new
-1.0-1.5 s synthetic training parents plus one synthetic holdout parent inside
-the Slurm container, cuts them into overlapping 100-step replay windows, and
-then delegates to the same 8-GPU training script used by the real trim50
-production path. The only intended differences are dataset paths, run name, and
-W&B project name.
+This is the current synthetic-long experiment. The build job creates 30 new
+1.0-1.5 s synthetic training parents plus one synthetic holdout parent, each
+starting from a real sampled reset state. It cuts every parent into all
+overlapping 100-step replay windows, the same way the real replay-window
+dataset is built. The train job is train-only: it refuses to launch unless the
+synthetic dataset already exists, then delegates to the same 8-GPU training
+script used by the real trim50 production path. The only intended training
+differences are dataset paths, run name, and W&B project name.
 
 ## Diagnostics
 

@@ -13,11 +13,6 @@ set -euo pipefail
 cd /scratch/$USER/tokamak/tokamak-rl-v2
 mkdir -p slurm_logs outputs
 
-export REAL_SOURCE_CONFIG=${REAL_SOURCE_CONFIG:-configs/experiments/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_mpo_balanced.yaml}
-export REAL_RESET_LIBRARY=${REAL_RESET_LIBRARY:-data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_initial_states.npz}
-export REAL_ORACLE_TARGET_DIR=${REAL_ORACLE_TARGET_DIR:-data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_targets}
-export REAL_ORACLE_TARGETS=${REAL_ORACLE_TARGETS:-${REAL_ORACLE_TARGET_DIR}/t15_replay_window_oracle_targets.npz}
-
 export SOURCE_CONFIG=${SOURCE_CONFIG:-configs/experiments/t15_synthetic_long30_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_mpo_balanced.yaml}
 export RESET_LIBRARY=${RESET_LIBRARY:-data/processed/t15_synthetic_long30_trim50_plain_gpu1e6_replay_window_0p1s_oracle_initial_states.npz}
 export ORACLE_TARGET_DIR=${ORACLE_TARGET_DIR:-data/processed/t15_synthetic_long30_trim50_plain_gpu1e6_replay_window_0p1s_oracle_targets}
@@ -27,111 +22,32 @@ export RUN_NAME=${RUN_NAME:-t15_synthetic_long30_trim50_plain_gpu1e6_replay_wind
 export TRAIN_OUTPUT=${TRAIN_OUTPUT:-outputs/${RUN_NAME}}
 export GENERATED_CONFIG=${GENERATED_CONFIG:-${TRAIN_OUTPUT}/generated_configs/${RUN_NAME}.json}
 export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-tokamak-rl-v2-tcvjdot-synlong30-trim50-gpu1e6-balanced-8gpu-100m-${SLURM_JOB_ID:-manual}}
-export SYNTHETIC_TRAIN_PARENTS=${SYNTHETIC_TRAIN_PARENTS:-30}
-export SYNTHETIC_HOLDOUT_PARENTS=${SYNTHETIC_HOLDOUT_PARENTS:-1}
-export SYNTHETIC_MIN_STEPS=${SYNTHETIC_MIN_STEPS:-1000}
-export SYNTHETIC_MAX_STEPS=${SYNTHETIC_MAX_STEPS:-1500}
-export SYNTHETIC_SEED=${SYNTHETIC_SEED:-37}
-export SYNTHETIC_WIGGLE_ROOM=${SYNTHETIC_WIGGLE_ROOM:-1.15}
-export SYNTHETIC_MAX_ATTEMPTS_PER_PARENT=${SYNTHETIC_MAX_ATTEMPTS_PER_PARENT:-2000}
-
-export TRIM_MACHINE_CONFIG_SOURCE=${TRIM_MACHINE_CONFIG_SOURCE:-../tokamak-sim/configs/T15MD_new_data.toml}
-export TRIM_DATA_ROOT=${TRIM_DATA_ROOT:-../tokamak-sim/data/t15_data_new_trim50}
-export ORACLE_MACHINE_CONFIG=${ORACLE_MACHINE_CONFIG:-data/processed/t15_new_trim50_plain_gpu1e6_machine_config.toml}
-export ORACLE_CONFIG_OUT=${ORACLE_CONFIG_OUT:-data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_config.yaml}
+export TRAIN_ENV_STEPS=${TRAIN_ENV_STEPS:-100000000}
+export EVAL_ENV_STEPS=${EVAL_ENV_STEPS:-500000}
+export CHECKPOINT_ENV_STEPS=${CHECKPOINT_ENV_STEPS:-1000000}
+export NUM_ENVS=${NUM_ENVS:-2048}
 
 if [[ ! -f "${SOURCE_CONFIG}" ]]; then
   echo "missing synthetic long30 training config: ${SOURCE_CONFIG}" >&2
   exit 2
 fi
-if [[ ! -f "${REAL_SOURCE_CONFIG}" ]]; then
-  echo "missing canonical real trim50 training config: ${REAL_SOURCE_CONFIG}" >&2
-  exit 2
-fi
-if [[ ! -f "${TRIM_MACHINE_CONFIG_SOURCE}" ]]; then
-  echo "missing trim50 machine config source: ${TRIM_MACHINE_CONFIG_SOURCE}" >&2
-  exit 2
-fi
-if [[ ! -d "${TRIM_DATA_ROOT}" ]]; then
-  echo "missing trim50 data root: ${TRIM_DATA_ROOT}" >&2
-  exit 2
-fi
-
-if [[ ! -f "${REAL_RESET_LIBRARY}" || ! -f "${REAL_ORACLE_TARGETS}" || ! -d "${REAL_ORACLE_TARGET_DIR}" ]]; then
-  echo "canonical real trim50 oracle libraries are missing; rebuilding them inside the container"
-  srun \
-    --ntasks=1 \
-    --container-image /scratch/$USER/tokamak/tokamak-rl-v2.sqsh \
-    --container-mounts /scratch/$USER/tokamak:/workspace,/dev:/dev,/lib/x86_64-linux-gnu:/host-libs \
-    bash -lc '
-      set -euo pipefail
-      mkdir -p /tmp/nvidia-lib
-      ln -sf /host-libs/libcuda.so.1 /tmp/nvidia-lib/libcuda.so.1
-      ln -sf /tmp/nvidia-lib/libcuda.so.1 /tmp/nvidia-lib/libcuda.so
-      ln -sf /host-libs/libnvidia-ml.so.1 /tmp/nvidia-lib/libnvidia-ml.so.1
-      ln -sf /tmp/nvidia-lib/libnvidia-ml.so.1 /tmp/nvidia-lib/libnvidia-ml.so
-      export LD_LIBRARY_PATH=/tmp/nvidia-lib:${LD_LIBRARY_PATH:-}
-      export PYTHONPATH=/workspace/tokamak-sim:/workspace/tokamak-rl-v2:${PYTHONPATH:-}
-      cd /workspace/tokamak-rl-v2
-
-      python3 scripts/write_trim50_plain_gpu1e6_machine_config.py \
-        --source "${TRIM_MACHINE_CONFIG_SOURCE}" \
-        --out "${ORACLE_MACHINE_CONFIG}"
-
-      python3 scripts/build_t15_new_replay_window_oracle_targets.py \
-        --base-config "${REAL_SOURCE_CONFIG}" \
-        --data-root "${TRIM_DATA_ROOT}" \
-        --machine-config "${ORACLE_MACHINE_CONFIG}" \
-        --target-dir "${REAL_ORACLE_TARGET_DIR}" \
-        --initial-library-out "${REAL_RESET_LIBRARY}" \
-        --config-out "${ORACLE_CONFIG_OUT}" \
-        --compute-backend gpu \
-        --gpu-device cuda:0 \
-        --batch-size 256 \
-        --window-steps 100 \
-        --angles 32 \
-        --train-shots 3856 3857 3858 3863 \
-        --holdout-shots 3864
-    '
-fi
-
-if [[ ! -f "${RESET_LIBRARY}" || ! -f "${ORACLE_TARGETS}" || ! -d "${ORACLE_TARGET_DIR}" ]]; then
-  echo "synthetic long30 oracle libraries are missing; building them inside the container"
-  srun \
-    --ntasks=1 \
-    --container-image /scratch/$USER/tokamak/tokamak-rl-v2.sqsh \
-    --container-mounts /scratch/$USER/tokamak:/workspace \
-    bash -lc '
-      set -euo pipefail
-      cd /workspace/tokamak-rl-v2
-      python3 scripts/build_t15_synthetic_long30_trim50_plain_gpu1e6_oracle_windows.py \
-        --oracle-target "${REAL_ORACLE_TARGETS}" \
-        --initial-library "${REAL_RESET_LIBRARY}" \
-        --target-dir "${ORACLE_TARGET_DIR}" \
-        --initial-library-out "${RESET_LIBRARY}" \
-        --train-parents "${SYNTHETIC_TRAIN_PARENTS}" \
-        --holdout-parents "${SYNTHETIC_HOLDOUT_PARENTS}" \
-        --min-steps "${SYNTHETIC_MIN_STEPS}" \
-        --max-steps "${SYNTHETIC_MAX_STEPS}" \
-        --seed "${SYNTHETIC_SEED}" \
-        --wiggle-room "${SYNTHETIC_WIGGLE_ROOM}" \
-        --max-attempts-per-parent "${SYNTHETIC_MAX_ATTEMPTS_PER_PARENT}"
-    '
-fi
-
 if [[ ! -f "${RESET_LIBRARY}" ]]; then
-  echo "missing synthetic long30 reset library after build: ${RESET_LIBRARY}" >&2
+  echo "missing synthetic long30 reset library: ${RESET_LIBRARY}" >&2
+  echo "build it first with jobs/build_t15_synthetic_long30_trim50_plain_gpu1e6_replay_window_0p1s_1gpu.sbatch" >&2
   exit 2
 fi
 if [[ ! -f "${ORACLE_TARGETS}" ]]; then
-  echo "missing synthetic long30 oracle targets after build: ${ORACLE_TARGETS}" >&2
+  echo "missing synthetic long30 oracle targets: ${ORACLE_TARGETS}" >&2
+  echo "build them first with jobs/build_t15_synthetic_long30_trim50_plain_gpu1e6_replay_window_0p1s_1gpu.sbatch" >&2
+  exit 2
+fi
+if [[ ! -d "${ORACLE_TARGET_DIR}" ]]; then
+  echo "missing synthetic long30 oracle target directory: ${ORACLE_TARGET_DIR}" >&2
   exit 2
 fi
 
-if [[ -z "${HOLDOUT_EVAL_EPISODES:-}" ]]; then
-  HOLDOUT_EVAL_EPISODES=$(python3 scripts/count_npz_string_value.py "${RESET_LIBRARY}" --array split --value holdout)
-  export HOLDOUT_EVAL_EPISODES
-fi
+HOLDOUT_EVAL_EPISODES=$(python3 scripts/count_npz_string_value.py "${RESET_LIBRARY}" --array split --value holdout)
+export HOLDOUT_EVAL_EPISODES
 if [[ "${HOLDOUT_EVAL_EPISODES}" -le 0 ]]; then
   echo "synthetic long30 reset library has no holdout windows" >&2
   exit 2

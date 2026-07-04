@@ -237,6 +237,9 @@ def _windows_from_parent(
         raise ValueError(f"parent {parent_id} produced actions outside normalized derivative limits")
 
     rows: list[dict[str, Any]] = []
+    reset_shot_id = int(parent.get("reset_shot_id", -1))
+    reset_source_index = int(parent.get("reset_source_index", -1))
+    reset_time_s = float(parent.get("reset_time_s", np.nan))
     for start in range(0, ip.shape[0] - WINDOW_STEPS):
         end = start + WINDOW_STEPS
         ip_target = ip[start : end + 1]
@@ -256,6 +259,9 @@ def _windows_from_parent(
                 "difficulty_bin": _difficulty_bin(float(ip_target[-1] - ip_target[0])),
                 "oracle_ip_mean_error_a": 0.0,
                 "oracle_ip_max_error_a": 0.0,
+                "parent_reset_shot_id": reset_shot_id,
+                "parent_reset_source_index": reset_source_index,
+                "parent_reset_time_s": reset_time_s,
             }
         )
     return rows
@@ -289,6 +295,9 @@ def _write_oracle_npz(path: Path, rows: list[dict[str, Any]], *, current_limits:
         real_jdot_action=np.stack([r["real_jdot_action"] for r in rows], axis=0).astype(np.float32),
         oracle_ip_mean_error_a=np.asarray([r["oracle_ip_mean_error_a"] for r in rows], dtype=np.float32),
         oracle_ip_max_error_a=np.asarray([r["oracle_ip_max_error_a"] for r in rows], dtype=np.float32),
+        parent_reset_shot_id=np.asarray([r["parent_reset_shot_id"] for r in rows], dtype=np.int64),
+        parent_reset_source_index=np.asarray([r["parent_reset_source_index"] for r in rows], dtype=np.int64),
+        parent_reset_time_s=np.asarray([r["parent_reset_time_s"] for r in rows], dtype=np.float64),
         current_limits=np.asarray(current_limits, dtype=np.float32),
         derivative_limits=np.asarray(derivative_limits, dtype=np.float32),
     )
@@ -306,6 +315,9 @@ def _write_initial_library(path: Path, rows: list[dict[str, Any]]) -> None:
         sol0=np.stack([r["sol0"] for r in rows], axis=0).astype(np.float32),
         split=np.asarray([r["split"] for r in rows]),
         difficulty_bin=np.asarray([r["difficulty_bin"] for r in rows]),
+        parent_reset_shot_id=np.asarray([r["parent_reset_shot_id"] for r in rows], dtype=np.int64),
+        parent_reset_source_index=np.asarray([r["parent_reset_source_index"] for r in rows], dtype=np.int64),
+        parent_reset_time_s=np.asarray([r["parent_reset_time_s"] for r in rows], dtype=np.float64),
     )
 
 
@@ -329,6 +341,9 @@ def _parent_summary(
         "radii_max": float(np.max(np.asarray(parent["radii"], dtype=np.float64))),
         "current_abs_max": float(np.max(np.abs(currents))),
         "jdot_abs_max": float(np.max(np.abs(jdot))),
+        "reset_shot_id": int(parent.get("reset_shot_id", -1)),
+        "reset_source_index": int(parent.get("reset_source_index", -1)),
+        "reset_time_s": float(parent.get("reset_time_s", np.nan)),
     }
 
 
