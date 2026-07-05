@@ -540,6 +540,11 @@ def _infer_currents(
     )
     query_key = (query_key - space.key_center.reshape(1, -1)) / space.key_scale.reshape(1, -1)
     pred = _knn_weighted_average(query_key, space.knn_keys, space.knn_currents, k=int(knn_k))
+    # KNN is a local state lookup, so nearest-neighbor identity can change from
+    # one millisecond to the next. Smooth the inferred current path before
+    # differencing; otherwise the diagnostic oracle action becomes needle-like
+    # and downstream current scaling collapses otherwise reasonable parents.
+    pred = _lowpass_2d(pred, width=_adaptive_odd_width(pred.shape[0], target=121))
     shifted = start_current.reshape(1, -1) + (pred - pred[0].reshape(1, -1))
     shifted[0] = start_current
     return shifted
@@ -944,6 +949,15 @@ def _lowpass_2d(values: np.ndarray, *, width: int) -> np.ndarray:
     for dim in range(values.shape[1]):
         out[:, dim] = np.convolve(np.pad(values[:, dim], (pad, pad), mode="edge"), kernel, mode="valid")[: values.shape[0]]
     return out
+
+
+def _adaptive_odd_width(length: int, *, target: int) -> int:
+    length = int(length)
+    target = int(target)
+    if length < 3:
+        return 1
+    width = min(target, length if length % 2 == 1 else length - 1)
+    return max(3, int(width))
 
 
 def _smoothstep(x: np.ndarray) -> np.ndarray:

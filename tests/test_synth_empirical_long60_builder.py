@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.build_t15_synth_empirical_long60 import (
     WINDOW_STEPS,
     _generate_parent,
+    _infer_currents,
     _load_empirical_space,
     _project_features,
     _windows_from_parent,
@@ -154,6 +155,40 @@ def test_feature_projection_scales_instead_of_clipping() -> None:
     assert np.isclose(scale, 0.5)
     assert np.allclose(projected[:, 0], [0.0, 0.5, 1.0, 1.5])
     assert np.allclose(np.diff(projected[:, 0]), [0.5, 0.5, 0.5])
+
+
+def test_current_inference_smooths_neighbor_identity_jumps() -> None:
+    features = np.zeros((301, 2), dtype=np.float64)
+    velocities = np.zeros((300, 2), dtype=np.float64)
+    current_a = np.zeros((1, 9), dtype=np.float64)
+    current_b = np.full((1, 9), 900000.0, dtype=np.float64)
+    space = SimpleNamespace(
+        real=SimpleNamespace(
+            feature_center=np.zeros(2, dtype=np.float64),
+            feature_scale=np.ones(2, dtype=np.float64),
+        ),
+        velocity_center=np.zeros(2, dtype=np.float64),
+        velocity_scale=np.ones(2, dtype=np.float64),
+        key_center=np.zeros(4, dtype=np.float64),
+        key_scale=np.ones(4, dtype=np.float64),
+        knn_keys=np.asarray([[0.0, 0.0, 0.0, 0.0], [100.0, 0.0, 0.0, 0.0]], dtype=np.float64),
+        knn_currents=np.concatenate([current_a, current_b], axis=0),
+    )
+    features[:150, 0] = 0.0
+    features[150:, 0] = 100.0
+
+    currents = _infer_currents(
+        space=space,
+        features=features,
+        velocities=velocities,
+        start_current=np.zeros(9, dtype=np.float64),
+        knn_k=1,
+    )
+    jdot = np.diff(currents[:, 0])
+
+    assert np.max(np.abs(jdot)) < 40000.0
+    assert currents[0, 0] == 0.0
+    assert currents[-1, 0] > 850000.0
 
 
 def test_empirical_cutting_uses_overlapping_100_step_windows(tmp_path: Path) -> None:
