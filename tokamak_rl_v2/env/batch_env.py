@@ -25,6 +25,10 @@ from tokamak_rl_v2.env.references import (
 from tokamak_rl_v2.env.t15_csv_initial_states import CsvInitialStateLibrary, CsvInitialStateSample
 from tokamak_rl_v2.rewards import build_reward
 
+_RATE_OBSERVATION_KINDS = {"controller_state_v5", "controller_state_v6", "controller_state_v7_no_step_norm"}
+_INTEGRAL_OBSERVATION_KINDS = {"controller_state_v6", "controller_state_v7_no_step_norm"}
+_NO_STEP_NORM_OBSERVATION_KINDS = {"controller_state_v7_no_step_norm"}
+
 
 @dataclass(slots=True)
 class BatchStep:
@@ -481,7 +485,7 @@ class TokamakMagneticControlEnv:
     def _actor_feature_slices(self) -> dict[str, tuple[int, int]]:
         n_angles = int(self.config.sim.angles)
         preview = int(self.config.observation.target_preview_steps)
-        sizes: tuple[tuple[str, int], ...] = (
+        base_sizes: tuple[tuple[str, int], ...] = (
             ("step_norm", 1),
             ("ip", 1),
             ("ip_ref", 1),
@@ -493,13 +497,17 @@ class TokamakMagneticControlEnv:
             ("boundary_radii_error", n_angles),
             ("boundary_found", 1),
         )
-        if self.config.observation.actor_kind in {"controller_state_v5", "controller_state_v6"}:
+        if self.config.observation.actor_kind in _NO_STEP_NORM_OBSERVATION_KINDS:
+            sizes = tuple((name, size) for name, size in base_sizes if name != "step_norm")
+        else:
+            sizes = base_sizes
+        if self.config.observation.actor_kind in _RATE_OBSERVATION_KINDS:
             sizes = sizes + (
                 ("ip_ref_rate", 1),
                 ("boundary_ref_rate", n_angles),
                 ("ip_measured_rate", 1),
             )
-        if self.config.observation.actor_kind == "controller_state_v6":
+        if self.config.observation.actor_kind in _INTEGRAL_OBSERVATION_KINDS:
             sizes = sizes + (
                 ("integral_ip_error", 1),
                 ("integral_boundary_radii_error", n_angles),
@@ -616,19 +624,23 @@ class TokamakMagneticControlEnv:
         current_scale = torch.where(torch.isfinite(self.current_limits) & (self.current_limits > 0.0), self.current_limits, torch.ones_like(self.current_limits))
         deriv_scale = torch.where(torch.isfinite(self.derivative_limits) & (self.derivative_limits > 0.0), self.derivative_limits, torch.ones_like(self.derivative_limits))
         current_usage_fraction, current_margin_fraction, derivative_usage = self._constraint_metrics(current=currents, derivs=derivs)
-        parts = [
-            self.step_index.to(torch.float32).reshape(self.batch_size, 1) / max(float(self.config.sim.max_episode_steps), 1.0),
-            (ip / 5.0e5).reshape(self.batch_size, 1),
-            (ip_ref / 5.0e5).reshape(self.batch_size, 1),
-            ((ip - ip_ref) / 5.0e5).reshape(self.batch_size, 1),
-            currents / current_scale[None, :],
-            derivs / deriv_scale[None, :],
-            measured_radii,
-            target_radii,
-            target_radii - measured_radii,
-            boundary_found,
-        ]
-        if self.config.observation.actor_kind in {"controller_state_v5", "controller_state_v6"}:
+        parts = []
+        if self.config.observation.actor_kind not in _NO_STEP_NORM_OBSERVATION_KINDS:
+            parts.append(self.step_index.to(torch.float32).reshape(self.batch_size, 1) / max(float(self.config.sim.max_episode_steps), 1.0))
+        parts.extend(
+            [
+                (ip / 5.0e5).reshape(self.batch_size, 1),
+                (ip_ref / 5.0e5).reshape(self.batch_size, 1),
+                ((ip - ip_ref) / 5.0e5).reshape(self.batch_size, 1),
+                currents / current_scale[None, :],
+                derivs / deriv_scale[None, :],
+                measured_radii,
+                target_radii,
+                target_radii - measured_radii,
+                boundary_found,
+            ]
+        )
+        if self.config.observation.actor_kind in _RATE_OBSERVATION_KINDS:
             parts.extend(
                 [
                     (ip_ref_rate / float(self.config.observation.ip_rate_scale_aps)).reshape(self.batch_size, 1),
@@ -636,7 +648,7 @@ class TokamakMagneticControlEnv:
                     self.ip_measured_rate.reshape(self.batch_size, 1),
                 ]
             )
-        if self.config.observation.actor_kind == "controller_state_v6":
+        if self.config.observation.actor_kind in _INTEGRAL_OBSERVATION_KINDS:
             integral_ip, integral_boundary = self._normalized_integral_features()
             parts.extend([integral_ip, integral_boundary])
         parts.extend([self.previous_action, self._preview()])
@@ -697,8 +709,11 @@ class TokamakMagneticControlEnv:
                 measured_radii = np.zeros((int(self.config.sim.angles),), dtype=float)
                 boundary_found = 0.0
             target_radii = ref_radii[b, : int(self.config.sim.angles)].detach().cpu().numpy().astype(float, copy=False)
+            scalar_features = [measured_ip / 5.0e5, float(ip_ref[b].item()) / 5.0e5, (measured_ip - float(ip_ref[b].item())) / 5.0e5]
+            if self.config.observation.actor_kind not in _NO_STEP_NORM_OBSERVATION_KINDS:
+                scalar_features.insert(0, float(self.step_index[b].item()) / max(float(self.config.sim.max_episode_steps), 1.0))
             parts = [
-                np.array([float(self.step_index[b].item()) / max(float(self.config.sim.max_episode_steps), 1.0), measured_ip / 5.0e5, float(ip_ref[b].item()) / 5.0e5, (measured_ip - float(ip_ref[b].item())) / 5.0e5], dtype=float),
+                np.asarray(scalar_features, dtype=float),
                 currents / current_scale,
                 derivs / deriv_scale,
                 np.nan_to_num(measured_radii, nan=0.0, posinf=0.0, neginf=0.0),
@@ -706,7 +721,7 @@ class TokamakMagneticControlEnv:
                 target_radii - np.nan_to_num(measured_radii, nan=0.0, posinf=0.0, neginf=0.0),
                 np.array([boundary_found], dtype=float),
             ]
-            if self.config.observation.actor_kind in {"controller_state_v5", "controller_state_v6"}:
+            if self.config.observation.actor_kind in _RATE_OBSERVATION_KINDS:
                 parts.extend(
                     [
                         np.array([float(ip_ref_rate[b].item()) / float(self.config.observation.ip_rate_scale_aps)], dtype=float),
@@ -714,7 +729,7 @@ class TokamakMagneticControlEnv:
                         np.array([float(self.ip_measured_rate[b].item())], dtype=float),
                     ]
                 )
-            if self.config.observation.actor_kind == "controller_state_v6":
+            if self.config.observation.actor_kind in _INTEGRAL_OBSERVATION_KINDS:
                 integral_ip, integral_boundary = self._normalized_integral_features()
                 parts.extend(
                     [
@@ -1021,12 +1036,12 @@ class TokamakMagneticControlEnv:
         self.step_index = torch.as_tensor(state["step_index"], dtype=torch.long, device=self.device).clone()
         self.done = torch.as_tensor(state["done"], dtype=torch.bool, device=self.device).clone()
         self.previous_action = torch.as_tensor(state["previous_action"], dtype=torch.float32, device=self.device).clone()
-        if self.config.observation.actor_kind in {"controller_state_v5", "controller_state_v6"} and "ip_measured_rate" not in state:
+        if self.config.observation.actor_kind in _RATE_OBSERVATION_KINDS and "ip_measured_rate" not in state:
             raise ValueError(f"environment checkpoint is missing {self.config.observation.actor_kind} ip_measured_rate")
         self.ip_measured_rate = torch.as_tensor(state.get("ip_measured_rate", torch.zeros((self.batch_size,), dtype=torch.float32)), dtype=torch.float32, device=self.device).clone()
-        if self.config.observation.actor_kind == "controller_state_v6":
+        if self.config.observation.actor_kind in _INTEGRAL_OBSERVATION_KINDS:
             if "integral_ip_error" not in state or "integral_boundary_radii_error" not in state:
-                raise ValueError("environment checkpoint is missing controller_state_v6 integral-error state")
+                raise ValueError("environment checkpoint is missing controller_state_v6/controller_state_v7_no_step_norm integral-error state")
         self.integral_ip_error = torch.as_tensor(state.get("integral_ip_error", torch.zeros((self.batch_size,), dtype=torch.float32)), dtype=torch.float32, device=self.device).clone()
         self.integral_boundary_radii_error = torch.as_tensor(
             state.get("integral_boundary_radii_error", torch.zeros((self.batch_size, int(self.config.sim.angles)), dtype=torch.float32)),

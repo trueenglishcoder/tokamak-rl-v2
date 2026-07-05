@@ -444,8 +444,8 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
             raise ValueError(f"reference.boundary.replay_reference_dir does not exist: {replay_dir}")
         if cfg.sim.reset_source != "csv_initial_states":
             raise ValueError("reference.boundary.kind=t15_replay_segment_conditioned requires csv initial states")
-    if cfg.observation.actor_kind not in {"controller_state_v4", "controller_state_v5", "controller_state_v6"}:
-        raise ValueError("observation.actor_kind must be controller_state_v4, controller_state_v5, or controller_state_v6")
+    if cfg.observation.actor_kind not in {"controller_state_v4", "controller_state_v5", "controller_state_v6", "controller_state_v7_no_step_norm"}:
+        raise ValueError("observation.actor_kind must be controller_state_v4, controller_state_v5, controller_state_v6, or controller_state_v7_no_step_norm")
     if cfg.observation.critic_kind not in {"privileged_training_state_v1", "compact_training_state_v2"}:
         raise ValueError("observation.critic_kind must be privileged_training_state_v1 or compact_training_state_v2")
     for name in ("ip_rate_scale_aps", "boundary_rate_scale_mps"):
@@ -549,8 +549,8 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
                 raise ValueError("training.production_mode single_segment_profile requires reference.boundary.kind=hold_reset_boundary")
         elif cfg.reference.boundary.kind != "t15_replay_segment_conditioned":
             raise ValueError("training.production_mode requires reference.boundary.kind=t15_replay_segment_conditioned")
-        if cfg.reference.ip.kind == "replay_window" and cfg.observation.actor_kind != "controller_state_v6":
-            raise ValueError("training.production_mode replay_window requires observation.actor_kind=controller_state_v6")
+        if cfg.reference.ip.kind == "replay_window" and cfg.observation.actor_kind not in {"controller_state_v6", "controller_state_v7_no_step_norm"}:
+            raise ValueError("training.production_mode replay_window requires observation.actor_kind=controller_state_v6 or controller_state_v7_no_step_norm")
         if cfg.reference.ip.kind == "replay_window" and cfg.observation.critic_kind != "compact_training_state_v2":
             raise ValueError("training.production_mode replay_window requires observation.critic_kind=compact_training_state_v2")
         if cfg.reward.kind != "tcv_derivative":

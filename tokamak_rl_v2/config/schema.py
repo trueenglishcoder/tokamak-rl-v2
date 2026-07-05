@@ -120,7 +120,7 @@ class ReferenceConfig:
 
 @dataclass(frozen=True, slots=True)
 class ObservationConfig:
-    actor_kind: Literal["controller_state_v4", "controller_state_v5", "controller_state_v6"] = "controller_state_v6"
+    actor_kind: Literal["controller_state_v4", "controller_state_v5", "controller_state_v6", "controller_state_v7_no_step_norm"] = "controller_state_v6"
     critic_kind: Literal["privileged_training_state_v1", "compact_training_state_v2"] = "compact_training_state_v2"
     target_preview_steps: int = 8
     target_preview_stride: int = 10
