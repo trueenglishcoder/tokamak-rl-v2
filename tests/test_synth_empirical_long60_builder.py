@@ -12,6 +12,7 @@ from scripts.build_t15_synth_empirical_long60 import (
     WINDOW_STEPS,
     _generate_parent,
     _load_empirical_space,
+    _project_features,
     _windows_from_parent,
     main,
 )
@@ -140,6 +141,19 @@ def test_empirical_parent_respects_current_and_jdot_limits(tmp_path: Path) -> No
     action = parent["real_jdot_action"]
     assert np.max(np.abs(currents) / space.real.current_limits.reshape(1, -1)) <= 1.0 + 1e-6
     assert np.max(np.abs(action)) <= 1.0 + 1e-6
+
+
+def test_feature_projection_scales_instead_of_clipping() -> None:
+    space = SimpleNamespace(
+        feature_low=np.asarray([-2.0], dtype=np.float64),
+        feature_high=np.asarray([1.5], dtype=np.float64),
+    )
+    raw = np.asarray([[0.0], [1.0], [2.0], [3.0]], dtype=np.float64)
+    projected, scale = _project_features(features=raw, start_feature=np.asarray([0.0]), space=space)
+
+    assert np.isclose(scale, 0.5)
+    assert np.allclose(projected[:, 0], [0.0, 0.5, 1.0, 1.5])
+    assert np.allclose(np.diff(projected[:, 0]), [0.5, 0.5, 0.5])
 
 
 def test_empirical_cutting_uses_overlapping_100_step_windows(tmp_path: Path) -> None:

@@ -386,8 +386,9 @@ def _generate_parent(
     features = np.empty((steps + 1, start_feature.shape[0]), dtype=np.float64)
     features[0] = start_feature
     features[1:] = start_feature.reshape(1, -1) + np.cumsum(velocities * float(dt), axis=0)
-    features = _project_features(features=features, start_feature=start_feature, space=space)
-    radii, feature_scale = _project_radii(features=features, start_feature=start_feature, space=space)
+    features, bounds_scale = _project_features(features=features, start_feature=start_feature, space=space)
+    features, radii, radii_scale = _project_radii(features=features, start_feature=start_feature, space=space)
+    feature_scale = min(bounds_scale, radii_scale)
     velocities = np.diff(features, axis=0) / float(dt)
 
     currents = _infer_currents(space=space, features=features, velocities=velocities, start_current=start_current, knn_k=knn_k)
@@ -456,13 +457,27 @@ def _sample_empirical_velocity_process(
     return velocities
 
 
-def _project_features(*, features: np.ndarray, start_feature: np.ndarray, space: EmpiricalSpace) -> np.ndarray:
-    out = np.asarray(features, dtype=np.float64).copy()
+def _project_features(*, features: np.ndarray, start_feature: np.ndarray, space: EmpiricalSpace) -> tuple[np.ndarray, float]:
+    raw = np.asarray(features, dtype=np.float64)
+    delta = raw - start_feature.reshape(1, -1)
+    scale = np.ones(raw.shape[1], dtype=np.float64)
+    for dim in range(raw.shape[1]):
+        lo = float(space.feature_low[dim])
+        hi = float(space.feature_high[dim])
+        pos = delta[:, dim] > 0.0
+        neg = delta[:, dim] < 0.0
+        if np.any(pos):
+            scale[dim] = min(scale[dim], float(np.min((hi - start_feature[dim]) / delta[pos, dim])))
+        if np.any(neg):
+            scale[dim] = min(scale[dim], float(np.min((lo - start_feature[dim]) / delta[neg, dim])))
+    scale = np.clip(scale, 0.0, 1.0)
+    out = start_feature.reshape(1, -1) + delta * scale.reshape(1, -1)
     out[0] = start_feature
-    for dim in range(out.shape[1]):
-        out[:, dim] = np.clip(out[:, dim], space.feature_low[dim], space.feature_high[dim])
+    # Numerical guard only. The geometric projection above is what prevents
+    # synthetic ramp-to-clamp corners.
+    out = np.minimum(np.maximum(out, space.feature_low.reshape(1, -1)), space.feature_high.reshape(1, -1))
     out[0] = start_feature
-    return out
+    return out, float(np.min(scale))
 
 
 def _project_radii(
@@ -470,8 +485,8 @@ def _project_radii(
     features: np.ndarray,
     start_feature: np.ndarray,
     space: EmpiricalSpace,
-) -> tuple[np.ndarray, float]:
-    def safe_at(scale: float) -> tuple[np.ndarray, bool]:
+) -> tuple[np.ndarray, np.ndarray, float]:
+    def safe_at(scale: float) -> tuple[np.ndarray, np.ndarray, bool]:
         candidate = features.copy()
         candidate[:, 1:] = start_feature.reshape(1, -1)[:, 1:] + scale * (
             candidate[:, 1:] - start_feature.reshape(1, -1)[:, 1:]
@@ -482,25 +497,26 @@ def _project_radii(
             and np.all(radii >= space.radii_low.reshape(1, -1))
             and np.all(radii <= space.radii_high.reshape(1, -1))
         )
-        return radii, ok
+        return candidate, radii, ok
 
-    radii, ok = safe_at(1.0)
+    candidate, radii, ok = safe_at(1.0)
     if ok:
-        return radii, 1.0
+        return candidate, radii, 1.0
     lo = 0.0
     hi = 1.0
-    best_radii, _ = safe_at(0.0)
+    best_features, best_radii, _ = safe_at(0.0)
     best_scale = 0.0
     for _ in range(40):
         mid = 0.5 * (lo + hi)
-        radii_mid, ok_mid = safe_at(mid)
+        features_mid, radii_mid, ok_mid = safe_at(mid)
         if ok_mid:
             lo = mid
             best_scale = mid
+            best_features = features_mid
             best_radii = radii_mid
         else:
             hi = mid
-    return best_radii, float(best_scale)
+    return best_features, best_radii, float(best_scale)
 
 
 def _infer_currents(
