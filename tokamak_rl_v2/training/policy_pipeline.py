@@ -966,6 +966,9 @@ def _preflight_artifact_failure(cfg: ExperimentConfig) -> dict[str, object] | No
                     "motion_shot_id",
                     "motion_source_index",
                     "reset_source_index",
+                    "parent_reset_shot_id",
+                    "parent_reset_source_index",
+                    "parent_reset_time_s",
                 }
                 actual_arrays = set(data.files)
                 missing = sorted(expected_arrays - actual_arrays)
