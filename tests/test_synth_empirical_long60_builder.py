@@ -17,6 +17,7 @@ from scripts.build_t15_synth_empirical_long60 import (
     _windows_from_parent,
     main,
 )
+from tokamak_rl_v2.config import load_experiment_config
 
 
 def _write_fake_real_library(tmp_path: Path) -> tuple[Path, Path]:
@@ -94,6 +95,7 @@ def _space(tmp_path: Path):
         dt=0.001,
         pca_components=5,
         wiggle_room=1.15,
+        ip_high_a=500000.0,
         radii_margin_m=0.025,
         current_envelope_margin=0.08,
         max_cloud_rows=4000,
@@ -123,6 +125,23 @@ def test_empirical_parent_starts_from_real_reset_and_has_no_mode(tmp_path: Path)
     assert parent["currents"].shape == (1001, 9)
     assert np.any(np.all(np.isclose(space.reset_features, parent["features"][0]), axis=1))
     assert np.any(np.all(np.isclose(space.reset_currents, parent["currents"][0]), axis=1))
+
+
+def test_empirical_space_uses_explicit_500ka_ip_high(tmp_path: Path) -> None:
+    space = _space(tmp_path)
+
+    assert space.feature_high[0] == 500000.0
+
+
+def test_synthetic_empirical_config_uses_expanded_ip_reward_scale() -> None:
+    config_path = (
+        Path(__file__).resolve().parents[1]
+        / "configs/experiments/t15_synth_empirical_long60_0p1s_tcvjdot_mpo_balanced.yaml"
+    )
+    cfg = load_experiment_config(config_path)
+
+    assert cfg.reward.ip_scale_a == 35000.0
+    assert cfg.reward.ip_weight == 1.8
 
 
 def test_empirical_parent_respects_current_and_jdot_limits(tmp_path: Path) -> None:

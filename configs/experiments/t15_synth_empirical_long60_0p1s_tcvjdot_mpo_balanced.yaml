@@ -60,7 +60,7 @@
     "kind": "tcv_derivative",
     "shape_mean_scale_m": 0.03,
     "shape_max_scale_m": 0.08,
-    "ip_scale_a": 25000.0,
+    "ip_scale_a": 35000.0,
     "boundary_missing_error_m": 1.0,
     "boundary_missing_weight": 20.0,
     "shape_mean_weight": 3.2,

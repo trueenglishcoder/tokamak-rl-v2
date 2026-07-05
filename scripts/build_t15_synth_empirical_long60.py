@@ -94,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-steps", type=int, default=1500)
     parser.add_argument("--pca-components", type=int, default=5)
     parser.add_argument("--wiggle-room", type=float, default=1.15)
+    parser.add_argument("--ip-high-a", type=float, default=500000.0)
     parser.add_argument("--radii-margin-m", type=float, default=0.025)
     parser.add_argument("--current-envelope-margin", type=float, default=0.08)
     parser.add_argument("--max-cloud-rows", type=int, default=12000)
@@ -237,6 +238,7 @@ def _load_empirical_space(
 
     feature_low = _expand_bounds(real.feature_low, real.feature_high, float(args.wiggle_room))[0]
     feature_high = _expand_bounds(real.feature_low, real.feature_high, float(args.wiggle_room))[1]
+    feature_high[0] = float(getattr(args, "ip_high_a", 500000.0))
     radii_low = real.radii_low
     radii_high = real.radii_high
 
@@ -742,6 +744,7 @@ def _summary(
         "safe_space": {
             "train_reset_rows": int(train_space.reset_features.shape[0]),
             "holdout_reset_rows": int(holdout_space.reset_features.shape[0]),
+            "synthetic_ip_high_a": float(train_space.feature_high[0]),
             "feature_low": train_space.feature_low.tolist(),
             "feature_high": train_space.feature_high.tolist(),
             "radii_low_min": float(np.min(train_space.radii_low)),
@@ -769,6 +772,7 @@ def _write_report(path: Path, summary: dict[str, Any]) -> None:
         f"- Holdout parents: {summary['holdout_parents']}",
         f"- Accepted windows: {summary['accepted_windows']}",
         f"- Parent steps: {summary['parent_steps']['min']}..{summary['parent_steps']['max']}",
+        f"- Synthetic Ip high: {summary['safe_space']['synthetic_ip_high_a']:.0f} A",
         f"- Max current usage: {summary['current_jdot_limits']['max_current_usage']:.4f}",
         f"- Max normalized Jdot action: {summary['current_jdot_limits']['max_action_usage']:.4f}",
         f"- Mean current scale: {summary['scale_factors']['current_motion_mean']:.4f}",
