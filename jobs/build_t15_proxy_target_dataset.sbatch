@@ -18,6 +18,8 @@ export INITIAL_LIBRARY=${INITIAL_LIBRARY:-data/processed/t15_new_trim50_plain_gp
 export MACHINE_ENVELOPE=${MACHINE_ENVELOPE:-configs/machine/t15_proxy_v1.yaml}
 export SIM_CONFIG=${SIM_CONFIG:-../tokamak-sim/configs/T15MD_new_data.toml}
 export TARGET_OUT_DIR=${TARGET_OUT_DIR:-data/processed/t15_proxy_target_v1}
+export TARGET_PREVIEW_DIR=${TARGET_PREVIEW_DIR:-data/previews/t15_proxy_target_v1_preview}
+export REQUIRE_TARGET_PREVIEW=${REQUIRE_TARGET_PREVIEW:-1}
 export TARGET_TRAIN_PARENTS=${TARGET_TRAIN_PARENTS:-48}
 export TARGET_HOLDOUT_PARENTS=${TARGET_HOLDOUT_PARENTS:-8}
 export TARGET_MIN_STEPS=${TARGET_MIN_STEPS:-1000}
@@ -45,6 +47,16 @@ fi
 if [[ "${TARGET_WINDOW_STRIDE_STEPS}" != "1" ]]; then
   echo "target dataset v1 requires TARGET_WINDOW_STRIDE_STEPS=1 for fully overlapping windows" >&2
   exit 2
+fi
+if [[ "${REQUIRE_TARGET_PREVIEW}" == "1" && ! -f "${TARGET_PREVIEW_DIR}/PREVIEW_READY" ]]; then
+  echo "missing target preview marker: ${TARGET_PREVIEW_DIR}/PREVIEW_READY" >&2
+  echo "Run this before the full build: sbatch jobs/preview_t15_proxy_target_dataset.sbatch" >&2
+  echo "Set REQUIRE_TARGET_PREVIEW=0 only for deliberate non-interactive rebuilds." >&2
+  exit 2
+fi
+
+if [[ -f "${TARGET_PREVIEW_DIR}/preview.html" ]]; then
+  echo "using_target_preview=${TARGET_PREVIEW_DIR}/preview.html"
 fi
 
 rm -rf "${TARGET_OUT_DIR}"
