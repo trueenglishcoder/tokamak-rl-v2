@@ -1,0 +1,120 @@
+{
+  "machine_envelope": {
+    "name": "t15_proxy_v1",
+    "verified_geometry": {
+      "limiter_surface": true,
+      "coil_positions": true
+    },
+    "observed_data": {
+      "source": "four_usable_real_t15_shots",
+      "role": [
+        "validation_anchor",
+        "initial_state_sampling",
+        "scale_reference"
+      ],
+      "notes": [
+        "Most numeric limits below are proxy training choices, not verified T15 machine constants.",
+        "The 500 kA Ip ceiling is a training envelope chosen to avoid hard overfitting to the observed 400 kA region."
+      ]
+    },
+    "proxy_training": {
+      "ip_range_a": [
+        100000.0,
+        500000.0
+      ],
+      "ip_rate_a_per_s": 500000.0,
+      "boundary_margin_m": 0.035,
+      "boundary_rate_m_per_s": 1.0,
+      "coil_current_range_a": [
+        [
+          -198365.72,
+          198365.72
+        ],
+        [
+          -345047.416,
+          345047.416
+        ],
+        [
+          -164882.78,
+          164882.78
+        ],
+        [
+          -204574.776,
+          204574.776
+        ],
+        [
+          -606866.803,
+          606866.803
+        ],
+        [
+          -2138757.022,
+          2138757.022
+        ],
+        [
+          -4760890.355,
+          4760890.355
+        ],
+        [
+          -13912524.5,
+          13912524.5
+        ],
+        [
+          -4771978.708,
+          4771978.708
+        ]
+      ],
+      "coil_jdot_range_a_per_s": [
+        [
+          -5070038.4,
+          5070038.4
+        ],
+        [
+          -5070038.4,
+          5070038.4
+        ],
+        [
+          -5070038.4,
+          5070038.4
+        ],
+        [
+          -5070038.4,
+          5070038.4
+        ],
+        [
+          -5070038.4,
+          5070038.4
+        ],
+        [
+          -5070038.4,
+          5070038.4
+        ],
+        [
+          -20950244.0,
+          20950244.0
+        ],
+        [
+          -20950244.0,
+          20950244.0
+        ],
+        [
+          -20950244.0,
+          20950244.0
+        ]
+      ]
+    },
+    "soft_penalties": {
+      "ip_soft_range_a": [
+        100000.0,
+        500000.0
+      ],
+      "coil_current_soft_fraction": 1.0,
+      "coil_jdot_soft_fraction": 1.0
+    },
+    "termination": {
+      "limiter_invalid_reference": true,
+      "boundary_loss_in_sim": true,
+      "invalid_state": true,
+      "extreme_proxy_actuator_violation": true
+    }
+  }
+}

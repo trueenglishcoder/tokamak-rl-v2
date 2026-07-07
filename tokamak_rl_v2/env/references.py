@@ -76,9 +76,16 @@ class T15ReplayBoundaryLibrary:
         self._oracle_radii: np.ndarray | None = None
         self._oracle_real_action: np.ndarray | None = None
         self._oracle_key_to_row: dict[tuple[str, int], int] = {}
+        target_path = self.root / "t15_target_trajectory_targets.npz"
+        if target_path.exists():
+            self._load_oracle(target_path, require_real_action=False)
+            self._entries = {}
+            return
         oracle_path = self.root / "t15_replay_window_oracle_targets.npz"
         if oracle_path.exists():
-            self._load_oracle(oracle_path)
+            with np.load(oracle_path, allow_pickle=False) as data:
+                has_real_action = "real_jdot_action" in data.files
+            self._load_oracle(oracle_path, require_real_action=has_real_action)
             self._entries = {}
             return
         entries: dict[str, T15ReplayBoundaryEntry] = {}
@@ -169,9 +176,10 @@ class T15ReplayBoundaryLibrary:
         source_time_s: float | None = None,
     ) -> np.ndarray:
         if not self._oracle:
-            raise ValueError("real action oracle is only available from t15_replay_window_oracle_targets.npz")
+            raise ValueError("real action oracle is only available from target/replay window NPZ references")
+        if self._oracle_real_action is None:
+            raise ValueError("target-only reference dataset does not contain real_jdot_action")
         row = self._oracle_row(shot_id, source_index=source_index, source_time_s=source_time_s)
-        assert self._oracle_real_action is not None
         return self._fit_segment_length(np.asarray(self._oracle_real_action[row], dtype=float), wanted=int(steps))
 
     def _entry(self, shot_id: int | str) -> T15ReplayBoundaryEntry:
@@ -181,18 +189,20 @@ class T15ReplayBoundaryLibrary:
         except KeyError as exc:
             raise ValueError(f"no T15 replay boundary reference for shot {key}") from exc
 
-    def _load_oracle(self, path: Path) -> None:
+    def _load_oracle(self, path: Path, *, require_real_action: bool = True) -> None:
         with np.load(path, allow_pickle=False) as data:
-            required = {"shot_id", "source_index", "time_s", "ip_target", "boundary_radii", "real_jdot_action", "difficulty_bin"}
+            required = {"shot_id", "source_index", "time_s", "ip_target", "boundary_radii", "difficulty_bin"}
+            if bool(require_real_action):
+                required = set(required) | {"real_jdot_action"}
             missing = sorted(required - set(data.files))
             if missing:
-                raise ValueError(f"{path} missing oracle arrays: {', '.join(missing)}")
+                raise ValueError(f"{path} missing target reference arrays: {', '.join(missing)}")
             shot_id = np.asarray(data["shot_id"]).astype(str).reshape(-1)
             source_index = np.asarray(data["source_index"], dtype=np.int64).reshape(-1)
             time_s = np.asarray(data["time_s"], dtype=float).reshape(-1)
             ip = np.asarray(data["ip_target"], dtype=float)
             radii = np.asarray(data["boundary_radii"], dtype=float)
-            real_action = np.asarray(data["real_jdot_action"], dtype=float)
+            real_action = np.asarray(data["real_jdot_action"], dtype=float) if "real_jdot_action" in data.files else None
             difficulty_bin = np.asarray(data["difficulty_bin"]).astype(str).reshape(-1)
         count = int(shot_id.shape[0])
         if count <= 0:
@@ -203,9 +213,12 @@ class T15ReplayBoundaryLibrary:
             raise ValueError(f"{path} ip_target must have shape [N, T+1]")
         if radii.ndim != 3 or radii.shape[0] != count or radii.shape[2] < self.theta_count:
             raise ValueError(f"{path} boundary_radii must have shape [N, T+1, >=theta_count]")
-        if real_action.ndim != 3 or real_action.shape[0] != count:
+        if real_action is not None and (real_action.ndim != 3 or real_action.shape[0] != count):
             raise ValueError(f"{path} real_jdot_action must have shape [N, T, action_dim]")
-        for name, arr in (("time_s", time_s), ("ip_target", ip), ("boundary_radii", radii), ("real_jdot_action", real_action)):
+        arrays_to_check = [("time_s", time_s), ("ip_target", ip), ("boundary_radii", radii)]
+        if real_action is not None:
+            arrays_to_check.append(("real_jdot_action", real_action))
+        for name, arr in arrays_to_check:
             if not np.all(np.isfinite(arr)):
                 raise ValueError(f"{path} contains non-finite {name}")
         if not np.all(radii[:, :, : self.theta_count] > 0.0):
@@ -222,7 +235,7 @@ class T15ReplayBoundaryLibrary:
         self._oracle_time_s = time_s
         self._oracle_ip = ip.astype(float, copy=False)
         self._oracle_radii = radii[:, :, : self.theta_count].astype(float, copy=False)
-        self._oracle_real_action = real_action.astype(float, copy=False)
+        self._oracle_real_action = None if real_action is None else real_action.astype(float, copy=False)
         self._oracle_key_to_row = key_to_row
 
     def _oracle_row(
