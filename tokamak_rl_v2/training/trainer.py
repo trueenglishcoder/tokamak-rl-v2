@@ -34,6 +34,7 @@ from tokamak_rl_v2.env import TokamakMagneticControlEnv
 from tokamak_rl_v2.export import export_deterministic_actor
 from tokamak_rl_v2.networks import CRITIC_ACTION_INPUT_KIND, FeedForwardGaussianActor, RecurrentQCritic
 from tokamak_rl_v2.training.distributed import broadcast_actor, start_actor_workers, stop_actor_workers
+from tokamak_rl_v2.training.distributed_eval import distributed_reduce_metrics, distributed_seed_offset, distributed_shard_count
 from tokamak_rl_v2.training.mpo import MaximumAPosterioriPolicyOptimiser
 from tokamak_rl_v2.training.replay import FIFOSequenceReplay
 
@@ -1512,6 +1513,30 @@ class Trainer:
         if str(self.config.sim.reset_source) != "csv_initial_states":
             return self.config
         return replace(self.config, sim=replace(self.config.sim, csv_initial_state_split="holdout"))
+
+
+    @torch.no_grad()
+    def evaluate_detailed_distributed(
+        self,
+        *,
+        episodes: int,
+        max_steps: int,
+        policy: Literal["actor", "no_control"] = "actor",
+        seed_offset: int = 100000,
+    ) -> dict[str, float]:
+        if not self._distributed_initialized() or int(self.distributed_world_size) <= 1:
+            return self.evaluate_detailed(episodes=episodes, max_steps=max_steps, policy=policy, seed_offset=seed_offset)
+        local_episodes = distributed_shard_count(int(episodes), rank=int(self.distributed_rank), world_size=int(self.distributed_world_size))
+        eval_episodes = max(1, int(local_episodes))
+        local_metrics = self.evaluate_detailed(
+            episodes=eval_episodes,
+            max_steps=max_steps,
+            policy=policy,
+            seed_offset=distributed_seed_offset(int(seed_offset), rank=int(self.distributed_rank)),
+        )
+        if local_episodes <= 0:
+            local_metrics = {}
+        return distributed_reduce_metrics(local_metrics, local_count=int(local_episodes), device=self.device, enabled=True)
 
     @staticmethod
     def _selection_score(metrics: dict[str, float]) -> float:

@@ -20,6 +20,14 @@ from tokamak_rl_v2.config.schema import ExperimentConfig
 from tokamak_rl_v2.env import TokamakMagneticControlEnv
 from tokamak_rl_v2.training.cli import _device_list
 from tokamak_rl_v2.training.trainer import Trainer, _eval_max_steps_for_config, filter_wandb_metrics
+from tokamak_rl_v2.training.distributed_eval import (
+    distributed_all_ok,
+    distributed_barrier_and_destroy,
+    distributed_is_initialized,
+    distributed_reduce_metrics,
+    distributed_seed_offset,
+    distributed_shard_count,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -45,6 +53,7 @@ def main(argv: list[str] | None = None) -> int:
     production_mode = bool(cfg.training.production_mode)
     rank = _distributed_rank()
     rank0 = rank == 0
+    distributed_final_eval = bool(cfg.training.distributed_mode == "local_replay" and int(os.environ.get("WORLD_SIZE", "1")) > 1)
     runtime_device = _rank_runtime_device(args.device or cfg.training.device, cfg)
     runtime_cfg = _rank_runtime_config(cfg, runtime_device)
     previous_signal_handlers = _install_shutdown_signal_handlers()
@@ -99,14 +108,14 @@ def main(argv: list[str] | None = None) -> int:
             export_policy=not bool(args.no_export),
             wandb_metric_preset=args.wandb_metric_preset,
         )
-        wandb_run = _start_wandb(args, cfg, output_dir=output_dir)
+        wandb_run = _start_wandb(args, cfg, output_dir=output_dir) if rank0 else None
         trainer.wandb_run = wandb_run
         trainer._configure_wandb_metrics()
         if not production_mode and rank0:
             _wandb_log(wandb_run, "pipeline/reset", reset_report, step=0)
         if not production_mode:
-            baseline = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=_eval_max_steps_for_config(cfg), policy="no_control", seed_offset=selection_seed_offset)
-            holdout_baseline = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=_eval_max_steps_for_config(cfg), policy="no_control", seed_offset=holdout_seed_offset)
+            baseline = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=_eval_max_steps_for_config(cfg), policy="no_control", seed_offset=selection_seed_offset, distributed=distributed_final_eval)
+            holdout_baseline = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=_eval_max_steps_for_config(cfg), policy="no_control", seed_offset=holdout_seed_offset, distributed=distributed_final_eval)
             if rank0:
                 _write_baseline_report(
                     output_dir,
@@ -158,8 +167,6 @@ def main(argv: list[str] | None = None) -> int:
                     _wandb_log(wandb_run, "pipeline", {"passed": 0.0, "failed_baseline_difficulty": 1.0}, step=0)
                 return 2 if not args.allow_failed_gates else 0
         train_result = trainer.train()
-        if cfg.training.distributed_mode == "local_replay" and not rank0:
-            return 0
         train_status = str(train_result.get("status", "completed")) if isinstance(train_result, Mapping) else "completed"
         if train_status.startswith("failed_"):
             if rank0:
@@ -187,7 +194,7 @@ def main(argv: list[str] | None = None) -> int:
         elif selected_checkpoint is None:
             trainer.restore_best_actor()
         try:
-            actor_eval = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=_eval_max_steps_for_config(cfg), policy="actor", seed_offset=holdout_seed_offset)
+            actor_eval = trainer.evaluate_detailed(episodes=int(cfg.training.eval_episodes), max_steps=_eval_max_steps_for_config(cfg), policy="actor", seed_offset=holdout_seed_offset, distributed=distributed_final_eval)
         except Exception as exc:
             if rank0 and bool(args.reward_sweep_mode):
                 report = {
@@ -207,7 +214,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             raise
         train_env_step = _train_env_step(train_result, cfg)
-        _wandb_log(wandb_run, "pipeline/actor_eval_holdout", actor_eval, step=train_env_step)
+        if rank0:
+            _wandb_log(wandb_run, "pipeline/actor_eval_holdout", actor_eval, step=train_env_step)
         losses = summarize_training_losses(output_dir / "losses.csv")
         selected_export = _selected_export_dir(output_dir)
         if bool(args.reward_sweep_mode):
@@ -258,13 +266,14 @@ def main(argv: list[str] | None = None) -> int:
                 "tail_losses": losses,
                 "gates": gate_report["checks"],
             }
-            _write_json(output_dir / "policy_validation.json", report)
-            _wandb_log(wandb_run, "pipeline/tail_losses", losses, step=train_env_step)
-            _wandb_log(wandb_run, "pipeline/gates", _gate_metrics(gate_report["checks"]), step=train_env_step)
-            _wandb_log(wandb_run, "pipeline", {"sweep_completed": 1.0, "gate_passed": 1.0 if gate_report["passed"] else 0.0}, step=train_env_step)
+            if rank0:
+                _write_json(output_dir / "policy_validation.json", report)
+                _wandb_log(wandb_run, "pipeline/tail_losses", losses, step=train_env_step)
+                _wandb_log(wandb_run, "pipeline/gates", _gate_metrics(gate_report["checks"]), step=train_env_step)
+                _wandb_log(wandb_run, "pipeline", {"sweep_completed": 1.0, "gate_passed": 1.0 if gate_report["passed"] else 0.0}, step=train_env_step)
             return 0
         controller_steps = int(args.controller_rollout_steps) if int(args.controller_rollout_steps) > 0 else int(cfg.sim.max_episode_steps)
-        rollout_report = validate_exported_controller(selected_export, cfg, steps=controller_steps) if selected_export is not None else {"status": "missing_export"}
+        rollout_report = validate_exported_controller(selected_export, cfg, steps=controller_steps, distributed=distributed_final_eval) if selected_export is not None else {"status": "missing_export"}
 
         gate_report = evaluate_policy_gates(
             actor_eval=actor_eval,
@@ -313,27 +322,31 @@ def main(argv: list[str] | None = None) -> int:
             "controller_rollout": rollout_report,
             "gates": gate_report["checks"],
         }
-        _write_json(output_dir / "policy_validation.json", report)
-        _write_json(output_dir / "closed_loop_rollout_report.json", rollout_report)
-        _wandb_log(wandb_run, "pipeline/tail_losses", losses, step=train_env_step)
-        _wandb_log(wandb_run, "pipeline/controller_rollout", rollout_report, step=train_env_step)
-        _wandb_log(wandb_run, "pipeline/gates", _gate_metrics(gate_report["checks"]), step=train_env_step)
+        if rank0:
+            _write_json(output_dir / "policy_validation.json", report)
+            _write_json(output_dir / "closed_loop_rollout_report.json", rollout_report)
+            _wandb_log(wandb_run, "pipeline/tail_losses", losses, step=train_env_step)
+            _wandb_log(wandb_run, "pipeline/controller_rollout", rollout_report, step=train_env_step)
+            _wandb_log(wandb_run, "pipeline/gates", _gate_metrics(gate_report["checks"]), step=train_env_step)
         return 0 if gate_report["passed"] or args.allow_failed_gates else 2
     except KeyboardInterrupt as exc:
-        _write_json(
-            output_dir / "policy_validation.json",
-            {
-                "status": "interrupted",
-                "reason": str(exc) or "training interrupted",
-                "output_dir": str(output_dir),
-            },
-        )
-        _wandb_log(wandb_run, "pipeline", {"interrupted": 1.0}, step=0)
+        if rank0:
+            _write_json(
+                output_dir / "policy_validation.json",
+                {
+                    "status": "interrupted",
+                    "reason": str(exc) or "training interrupted",
+                    "output_dir": str(output_dir),
+                },
+            )
+            _wandb_log(wandb_run, "pipeline", {"interrupted": 1.0}, step=0)
         return 130
     finally:
         _restore_signal_handlers(previous_signal_handlers)
         if wandb_run is not None:
             wandb_run.finish()
+        if distributed_final_eval:
+            distributed_barrier_and_destroy()
 
 
 def run_reset_sanity(config: ExperimentConfig, *, device: str | None = None, num_envs: int | None = None) -> dict[str, float]:
@@ -602,19 +615,34 @@ class _ArrayReferenceScenario:
         return np.nan_to_num(ref, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def validate_exported_controller(export_dir: Path | None, config: ExperimentConfig, *, steps: int) -> dict[str, object]:
+def validate_exported_controller(
+    export_dir: Path | None,
+    config: ExperimentConfig,
+    *,
+    steps: int,
+    distributed: bool = False,
+) -> dict[str, object]:
     if export_dir is None:
         return {"status": "missing_export"}
+
+    reduce_device = _distributed_reduce_device(config)
+    distributed_eval = bool(distributed) and distributed_is_initialized()
+    total_episode_count = max(1, int(config.training.eval_episodes))
+    local_episode_count = distributed_shard_count(total_episode_count) if distributed_eval else total_episode_count
+    local_status = "ok"
+    local_error = ""
+    local_metrics: dict[str, float] = {}
+
     try:
         from tokamak_control.control.learned_magnetic_controller import LearnedMagneticController
         from tokamak_control.geometry.boundary import BoundaryNotFoundError, find_plasma_boundary_with_status
         from tokamak_control.geometry.legacy_metrics import legacy_radii_at_angles
 
         rollout_config = replace(config, sim=replace(config.sim, compute_backend="cpu", gpu_device="cuda:0", csv_initial_state_split="holdout"))
-        env = TokamakMagneticControlEnv(rollout_config, batch_size=1, device="cpu", seed=int(config.training.seed) + 910000)
+        env_seed = distributed_seed_offset(int(config.training.seed) + 910000) if distributed_eval else int(config.training.seed) + 910000
+        env = TokamakMagneticControlEnv(rollout_config, batch_size=1, device="cpu", seed=int(env_seed))
         controller = LearnedMagneticController(export_dir=export_dir)
         current_limits = env.current_limits.detach().cpu().numpy().astype(float)
-        episode_count = max(1, int(config.training.eval_episodes))
         step_count = max(1, int(steps))
         action_rms_all: list[float] = []
         completion: list[float] = []
@@ -629,7 +657,7 @@ def validate_exported_controller(export_dir: Path | None, config: ExperimentConf
         current_late: list[float] = []
         current_usage_late: list[float] = []
 
-        for _episode in range(episode_count):
+        for _episode in range(int(local_episode_count)):
             controller.reset()
             env.reset()
             if env.reference is None:
@@ -733,24 +761,17 @@ def validate_exported_controller(export_dir: Path | None, config: ExperimentConf
             current_usage_late.extend(ep_current_usage[late_start:])
 
         completion_arr = np.asarray(completion, dtype=float)
-        return {
-            "status": "ok",
-            "export_dir": str(export_dir),
-            "episodes": int(episode_count),
-            "steps": int(step_count),
-            "reference_kind": {
-                "boundary": str(config.reference.boundary.kind),
-                "ip": str(config.reference.ip.kind),
-            },
-            "mean_episode_completion": float(np.nanmean(completion_arr)),
-            "min_episode_completion": float(np.nanmin(completion_arr)),
-            "physical_derivative_rms": float(np.nanmean(np.asarray(action_rms_all, dtype=float))),
-            "action_rms": float(np.nanmean(np.asarray(action_rms_all, dtype=float))),
-            "boundary_found_mean": float(np.nanmean(np.asarray(boundary_found_all, dtype=float))),
+        local_metrics = {
+            "episodes": float(local_episode_count),
+            "mean_episode_completion": float(np.nanmean(completion_arr)) if completion_arr.size else float("nan"),
+            "min_episode_completion": float(np.nanmin(completion_arr)) if completion_arr.size else float("nan"),
+            "physical_derivative_rms": float(np.nanmean(np.asarray(action_rms_all, dtype=float))) if action_rms_all else float("nan"),
+            "action_rms": float(np.nanmean(np.asarray(action_rms_all, dtype=float))) if action_rms_all else float("nan"),
+            "boundary_found_mean": float(np.nanmean(np.asarray(boundary_found_all, dtype=float))) if boundary_found_all else float("nan"),
             "boundary_found_late_min": float(np.nanmin(np.asarray(boundary_late, dtype=float))) if boundary_late else float("nan"),
-            "shape_error_mean_m": float(np.nanmean(np.asarray(shape_error_all, dtype=float))),
+            "shape_error_mean_m": float(np.nanmean(np.asarray(shape_error_all, dtype=float))) if shape_error_all else float("nan"),
             "shape_error_late_m": float(np.nanmean(np.asarray(shape_late, dtype=float))) if shape_late else float("nan"),
-            "ip_error_a": float(np.nanmean(np.asarray(ip_error_all, dtype=float))),
+            "ip_error_a": float(np.nanmean(np.asarray(ip_error_all, dtype=float))) if ip_error_all else float("nan"),
             "ip_error_late_a": float(np.nanmean(np.asarray(ip_late, dtype=float))) if ip_late else float("nan"),
             "current_over_limit_a_max": float(np.nanmax(np.asarray(current_over_all, dtype=float))) if current_over_all else 0.0,
             "current_over_limit_a_late_max": float(np.nanmax(np.asarray(current_late, dtype=float))) if current_late else 0.0,
@@ -762,7 +783,41 @@ def validate_exported_controller(export_dir: Path | None, config: ExperimentConf
             "current_over_limit_1pct_fraction_late": float(np.nanmean(np.asarray(current_usage_late, dtype=float) > 1.01)) if current_usage_late else 0.0,
         }
     except Exception as exc:
-        return {"status": "error", "export_dir": str(export_dir), "error": repr(exc)}
+        local_status = "error"
+        local_error = repr(exc)
+        local_metrics = {}
+
+    if distributed_eval:
+        all_ok = distributed_all_ok(local_status == "ok", device=reduce_device)
+        if not all_ok:
+            return {"status": "error", "export_dir": str(export_dir), "error": local_error or "controller validation failed on another rank"}
+        reduced = distributed_reduce_metrics(local_metrics, local_count=int(local_episode_count), device=reduce_device, enabled=True)
+    else:
+        if local_status != "ok":
+            return {"status": "error", "export_dir": str(export_dir), "error": local_error}
+        reduced = dict(local_metrics)
+
+    return {
+        "status": "ok",
+        "export_dir": str(export_dir),
+        "episodes": int(total_episode_count),
+        "steps": int(max(1, int(steps))),
+        "reference_kind": {
+            "boundary": str(config.reference.boundary.kind),
+            "ip": str(config.reference.ip.kind),
+        },
+        **{key: value for key, value in reduced.items() if key != "episodes"},
+    }
+
+
+def _distributed_reduce_device(config: ExperimentConfig) -> torch.device:
+    if bool(config.training.distributed_mode == "local_replay") and torch.cuda.is_available():
+        local_rank = _distributed_local_rank()
+        if local_rank < torch.cuda.device_count():
+            device = torch.device(f"cuda:{local_rank}")
+            torch.cuda.set_device(device)
+            return device
+    return torch.device("cpu")
 
 
 def _apply_overrides(cfg: ExperimentConfig, args: argparse.Namespace) -> ExperimentConfig:
