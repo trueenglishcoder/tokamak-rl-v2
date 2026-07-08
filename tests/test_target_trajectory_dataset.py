@@ -9,8 +9,10 @@ from tokamak_rl_v2.config.machine_envelope import load_machine_envelope
 from tokamak_rl_v2.data.target_trajectories import (
     TARGET_FILE,
     WINDOW_STEPS,
+    _quota_counts,
     build_target_dataset,
     limiter_radii_at_angles,
+    parse_difficulty_fractions,
 )
 from tokamak_rl_v2.env.references import T15ReplayBoundaryLibrary
 
@@ -179,3 +181,58 @@ def test_target_only_library_replays_without_real_action(tmp_path: Path) -> None
     assert np.allclose(library.radii_for_segment(shot, steps=100, reset_radii=np.ones(32), source_index=source), expected_radii)
     with pytest.raises(ValueError, match="target-only"):
         library.real_action_for_segment(shot, steps=100, source_index=source)
+
+
+
+def test_parse_difficulty_fractions_normalizes() -> None:
+    fractions = parse_difficulty_fractions("hold=2,slow=3,medium=4,fast=1")
+
+    assert fractions == {"hold": 0.2, "slow": 0.3, "medium": 0.4, "fast": 0.1}
+
+
+def test_balanced_quota_counts_distributes_remainder() -> None:
+    fractions = parse_difficulty_fractions("hold=0.20,slow=0.35,medium=0.30,fast=0.15")
+    assert fractions is not None
+
+    quotas = _quota_counts(20, fractions)
+
+    assert quotas == {"hold": 4, "slow": 7, "medium": 6, "fast": 3}
+    assert sum(quotas.values()) == 20
+
+
+def test_target_builder_can_select_balanced_window_counts(tmp_path: Path) -> None:
+    target_seed, initial_seed = _write_seed_libraries(tmp_path)
+    machine = _write_machine(tmp_path / "machine.yaml")
+    limiter = np.asarray([[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]], dtype=float)
+    out_dir = tmp_path / "balanced"
+
+    summary = build_target_dataset(
+        target_seed_path=target_seed,
+        initial_library_path=initial_seed,
+        machine_envelope_path=machine,
+        out_dir=out_dir,
+        limiter_shape=limiter,
+        boundary_center=(0.0, 0.0),
+        theta_count=32,
+        train_parents=2,
+        holdout_parents=1,
+        min_steps=130,
+        max_steps=130,
+        window_steps=WINDOW_STEPS,
+        window_stride_steps=1,
+        dt=0.001,
+        seed=11,
+        target_train_windows=12,
+        target_holdout_windows=6,
+        target_difficulty_fractions={"hold": 0.5, "slow": 0.5, "medium": 0.0, "fast": 0.0},
+    )
+
+    assert summary.windows == 18
+    assert summary.train_windows == 12
+    assert summary.holdout_windows == 6
+    assert summary.difficulty_selection is not None
+    assert summary.difficulty_selection["target_split_windows"] == {"train": 12, "holdout": 6}
+    assert summary.difficulty_selection["selected_windows"] == 18
+    with np.load(out_dir / TARGET_FILE, allow_pickle=False) as target:
+        assert target["ip_target"].shape[0] == 18
+        assert set(np.asarray(target["split"]).astype(str).tolist()) == {"train", "holdout"}

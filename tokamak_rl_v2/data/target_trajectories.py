@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 import json
@@ -14,6 +14,8 @@ TARGET_SCHEMA = "t15_proxy_target_trajectory_v1"
 TARGET_FILE = "t15_target_trajectory_targets.npz"
 INITIAL_FILE = "t15_proxy_target_v1_initial_states.npz"
 WINDOW_STEPS = 100
+DIFFICULTY_ORDER = ("hold", "slow", "medium", "fast")
+DEFAULT_BALANCED_DIFFICULTY_FRACTIONS = {"hold": 0.20, "slow": 0.35, "medium": 0.30, "fast": 0.15}
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,9 +54,10 @@ class TargetDatasetSummary:
     min_limiter_margin_m: float
     family_counts: dict[str, int]
     difficulty_counts: dict[str, int]
+    difficulty_selection: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "dataset_dir": str(self.dataset_dir),
             "target_path": str(self.target_path),
             "initial_state_path": str(self.initial_state_path),
@@ -71,6 +74,9 @@ class TargetDatasetSummary:
             "family_counts": dict(self.family_counts),
             "difficulty_counts": dict(self.difficulty_counts),
         }
+        if self.difficulty_selection is not None:
+            out["difficulty_selection"] = self.difficulty_selection
+        return out
 
 
 def build_target_dataset(
@@ -91,6 +97,9 @@ def build_target_dataset(
     dt: float = 0.001,
     seed: int = 123,
     split_holdout_fraction: float = 0.15,
+    target_train_windows: int | None = None,
+    target_holdout_windows: int | None = None,
+    target_difficulty_fractions: Mapping[str, float] | None = None,
 ) -> TargetDatasetSummary:
     """Build target-only Ip/boundary windows with overlapping cuts.
 
@@ -160,10 +169,24 @@ def build_target_dataset(
                 window_steps=int(window_steps),
                 stride=int(window_stride_steps),
                 dt=float(dt),
+                envelope=envelope,
             )
         )
     if not windows:
         raise RuntimeError("target generator produced no windows")
+
+    difficulty_selection: dict[str, Any] | None = None
+    normalized_fractions = _normalize_difficulty_fractions(target_difficulty_fractions)
+    if normalized_fractions is not None:
+        windows, difficulty_selection = _select_balanced_difficulty_windows(
+            windows,
+            fractions=normalized_fractions,
+            target_train_windows=target_train_windows,
+            target_holdout_windows=target_holdout_windows,
+            rng=rng,
+        )
+        if not windows:
+            raise RuntimeError("balanced target selection produced no windows")
 
     out_dir = Path(out_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -179,6 +202,8 @@ def build_target_dataset(
         _write_target_npz(compat_path, windows, theta=theta, envelope=envelope, dt=float(dt), window_steps=int(window_steps))
 
     summary = summarize_target_dataset(target_path=target_path, initial_state_path=initial_path, limiter_shape=limiter, boundary_center=tuple(center), dt=float(dt))
+    if difficulty_selection is not None:
+        summary = replace(summary, difficulty_selection=difficulty_selection)
     summary_path = out_dir / "summary.json"
     summary_path.write_text(json.dumps(summary.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
     _write_report(out_dir / "target_feasibility_report.md", summary=summary, envelope=envelope)
@@ -393,7 +418,7 @@ def _limit_boundary_rate(values: np.ndarray, *, previous: np.ndarray, max_rate: 
     return out
 
 
-def _windows_from_parent(*, parent: Mapping[str, Any], window_steps: int, stride: int, dt: float) -> list[dict[str, Any]]:
+def _windows_from_parent(*, parent: Mapping[str, Any], window_steps: int, stride: int, dt: float, envelope: MachineEnvelope) -> list[dict[str, Any]]:
     ip = np.asarray(parent["ip"], dtype=np.float64)
     radii = np.asarray(parent["radii"], dtype=np.float64)
     if ip.shape[0] != radii.shape[0]:
@@ -404,19 +429,28 @@ def _windows_from_parent(*, parent: Mapping[str, Any], window_steps: int, stride
     rows = []
     for start in range(0, max_start + 1, int(stride)):
         end = start + int(window_steps)
+        ip_window = ip[start : end + 1].astype(np.float32)
+        radii_window = radii[start : end + 1].astype(np.float32)
+        window_difficulty = _difficulty_bin(
+            ip=np.asarray(ip_window, dtype=np.float64),
+            radii=np.asarray(radii_window, dtype=np.float64),
+            dt=float(dt),
+            envelope=envelope,
+            family=str(parent["family"]),
+        )
         rows.append(
             {
                 "shot_id": int(parent["parent_id"]),
                 "source_index": int(start),
                 "time_s": float(start) * float(dt),
                 "split": str(parent["split"]),
-                "difficulty_bin": str(parent["difficulty_bin"]),
+                "difficulty_bin": str(window_difficulty),
                 "family": str(parent["family"]),
                 "seed_shot_id": str(parent["seed_shot_id"]),
                 "seed_source_index": int(parent["seed_source_index"]),
                 "seed_time_s": float(parent["seed_time_s"]),
-                "ip_target": ip[start : end + 1].astype(np.float32),
-                "boundary_radii": radii[start : end + 1].astype(np.float32),
+                "ip_target": ip_window,
+                "boundary_radii": radii_window,
                 "ip0": float(ip[start]),
                 "pfc0": np.asarray(parent["pfc0"], dtype=np.float32),
                 "sol0": np.asarray(parent["sol0"], dtype=np.float32),
@@ -425,6 +459,156 @@ def _windows_from_parent(*, parent: Mapping[str, Any], window_steps: int, stride
         )
     return rows
 
+
+
+def parse_difficulty_fractions(text: str | None) -> dict[str, float] | None:
+    """Parse difficulty fractions such as ``hold=0.2,slow=0.35,medium=0.3,fast=0.15``."""
+
+    if text is None or str(text).strip() == "":
+        return None
+    out: dict[str, float] = {}
+    for raw_item in str(text).split(","):
+        item = raw_item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise ValueError(f"difficulty fraction item must be name=value, got {item!r}")
+        name, value = item.split("=", 1)
+        name = name.strip()
+        if name not in DIFFICULTY_ORDER:
+            raise ValueError(f"unknown difficulty {name!r}; expected one of {DIFFICULTY_ORDER}")
+        fraction = float(value)
+        if not np.isfinite(fraction) or fraction < 0.0:
+            raise ValueError(f"difficulty fraction for {name!r} must be finite and non-negative")
+        out[name] = fraction
+    return _normalize_difficulty_fractions(out)
+
+
+def _normalize_difficulty_fractions(fractions: Mapping[str, float] | None) -> dict[str, float] | None:
+    if fractions is None:
+        return None
+    unknown = sorted(set(fractions) - set(DIFFICULTY_ORDER))
+    if unknown:
+        raise ValueError(f"unknown difficulty fraction keys: {unknown}")
+    values = {name: float(fractions.get(name, 0.0)) for name in DIFFICULTY_ORDER}
+    for name, value in values.items():
+        if not np.isfinite(value) or value < 0.0:
+            raise ValueError(f"difficulty fraction for {name!r} must be finite and non-negative")
+    total = float(sum(values.values()))
+    if total <= 0.0:
+        raise ValueError("difficulty fractions must sum to a positive value")
+    return {name: values[name] / total for name in DIFFICULTY_ORDER}
+
+
+def _count_difficulty(rows: Iterable[Mapping[str, Any]]) -> dict[str, int]:
+    counts = {name: 0 for name in DIFFICULTY_ORDER}
+    for row in rows:
+        name = str(row.get("difficulty_bin", "unknown"))
+        counts[name] = int(counts.get(name, 0)) + 1
+    return {name: count for name, count in counts.items() if count > 0}
+
+
+def _quota_counts(total: int, fractions: Mapping[str, float]) -> dict[str, int]:
+    total = int(total)
+    if total < 0:
+        raise ValueError("quota total must be non-negative")
+    exact = {name: float(fractions.get(name, 0.0)) * float(total) for name in DIFFICULTY_ORDER}
+    quotas = {name: int(math.floor(exact[name])) for name in DIFFICULTY_ORDER}
+    remainder = total - int(sum(quotas.values()))
+    order = sorted(DIFFICULTY_ORDER, key=lambda name: (exact[name] - math.floor(exact[name]), fractions.get(name, 0.0)), reverse=True)
+    for name in order[:remainder]:
+        quotas[name] += 1
+    return quotas
+
+
+def _select_balanced_difficulty_windows(
+    windows: list[dict[str, Any]],
+    *,
+    fractions: Mapping[str, float],
+    target_train_windows: int | None,
+    target_holdout_windows: int | None,
+    rng: np.random.Generator,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    raw_counts_all = _count_difficulty(windows)
+    selected: list[dict[str, Any]] = []
+    meta: dict[str, Any] = {
+        "target_difficulty_fractions": {name: float(fractions.get(name, 0.0)) for name in DIFFICULTY_ORDER},
+        "raw_difficulty_counts": raw_counts_all,
+        "raw_split_difficulty_counts": {},
+        "target_split_windows": {},
+        "target_split_difficulty_quotas": {},
+        "selected_split_difficulty_counts": {},
+        "unused_split_difficulty_counts": {},
+        "underfilled_split_difficulties": {},
+    }
+    for split in ("train", "holdout"):
+        split_rows = [row for row in windows if str(row.get("split")) == split]
+        requested = target_train_windows if split == "train" else target_holdout_windows
+        target_count = len(split_rows) if requested is None else int(requested)
+        if target_count < 0:
+            raise ValueError(f"target_{split}_windows must be non-negative")
+        target_count = min(target_count, len(split_rows))
+        chosen, split_meta = _select_balanced_split_windows(split_rows, target_count=target_count, fractions=fractions, rng=rng)
+        selected.extend(chosen)
+        meta["raw_split_difficulty_counts"][split] = split_meta["raw_counts"]
+        meta["target_split_windows"][split] = int(target_count)
+        meta["target_split_difficulty_quotas"][split] = split_meta["target_quotas"]
+        meta["selected_split_difficulty_counts"][split] = split_meta["selected_counts"]
+        meta["unused_split_difficulty_counts"][split] = split_meta["unused_counts"]
+        meta["underfilled_split_difficulties"][split] = split_meta["underfilled_difficulties"]
+    selected.sort(key=lambda row: (str(row.get("split")), int(row.get("shot_id", 0)), int(row.get("source_index", 0))))
+    meta["selected_difficulty_counts"] = _count_difficulty(selected)
+    meta["selected_windows"] = int(len(selected))
+    return selected, meta
+
+
+def _select_balanced_split_windows(
+    rows: list[dict[str, Any]],
+    *,
+    target_count: int,
+    fractions: Mapping[str, float],
+    rng: np.random.Generator,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    by_diff: dict[str, list[int]] = {name: [] for name in DIFFICULTY_ORDER}
+    overflow: list[int] = []
+    for idx, row in enumerate(rows):
+        name = str(row.get("difficulty_bin", "unknown"))
+        if name in by_diff:
+            by_diff[name].append(idx)
+        else:
+            overflow.append(idx)
+    raw_counts = {name: len(indices) for name, indices in by_diff.items() if indices}
+    if overflow:
+        raw_counts["unknown"] = len(overflow)
+    quotas = _quota_counts(int(target_count), fractions)
+    selected_indices: list[int] = []
+    underfilled: dict[str, dict[str, int]] = {}
+    for name in DIFFICULTY_ORDER:
+        available = list(by_diff[name])
+        rng.shuffle(available)
+        take = min(int(quotas[name]), len(available))
+        selected_indices.extend(available[:take])
+        if take < int(quotas[name]):
+            underfilled[name] = {"requested": int(quotas[name]), "available": int(len(available)), "selected": int(take)}
+    selected_set = set(selected_indices)
+    deficit = int(target_count) - len(selected_indices)
+    if deficit > 0:
+        remaining = [idx for idx in range(len(rows)) if idx not in selected_set]
+        rng.shuffle(remaining)
+        selected_indices.extend(remaining[:deficit])
+    selected_indices = selected_indices[: int(target_count)]
+    selected_set = set(selected_indices)
+    selected_rows = [rows[idx] for idx in selected_indices]
+    selected_counts = _count_difficulty(selected_rows)
+    unused_rows = [rows[idx] for idx in range(len(rows)) if idx not in selected_set]
+    unused_counts = _count_difficulty(unused_rows)
+    return selected_rows, {
+        "raw_counts": raw_counts,
+        "target_quotas": {name: int(value) for name, value in quotas.items() if value > 0},
+        "selected_counts": selected_counts,
+        "unused_counts": unused_counts,
+        "underfilled_difficulties": underfilled,
+    }
 
 def summarize_target_dataset(
     *,
@@ -691,6 +875,8 @@ def _write_report(path: Path, *, summary: TargetDatasetSummary, envelope: Machin
     lines.extend(["", "## Difficulty counts", ""])
     for key, value in sorted(summary.difficulty_counts.items()):
         lines.append(f"- {key}: {value}")
+    if summary.difficulty_selection is not None:
+        lines.extend(["", "## Difficulty selection", "", "```json", json.dumps(summary.difficulty_selection, indent=2, sort_keys=True), "```"])
     if envelope is not None:
         lines.extend(
             [
