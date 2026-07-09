@@ -550,6 +550,26 @@ class T15TCVDerivativeReward:
             if mean_jdot_bias_fraction is None
             else torch.clamp(mean_jdot_bias_fraction.to(dtype=action.dtype, device=action.device).reshape_as(derivative_usage), min=0.0)
         )
+        current_usage_mean = (
+            torch.clamp(current_usage_fraction, min=0.0)
+            if current_usage_mean_fraction is None
+            else torch.clamp(current_usage_mean_fraction.to(dtype=action.dtype, device=action.device).reshape_as(current_usage_fraction), min=0.0)
+        )
+        derivative_usage_mean = (
+            torch.clamp(derivative_usage, min=0.0)
+            if derivative_usage_mean_fraction is None
+            else torch.clamp(derivative_usage_mean_fraction.to(dtype=action.dtype, device=action.device).reshape_as(derivative_usage), min=0.0)
+        )
+        current_usage_mean_reward = _tcv_clipped_linear(
+            current_usage_mean,
+            bad=float(c.current_bad_fraction),
+            good=0.0,
+        )
+        derivative_usage_mean_reward = _tcv_clipped_linear(
+            derivative_usage_mean,
+            bad=float(c.derivative_margin_bad_fraction),
+            good=0.0,
+        )
         current_drift_reward = _tcv_clipped_linear(
             current_drift,
             bad=float(c.current_drift_bad_fraction),
@@ -582,6 +602,8 @@ class T15TCVDerivativeReward:
                 derivative_reward,
                 current_margin_reward,
                 derivative_margin_reward,
+                current_usage_mean_reward,
+                derivative_usage_mean_reward,
                 current_drift_reward,
                 mean_jdot_bias_reward,
                 saturation_reward,
@@ -599,6 +621,8 @@ class T15TCVDerivativeReward:
                 float(c.derivative_weight),
                 float(c.current_margin_weight),
                 float(c.derivative_margin_weight),
+                float(c.current_usage_weight),
+                float(c.derivative_usage_weight),
                 float(c.current_drift_weight),
                 float(c.mean_jdot_bias_weight),
                 float(c.actuator_saturation_weight),
@@ -637,6 +661,8 @@ class T15TCVDerivativeReward:
         derivative_loss = 1.0 - derivative_reward
         current_margin_loss = 1.0 - current_margin_reward
         derivative_margin_loss = 1.0 - derivative_margin_reward
+        current_usage_mean_loss = 1.0 - current_usage_mean_reward
+        derivative_usage_mean_loss = 1.0 - derivative_usage_mean_reward
         current_drift_loss = 1.0 - current_drift_reward
         mean_jdot_bias_loss = 1.0 - mean_jdot_bias_reward
         saturation_component_loss = 1.0 - saturation_reward
@@ -687,10 +713,12 @@ class T15TCVDerivativeReward:
                 "derivative_loss": derivative_loss,
                 "current_margin_loss": current_margin_loss,
                 "derivative_margin_loss": derivative_margin_loss,
+                "current_usage_mean_loss": current_usage_mean_loss,
+                "derivative_usage_mean_loss": derivative_usage_mean_loss,
                 "current_drift_loss": current_drift_loss,
                 "mean_jdot_bias_loss": mean_jdot_bias_loss,
-                "current_usage_loss": current_loss,
-                "derivative_usage_loss": derivative_loss,
+                "current_usage_loss": current_usage_mean_loss,
+                "derivative_usage_loss": derivative_usage_mean_loss,
                 "action_loss": torch.zeros_like(quality),
                 "delta_action_loss": torch.zeros_like(quality),
                 "jdot_switching_loss": jdot_switching_loss,
