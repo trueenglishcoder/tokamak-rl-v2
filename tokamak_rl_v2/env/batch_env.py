@@ -25,9 +25,10 @@ from tokamak_rl_v2.env.references import (
 from tokamak_rl_v2.env.t15_csv_initial_states import CsvInitialStateLibrary, CsvInitialStateSample
 from tokamak_rl_v2.rewards import build_reward
 
-_RATE_OBSERVATION_KINDS = {"controller_state_v5", "controller_state_v6", "controller_state_v7_no_step_norm"}
-_INTEGRAL_OBSERVATION_KINDS = {"controller_state_v6", "controller_state_v7_no_step_norm"}
+_RATE_OBSERVATION_KINDS = {"controller_state_v5", "controller_state_v6", "controller_state_v7_no_step_norm", "controller_state_v8_safety_margin"}
+_INTEGRAL_OBSERVATION_KINDS = {"controller_state_v6", "controller_state_v7_no_step_norm", "controller_state_v8_safety_margin"}
 _NO_STEP_NORM_OBSERVATION_KINDS = {"controller_state_v7_no_step_norm"}
+_SAFETY_MARGIN_OBSERVATION_KINDS = {"controller_state_v8_safety_margin"}
 
 
 @dataclass(slots=True)
@@ -512,6 +513,13 @@ class TokamakMagneticControlEnv:
                 ("integral_ip_error", 1),
                 ("integral_boundary_radii_error", n_angles),
             )
+        if self.config.observation.actor_kind in _SAFETY_MARGIN_OBSERVATION_KINDS:
+            sizes = sizes + (
+                ("current_usage_by_coil", self.action_dim),
+                ("derivative_usage_by_coil", self.action_dim),
+                ("min_current_margin_fraction", 1),
+                ("min_derivative_margin_fraction", 1),
+            )
         sizes = sizes + (
             ("previous_action", self.action_dim),
             ("target_preview", preview * (2 + n_angles)),
@@ -623,7 +631,11 @@ class TokamakMagneticControlEnv:
         boundary_found = result.boundary.found.to(torch.float32).reshape(self.batch_size, 1)
         current_scale = torch.where(torch.isfinite(self.current_limits) & (self.current_limits > 0.0), self.current_limits, torch.ones_like(self.current_limits))
         deriv_scale = torch.where(torch.isfinite(self.derivative_limits) & (self.derivative_limits > 0.0), self.derivative_limits, torch.ones_like(self.derivative_limits))
+        raw_deriv_scale = torch.where(torch.isfinite(self.raw_derivative_limits) & (self.raw_derivative_limits > 0.0), self.raw_derivative_limits, torch.ones_like(self.raw_derivative_limits))
+        current_usage_by_coil = torch.abs(currents) / current_scale[None, :]
+        derivative_usage_by_coil = torch.abs(derivs) / raw_deriv_scale[None, :]
         current_usage_fraction, current_margin_fraction, derivative_usage = self._constraint_metrics(current=currents, derivs=derivs)
+        derivative_margin_fraction = torch.min(1.0 - derivative_usage_by_coil, dim=1).values
         parts = []
         if self.config.observation.actor_kind not in _NO_STEP_NORM_OBSERVATION_KINDS:
             parts.append(self.step_index.to(torch.float32).reshape(self.batch_size, 1) / max(float(self.config.sim.max_episode_steps), 1.0))
@@ -651,6 +663,15 @@ class TokamakMagneticControlEnv:
         if self.config.observation.actor_kind in _INTEGRAL_OBSERVATION_KINDS:
             integral_ip, integral_boundary = self._normalized_integral_features()
             parts.extend([integral_ip, integral_boundary])
+        if self.config.observation.actor_kind in _SAFETY_MARGIN_OBSERVATION_KINDS:
+            parts.extend(
+                [
+                    torch.clamp(current_usage_by_coil, min=0.0, max=2.0),
+                    torch.clamp(derivative_usage_by_coil, min=0.0, max=2.0),
+                    torch.clamp(current_margin_fraction, min=-1.0, max=1.0).reshape(self.batch_size, 1),
+                    torch.clamp(derivative_margin_fraction, min=-1.0, max=1.0).reshape(self.batch_size, 1),
+                ]
+            )
         parts.extend([self.previous_action, self._preview()])
         actor_obs = torch.cat(parts, dim=1)
         actor_obs = torch.nan_to_num(actor_obs, nan=0.0, posinf=0.0, neginf=0.0)
@@ -676,6 +697,8 @@ class TokamakMagneticControlEnv:
         current_scale = np.where(np.isfinite(current_scale) & (current_scale > 0.0), current_scale, 1.0)
         deriv_scale = np.asarray(self.derivative_limits.detach().cpu().numpy(), dtype=float)
         deriv_scale = np.where(np.isfinite(deriv_scale) & (deriv_scale > 0.0), deriv_scale, 1.0)
+        raw_deriv_scale = np.asarray(self.raw_derivative_limits.detach().cpu().numpy(), dtype=float)
+        raw_deriv_scale = np.where(np.isfinite(raw_deriv_scale) & (raw_deriv_scale > 0.0), raw_deriv_scale, 1.0)
         preview = self._preview().detach().cpu().numpy()
         for b, model in enumerate(self._cpu_models):
             currents = np.concatenate([model.state.pfc_currents, model.state.sol_currents]).astype(float, copy=False)
@@ -735,6 +758,17 @@ class TokamakMagneticControlEnv:
                     [
                         integral_ip[b].detach().cpu().numpy().astype(float, copy=False),
                         integral_boundary[b].detach().cpu().numpy().astype(float, copy=False),
+                    ]
+                )
+            current_usage_by_coil = np.abs(currents) / current_scale
+            derivative_usage_by_coil = np.abs(derivs) / raw_deriv_scale
+            if self.config.observation.actor_kind in _SAFETY_MARGIN_OBSERVATION_KINDS:
+                parts.extend(
+                    [
+                        np.clip(current_usage_by_coil, 0.0, 2.0),
+                        np.clip(derivative_usage_by_coil, 0.0, 2.0),
+                        np.array([float(np.clip(np.min(1.0 - current_usage_by_coil), -1.0, 1.0))], dtype=float),
+                        np.array([float(np.clip(np.min(1.0 - derivative_usage_by_coil), -1.0, 1.0))], dtype=float),
                     ]
                 )
             parts.extend(
@@ -840,6 +874,8 @@ class TokamakMagneticControlEnv:
         derivative_usage = torch.max(derivative_usage_by_coil, dim=1).values
         derivative_usage_mean_fraction = torch.mean(derivative_usage_by_coil, dim=1)
         derivative_usage_loss = torch.mean(derivative_usage_by_coil.pow(2), dim=1)
+        max_current_fraction, max_current_fraction_coil_index = torch.max(current_usage_by_coil, dim=1)
+        max_derivative_fraction, max_derivative_fraction_coil_index = torch.max(derivative_usage_by_coil, dim=1)
         current_drift_fraction, mean_jdot_bias_fraction = self._drift_metrics(current=current)
         boundary_points = result.boundary.points[:, : int(self.config.sim.angles)].to(torch.float32)
         ref = ref_points[:, : int(self.config.sim.angles)].to(torch.float32)
@@ -855,6 +891,10 @@ class TokamakMagneticControlEnv:
         components["terminated_current_hard"] = current_hard_terminated.to(dtype=rb.reward.dtype)
         components["terminated_current_grace"] = current_grace_terminated.to(dtype=rb.reward.dtype)
         components["current_over_limit_steps"] = self.current_over_limit_steps.to(dtype=rb.reward.dtype)
+        components["max_current_fraction"] = max_current_fraction.to(dtype=rb.reward.dtype)
+        components["max_derivative_fraction"] = max_derivative_fraction.to(dtype=rb.reward.dtype)
+        components["max_current_fraction_coil_index"] = max_current_fraction_coil_index.to(dtype=rb.reward.dtype)
+        components["max_derivative_fraction_coil_index"] = max_derivative_fraction_coil_index.to(dtype=rb.reward.dtype)
         return rb.reward, terminated, {"reward_components": {k: v.detach() for k, v in components.items()}}
 
     def _reward_cpu(
@@ -913,6 +953,8 @@ class TokamakMagneticControlEnv:
         derivative_usage = torch.max(derivative_usage_by_coil, dim=1).values
         derivative_usage_mean_fraction = torch.mean(derivative_usage_by_coil, dim=1)
         derivative_usage_loss = torch.mean(derivative_usage_by_coil.pow(2), dim=1)
+        max_current_fraction, max_current_fraction_coil_index = torch.max(current_usage_by_coil, dim=1)
+        max_derivative_fraction, max_derivative_fraction_coil_index = torch.max(derivative_usage_by_coil, dim=1)
         current_drift_fraction, mean_jdot_bias_fraction = self._drift_metrics(current=current_t)
         found_t = torch.as_tensor(found, dtype=torch.bool, device=self.device)
         boundary_terminated = ~found_t if self.config.sim.terminate_on_boundary_loss else torch.zeros_like(found_t, dtype=torch.bool)
@@ -926,6 +968,10 @@ class TokamakMagneticControlEnv:
         components["terminated_current_hard"] = current_hard_terminated.to(dtype=rb.reward.dtype)
         components["terminated_current_grace"] = current_grace_terminated.to(dtype=rb.reward.dtype)
         components["current_over_limit_steps"] = self.current_over_limit_steps.to(dtype=rb.reward.dtype)
+        components["max_current_fraction"] = max_current_fraction.to(dtype=rb.reward.dtype)
+        components["max_derivative_fraction"] = max_derivative_fraction.to(dtype=rb.reward.dtype)
+        components["max_current_fraction_coil_index"] = max_current_fraction_coil_index.to(dtype=rb.reward.dtype)
+        components["max_derivative_fraction_coil_index"] = max_derivative_fraction_coil_index.to(dtype=rb.reward.dtype)
         return rb.reward, terminated, {"reward_components": {k: v.detach() for k, v in components.items()}}
 
     def export_schema(self) -> dict[str, object]:

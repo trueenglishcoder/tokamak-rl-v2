@@ -7,6 +7,7 @@ import torch
 from torch import Tensor
 
 from tokamak_rl_v2.config.schema import RewardConfig
+from tokamak_rl_v2.rewards.bounded_objectives import bounded_margin_loss, bounded_margin_quality
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +100,16 @@ class T15PhysicalReward:
         ip_loss = _huber(ip_error / max(float(c.ip_scale_a), 1.0e-12))
         current_loss = _threshold_square(current_usage_fraction, start=float(c.current_soft_fraction), bad=float(c.current_bad_fraction))
         derivative_loss = _threshold_square(derivative_usage, start=float(c.derivative_soft_fraction), bad=float(c.derivative_bad_fraction))
+        current_margin_loss = bounded_margin_loss(
+            current_usage_fraction,
+            good=float(c.current_margin_good_fraction),
+            bad=float(c.current_margin_bad_fraction),
+        )
+        derivative_margin_loss = bounded_margin_loss(
+            derivative_usage,
+            good=float(c.derivative_margin_good_fraction),
+            bad=float(c.derivative_margin_bad_fraction),
+        )
         current_usage_cost = (
             torch.clamp(current_usage_fraction, min=0.0).pow(2)
             if current_usage_loss is None
@@ -145,6 +156,8 @@ class T15PhysicalReward:
             + float(c.ip_weight) * ip_loss
             + float(c.current_weight) * current_loss
             + float(c.derivative_weight) * derivative_loss
+            + float(c.current_margin_weight) * current_margin_loss
+            + float(c.derivative_margin_weight) * derivative_margin_loss
             + float(c.current_usage_weight) * current_usage_cost
             + float(c.derivative_usage_weight) * derivative_usage_cost
             + float(c.action_weight) * action_loss
@@ -186,6 +199,7 @@ class T15PhysicalReward:
                 "current_drift_fraction": current_drift,
                 "current_margin_fraction": current_margin_fraction,
                 "derivative_usage": torch.clamp(derivative_usage, min=0.0),
+                "derivative_margin_fraction": 1.0 - torch.clamp(derivative_usage, min=0.0),
                 "derivative_usage_mean_fraction": derivative_usage_mean,
                 "mean_jdot_bias_fraction": mean_jdot_bias,
                 "max_abs_action": max_abs_action,
@@ -203,6 +217,8 @@ class T15PhysicalReward:
                 "ip_loss": ip_loss,
                 "current_loss": current_loss,
                 "derivative_loss": derivative_loss,
+                "current_margin_loss": current_margin_loss,
+                "derivative_margin_loss": derivative_margin_loss,
                 "current_usage_loss": current_usage_cost,
                 "current_drift_loss": torch.zeros_like(current_drift),
                 "derivative_usage_loss": derivative_usage_cost,
@@ -291,6 +307,16 @@ class T15TCVQualityReward:
         ip_loss = ip_error / max(float(c.ip_scale_a), 1.0e-12)
         current_loss = _threshold_square(current_usage_fraction, start=float(c.current_soft_fraction), bad=float(c.current_bad_fraction))
         derivative_loss = _threshold_square(derivative_usage, start=float(c.derivative_soft_fraction), bad=float(c.derivative_bad_fraction))
+        current_margin_loss = bounded_margin_loss(
+            current_usage_fraction,
+            good=float(c.current_margin_good_fraction),
+            bad=float(c.current_margin_bad_fraction),
+        )
+        derivative_margin_loss = bounded_margin_loss(
+            derivative_usage,
+            good=float(c.derivative_margin_good_fraction),
+            bad=float(c.derivative_margin_bad_fraction),
+        )
         current_usage_cost = (
             torch.clamp(current_usage_fraction, min=0.0).pow(2)
             if current_usage_loss is None
@@ -337,6 +363,8 @@ class T15TCVQualityReward:
                 float(c.ip_weight) * ip_loss,
                 float(c.current_weight) * current_loss,
                 float(c.derivative_weight) * derivative_loss,
+                float(c.current_margin_weight) * current_margin_loss,
+                float(c.derivative_margin_weight) * derivative_margin_loss,
                 float(c.current_drift_weight) * current_drift,
                 float(c.mean_jdot_bias_weight) * mean_jdot_bias,
                 float(c.current_usage_weight) * current_usage_cost,
@@ -384,6 +412,7 @@ class T15TCVQualityReward:
                 "current_drift_fraction": current_drift,
                 "current_margin_fraction": current_margin_fraction,
                 "derivative_usage": torch.clamp(derivative_usage, min=0.0),
+                "derivative_margin_fraction": 1.0 - torch.clamp(derivative_usage, min=0.0),
                 "derivative_usage_mean_fraction": derivative_usage_mean,
                 "mean_jdot_bias_fraction": mean_jdot_bias,
                 "max_abs_action": max_abs_action,
@@ -403,6 +432,8 @@ class T15TCVQualityReward:
                 "ip_loss": ip_loss,
                 "current_loss": current_loss,
                 "derivative_loss": derivative_loss,
+                "current_margin_loss": current_margin_loss,
+                "derivative_margin_loss": derivative_margin_loss,
                 "current_usage_loss": current_usage_cost,
                 "current_drift_loss": current_drift,
                 "derivative_usage_loss": derivative_usage_cost,
@@ -499,6 +530,16 @@ class T15TCVDerivativeReward:
             bad=float(c.derivative_bad_fraction),
             good=float(c.derivative_soft_fraction),
         )
+        current_margin_reward = bounded_margin_quality(
+            current_usage_fraction,
+            good=float(c.current_margin_good_fraction),
+            bad=float(c.current_margin_bad_fraction),
+        )
+        derivative_margin_reward = bounded_margin_quality(
+            derivative_usage,
+            good=float(c.derivative_margin_good_fraction),
+            bad=float(c.derivative_margin_bad_fraction),
+        )
         current_drift = (
             torch.zeros_like(current_usage_fraction)
             if current_drift_fraction is None
@@ -539,6 +580,8 @@ class T15TCVDerivativeReward:
                 ip_reward,
                 current_reward,
                 derivative_reward,
+                current_margin_reward,
+                derivative_margin_reward,
                 current_drift_reward,
                 mean_jdot_bias_reward,
                 saturation_reward,
@@ -554,6 +597,8 @@ class T15TCVDerivativeReward:
                 float(c.ip_weight),
                 float(c.current_weight),
                 float(c.derivative_weight),
+                float(c.current_margin_weight),
+                float(c.derivative_margin_weight),
                 float(c.current_drift_weight),
                 float(c.mean_jdot_bias_weight),
                 float(c.actuator_saturation_weight),
@@ -590,6 +635,8 @@ class T15TCVDerivativeReward:
         ip_loss = 1.0 - ip_reward
         current_loss = 1.0 - current_reward
         derivative_loss = 1.0 - derivative_reward
+        current_margin_loss = 1.0 - current_margin_reward
+        derivative_margin_loss = 1.0 - derivative_margin_reward
         current_drift_loss = 1.0 - current_drift_reward
         mean_jdot_bias_loss = 1.0 - mean_jdot_bias_reward
         saturation_component_loss = 1.0 - saturation_reward
@@ -617,6 +664,7 @@ class T15TCVDerivativeReward:
                 "current_drift_fraction": current_drift,
                 "current_margin_fraction": current_margin_fraction,
                 "derivative_usage": torch.clamp(derivative_usage, min=0.0),
+                "derivative_margin_fraction": 1.0 - torch.clamp(derivative_usage, min=0.0),
                 "derivative_usage_mean_fraction": derivative_usage_mean,
                 "mean_jdot_bias_fraction": mean_jdot_bias,
                 "max_abs_action": max_abs_action,
@@ -637,6 +685,8 @@ class T15TCVDerivativeReward:
                 "ip_loss": ip_loss,
                 "current_loss": current_loss,
                 "derivative_loss": derivative_loss,
+                "current_margin_loss": current_margin_loss,
+                "derivative_margin_loss": derivative_margin_loss,
                 "current_drift_loss": current_drift_loss,
                 "mean_jdot_bias_loss": mean_jdot_bias_loss,
                 "current_usage_loss": current_loss,

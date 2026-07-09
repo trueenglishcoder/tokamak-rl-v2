@@ -120,7 +120,7 @@ class ReferenceConfig:
 
 @dataclass(frozen=True, slots=True)
 class ObservationConfig:
-    actor_kind: Literal["controller_state_v4", "controller_state_v5", "controller_state_v6", "controller_state_v7_no_step_norm"] = "controller_state_v6"
+    actor_kind: Literal["controller_state_v4", "controller_state_v5", "controller_state_v6", "controller_state_v7_no_step_norm", "controller_state_v8_safety_margin"] = "controller_state_v6"
     critic_kind: Literal["privileged_training_state_v1", "compact_training_state_v2"] = "compact_training_state_v2"
     target_preview_steps: int = 8
     target_preview_stride: int = 10
@@ -147,6 +147,12 @@ class RewardConfig:
     mean_jdot_bias_bad_fraction: float = 0.10
     current_usage_weight: float = 0.0
     derivative_usage_weight: float = 0.0
+    current_margin_weight: float = 0.0
+    current_margin_good_fraction: float = 0.70
+    current_margin_bad_fraction: float = 0.90
+    derivative_margin_weight: float = 0.0
+    derivative_margin_good_fraction: float = 0.25
+    derivative_margin_bad_fraction: float = 0.50
     action_weight: float = 0.02
     delta_action_weight: float = 0.05
     jdot_switching_weight: float = 0.0

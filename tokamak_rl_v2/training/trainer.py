@@ -49,6 +49,10 @@ _FOCUSED_WANDB_METRICS = {
     "eval/ip_error_a_late",
     "eval/current_over_limit_a_max",
     "eval/current_over_limit_a_late_max",
+    "eval/current_margin_loss_late_max",
+    "eval/derivative_margin_loss_late_max",
+    "eval/max_current_fraction_late_max",
+    "eval/max_derivative_fraction_late_max",
     "eval/current_over_limit_fraction_late",
     "eval/current_over_limit_5ka_fraction_late",
     "eval/current_over_limit_1pct_fraction_late",
@@ -61,6 +65,8 @@ _FOCUSED_WANDB_METRICS = {
     "reward/current_usage_fraction",
     "reward/current_usage_mean_fraction",
     "reward/current_usage_loss",
+    "reward/current_margin_loss",
+    "reward/derivative_margin_loss",
     "reward/current_drift_fraction",
     "reward/current_drift_loss",
     "reward/current_over_limit_a",
@@ -98,6 +104,10 @@ _SWEEP_WANDB_METRICS = {
     "eval/ip_error_a_late",
     "eval/current_over_limit_a_max",
     "eval/current_over_limit_a_late_max",
+    "eval/current_margin_loss_late_max",
+    "eval/derivative_margin_loss_late_max",
+    "eval/max_current_fraction_late_max",
+    "eval/max_derivative_fraction_late_max",
     "eval/current_over_limit_fraction_late",
     "eval/current_over_limit_5ka_fraction_late",
     "eval/current_over_limit_1pct_fraction_late",
@@ -1295,7 +1305,7 @@ class Trainer:
             "terminated_current",
             "current_over_limit_steps",
         }
-        min_metrics = {"current_margin_fraction", "boundary_found"}
+        min_metrics = {"current_margin_fraction", "derivative_margin_fraction", "boundary_found"}
         for name, values in component_values.items():
             arr = np.asarray(values, dtype=float)
             if arr.size:
@@ -1473,12 +1483,17 @@ class Trainer:
             "current_over_limit_a",
             "current_usage_fraction",
             "current_usage_mean_fraction",
+            "derivative_usage",
+            "current_margin_loss",
+            "derivative_margin_loss",
+            "max_current_fraction",
+            "max_derivative_fraction",
             "action_rms",
             "action_saturation_fraction",
             "terminated_boundary",
             "terminated_current",
         }
-        min_metrics = {"current_margin_fraction", "boundary_found"}
+        min_metrics = {"current_margin_fraction", "derivative_margin_fraction", "boundary_found"}
         for name, values in component_values.items():
             arr = np.asarray(values, dtype=float)
             if arr.size:
@@ -1562,6 +1577,10 @@ class Trainer:
             metric("current_over_limit_1pct_fraction_late", metric("current_over_limit_fraction_late", metric("current_over_limit_fraction", 0.0))),
         )
         saturation_fraction = metric("action_saturation_fraction_late", metric("action_saturation_fraction", 1.0))
+        current_margin_loss = metric("current_margin_loss_late_max", metric("current_margin_loss_max", metric("current_margin_loss", 0.0)))
+        derivative_margin_loss = metric("derivative_margin_loss_late_max", metric("derivative_margin_loss_max", metric("derivative_margin_loss", 0.0)))
+        max_current_fraction = metric("max_current_fraction_late_max", metric("max_current_fraction_max", metric("current_usage_fraction_late_max", metric("current_usage_fraction_max", 0.0))))
+        max_derivative_fraction = metric("max_derivative_fraction_late_max", metric("max_derivative_fraction_max", metric("derivative_usage_late_max", metric("derivative_usage_max", 0.0))))
         shape_mean = metric("shape_error_mean_m_late_p90", metric("shape_error_mean_m_p90", metric("shape_error_mean_m_late", metric("shape_error_mean_m", 1.0))))
         shape_max = metric("shape_error_max_m_late_p90", metric("shape_error_max_m_p90", metric("shape_error_max_m_late", metric("shape_error_max_m", 1.0))))
         ip_error = metric("ip_error_a_late_p90", metric("ip_error_a_p90", metric("ip_error_a_late", metric("ip_error_a", 1.0e6))))
@@ -1575,6 +1594,10 @@ class Trainer:
             + 500.0 * max(current_over, 0.0) / 5000.0
             + 500.0 * max(current_fraction, 0.0)
             + 500.0 * max(current_1pct_fraction, 0.0)
+            + 250.0 * max(current_margin_loss, 0.0)
+            + 250.0 * max(derivative_margin_loss, 0.0)
+            + 100.0 * max(max_current_fraction - 0.90, 0.0)
+            + 100.0 * max(max_derivative_fraction - 0.50, 0.0)
             + 500.0 * max(saturation_fraction - 0.01, 0.0)
             + max(shape_mean, 0.0) / 0.03
             + 0.5 * max(shape_max, 0.0) / 0.08
