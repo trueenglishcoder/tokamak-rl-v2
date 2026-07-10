@@ -7,6 +7,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --output=/scratch/%u/tokamak/tokamak-rl-v2/slurm_logs/t15-realstyle60-build-%j.out
 #SBATCH --error=/scratch/%u/tokamak/tokamak-rl-v2/slurm_logs/t15-realstyle60-build-%j.err
+#SBATCH --exclude=cn13
 
 set -euo pipefail
 
