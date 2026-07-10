@@ -5,8 +5,8 @@
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
-#SBATCH --output=slurm_logs/t15-realstyle60-build-%j.out
-#SBATCH --error=slurm_logs/t15-realstyle60-build-%j.err
+#SBATCH --output=/scratch/%u/tokamak/tokamak-rl-v2/slurm_logs/t15-realstyle60-build-%j.out
+#SBATCH --error=/scratch/%u/tokamak/tokamak-rl-v2/slurm_logs/t15-realstyle60-build-%j.err
 
 set -euo pipefail
 
