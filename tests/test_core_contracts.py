@@ -1842,6 +1842,26 @@ def test_config_loader_rejects_invalid_values(tmp_path: Path) -> None:
         load_experiment_config(bad_derivative_usage_weight)
 
     data = json.loads(CONFIG.read_text())
+    data["sim"]["current_saturation_fraction"] = 1.0
+    data["reward"]["kind"] = "tcv_derivative"
+    data["reward"]["smoothmax_alpha"] = -5.0
+    data["reward"]["action_weight"] = 0.0
+    data["reward"]["delta_action_weight"] = 0.0
+    data["reward"]["current_usage_weight"] = 1.0
+    data["reward"]["derivative_usage_weight"] = 1.5
+    usage_weighted_tcv_derivative = tmp_path / "usage_weighted_tcv_derivative.json"
+    usage_weighted_tcv_derivative.write_text(json.dumps(data), encoding="utf-8")
+    cfg = load_experiment_config(usage_weighted_tcv_derivative)
+    assert cfg.reward.current_usage_weight == pytest.approx(1.0)
+    assert cfg.reward.derivative_usage_weight == pytest.approx(1.5)
+
+    data["reward"]["action_weight"] = 0.1
+    bad_tcv_action_weight = tmp_path / "bad_tcv_action_weight.json"
+    bad_tcv_action_weight.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="action_weight"):
+        load_experiment_config(bad_tcv_action_weight)
+
+    data = json.loads(CONFIG.read_text())
     data["sim"]["current_saturation_fraction"] = 0.99
     bad_current_saturation = tmp_path / "bad_current_saturation.json"
     bad_current_saturation.write_text(json.dumps(data), encoding="utf-8")

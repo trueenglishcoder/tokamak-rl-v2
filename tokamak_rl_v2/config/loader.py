@@ -627,7 +627,7 @@ def _validate_reward_config(reward: RewardConfig, *, prefix: str) -> None:
     if not math.isfinite(float(reward.terminal_remaining_cost)) or float(reward.terminal_remaining_cost) < 0.0:
         raise ValueError(f"{prefix}.terminal_remaining_cost must be finite and non-negative")
     if reward.kind == "tcv_derivative":
-        for name in ("current_usage_weight", "derivative_usage_weight", "action_weight", "delta_action_weight"):
+        for name in ("action_weight", "delta_action_weight"):
             if abs(float(getattr(reward, name))) > 1.0e-12:
                 raise ValueError(f"{prefix}.{name} must be 0 for reward.kind=tcv_derivative")
 
