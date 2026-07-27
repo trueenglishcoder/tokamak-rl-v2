@@ -31,7 +31,7 @@ def _load_trim50_machine_writer():
 def _write_loadable_active_config(tmp_path: Path, mutate=None) -> Path:
     tmp_path.mkdir(parents=True, exist_ok=True)
     raw = json.loads(ACTIVE_CONFIG.read_text(encoding="utf-8"))
-    machine = tmp_path / "T15MD_new_data_trim50_plain_gpu_1e6_3856.toml"
+    machine = tmp_path / "T15MD_trim50_plain_gpu1e6_replay.toml"
     machine.write_text("# test placeholder\n", encoding="utf-8")
     replay_dir = tmp_path / "t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_targets"
     replay_dir.mkdir()

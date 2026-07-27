@@ -28,7 +28,7 @@ srun \
     cd /workspace/tokamak-rl-v2
 
     python3 scripts/write_trim50_plain_gpu1e6_machine_config.py \
-      --source ../tokamak-sim/configs/T15MD_new_data.toml \
+      --source ../tokamak-sim/configs/T15MD.toml \
       --out data/processed/t15_new_trim50_plain_gpu1e6_machine_config.toml
 
     python3 scripts/build_t15_new_replay_window_oracle_targets.py \
@@ -43,6 +43,6 @@ srun \
       --batch-size 256 \
       --window-steps 100 \
       --angles 32 \
-      --train-shots 3856 3857 3858 3863 \
-      --holdout-shots 3864
+      --train-shots 3855 3863 3856 3854 \
+      --holdout-shots 3859
   '

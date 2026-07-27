@@ -14,7 +14,7 @@ cd /scratch/$USER/tokamak/tokamak-rl-v2
 mkdir -p slurm_logs outputs
 
 export SOURCE_CONFIG=${SOURCE_CONFIG:-configs/experiments/t15_proxy_target_balanced_v1_v9_strict_safety_24gpu_100m.yaml}
-export TRIM_MACHINE_CONFIG_SOURCE=${TRIM_MACHINE_CONFIG_SOURCE:-../tokamak-sim/configs/T15MD_new_data.toml}
+export TRIM_MACHINE_CONFIG_SOURCE=${TRIM_MACHINE_CONFIG_SOURCE:-../tokamak-sim/configs/T15MD.toml}
 export TARGET_DATASET_DIR=${TARGET_DATASET_DIR:-data/processed/t15_proxy_target_balanced_v1}
 export RESET_LIBRARY=${RESET_LIBRARY:-${TARGET_DATASET_DIR}/t15_proxy_target_v1_initial_states.npz}
 export TARGETS=${TARGETS:-${TARGET_DATASET_DIR}/t15_target_trajectory_targets.npz}
@@ -136,7 +136,7 @@ PYVALID
 mkdir -p "$(dirname "${GENERATED_CONFIG}")"
 python3 scripts/write_trim50_plain_gpu1e6_machine_config.py \
   --source "${TRIM_MACHINE_CONFIG_SOURCE}" \
-  --out "$(dirname "${GENERATED_CONFIG}")/T15MD_new_data.toml"
+  --out "$(dirname "${GENERATED_CONFIG}")/T15MD.toml"
 
 python3 - <<PYCFG
 import json
@@ -147,7 +147,7 @@ out = Path("${GENERATED_CONFIG}")
 cfg = json.loads(source.read_text(encoding="utf-8"))
 
 cfg["name"] = "${CONFIG_NAME}"
-cfg["sim"]["config_path"] = "/workspace/tokamak-rl-v2/${TRAIN_OUTPUT}/generated_configs/T15MD_new_data.toml"
+cfg["sim"]["config_path"] = "/workspace/tokamak-rl-v2/${TRAIN_OUTPUT}/generated_configs/T15MD.toml"
 cfg["sim"]["csv_initial_state_library"] = "/workspace/tokamak-rl-v2/${RESET_LIBRARY}"
 cfg["reference"]["boundary"]["replay_reference_dir"] = "/workspace/tokamak-rl-v2/${TARGET_DATASET_DIR}"
 cfg["training"]["steps"] = int("${TRAIN_ENV_STEPS}")

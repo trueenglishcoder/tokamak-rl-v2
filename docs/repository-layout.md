@@ -69,7 +69,7 @@ The final path reads local/generated data:
 
 ```text
 ../tokamak-sim/data/t15_data_new_trim50/
-../tokamak-sim/runs/t15md_trim50_plain_gpu_1e6_setup/
+../tokamak-sim/runs/t15md_trim50_plain_gpu1e6_top5_replay/
 data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_initial_states.npz
 data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_targets/
 ```

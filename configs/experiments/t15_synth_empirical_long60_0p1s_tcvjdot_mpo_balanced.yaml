@@ -1,7 +1,7 @@
 {
   "name": "t15_synth_empirical_long60_0p1s_tcvjdot_balanced_oracle",
   "sim": {
-    "config_path": "../../../tokamak-sim/runs/t15md_trim50_plain_gpu_1e6_setup/T15MD_new_data_trim50_plain_gpu_1e6_3856.toml",
+    "config_path": "../../../tokamak-sim/runs/t15md_trim50_plain_gpu1e6_top5_replay/T15MD_trim50_plain_gpu1e6_replay.toml",
     "compute_backend": "gpu",
     "gpu_device": "cuda:0",
     "angles": 32,

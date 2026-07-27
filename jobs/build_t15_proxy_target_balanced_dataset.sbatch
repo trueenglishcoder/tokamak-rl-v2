@@ -16,7 +16,7 @@ mkdir -p slurm_logs
 export SEED_TARGET_LIBRARY=${SEED_TARGET_LIBRARY:-data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_targets/t15_replay_window_oracle_targets.npz}
 export INITIAL_LIBRARY=${INITIAL_LIBRARY:-data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_initial_states.npz}
 export MACHINE_ENVELOPE=${MACHINE_ENVELOPE:-configs/machine/t15_proxy_v1.yaml}
-export SIM_CONFIG=${SIM_CONFIG:-../tokamak-sim/configs/T15MD_new_data.toml}
+export SIM_CONFIG=${SIM_CONFIG:-../tokamak-sim/configs/T15MD.toml}
 export TARGET_OUT_DIR=${TARGET_OUT_DIR:-data/processed/t15_proxy_target_balanced_v1}
 export TARGET_PREVIEW_DIR=${TARGET_PREVIEW_DIR:-data/previews/t15_proxy_target_balanced_v1_preview}
 export REQUIRE_TARGET_PREVIEW=${REQUIRE_TARGET_PREVIEW:-1}

@@ -21,7 +21,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed-target-library", type=Path, default=Path("data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_targets/t15_replay_window_oracle_targets.npz"))
     parser.add_argument("--initial-library", type=Path, default=Path("data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_initial_states.npz"))
     parser.add_argument("--machine-envelope", type=Path, default=Path("configs/machine/t15_proxy_v1.yaml"))
-    parser.add_argument("--sim-config", type=Path, default=Path("../tokamak-sim/configs/T15MD_new_data.toml"))
+    parser.add_argument("--sim-config", type=Path, default=Path("../tokamak-sim/configs/T15MD.toml"))
     parser.add_argument("--out-dir", type=Path, default=Path("data/processed/t15_proxy_target_v1"))
     parser.add_argument("--theta-count", type=int, default=32)
     parser.add_argument("--train-parents", type=int, default=48)

@@ -23,12 +23,12 @@ Required ignored/local artifacts:
 
 ```text
 ../tokamak-sim/data/t15_data_new_trim50/
-../tokamak-sim/runs/t15md_trim50_plain_gpu_1e6_setup/
+../tokamak-sim/runs/t15md_trim50_plain_gpu1e6_top5_replay/
 data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_initial_states.npz
 data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_targets/
 ```
 
-Train shots are `3856, 3857, 3858, 3863`. Shot `3864` is held out.
+Train shots are `3855, 3863, 3856, 3854`. Shot `3859` is held out.
 
 ## Contract
 
@@ -66,7 +66,7 @@ sbatch jobs/train_t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balance
 ```
 
 The 100M job writes a run-local generated config and a copied
-`T15MD_new_data.toml` under its output directory. That generated config is the
+`T15MD.toml` under its output directory. That generated config is the
 source of truth for exports and post-run analysis.
 
 ## Evaluation

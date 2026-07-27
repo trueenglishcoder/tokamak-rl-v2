@@ -33,7 +33,7 @@ def _write_initial_library_with_parent_reset_metadata(path: Path) -> None:
 
 def test_initial_state_preflight_accepts_synthetic_parent_reset_metadata(tmp_path: Path) -> None:
     raw = json.loads(NO_STEP_LONG60_CONFIG.read_text(encoding="utf-8"))
-    machine = tmp_path / "T15MD_new_data.toml"
+    machine = tmp_path / "T15MD.toml"
     initial_library = tmp_path / "t15_synth_empirical_long60_initial_states.npz"
     replay_reference_dir = tmp_path / "t15_synth_empirical_long60"
     machine.write_text("# test placeholder\n", encoding="utf-8")

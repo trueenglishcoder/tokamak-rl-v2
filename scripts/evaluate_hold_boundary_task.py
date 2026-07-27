@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--episodes", type=int, default=100)
     ap.add_argument("--steps", type=int, default=500)
     ap.add_argument("--split", default="holdout", choices=("holdout", "train", "all"))
-    ap.add_argument("--expected-shot", default="3864")
+    ap.add_argument("--expected-shot", default="3859")
     ap.add_argument("--seed", type=int, default=386400)
     ap.add_argument("--base-index", type=int, default=0)
     ap.add_argument(

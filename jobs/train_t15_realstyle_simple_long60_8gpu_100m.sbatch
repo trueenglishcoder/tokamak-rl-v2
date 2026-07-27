@@ -15,7 +15,7 @@ cd /scratch/$USER/tokamak/tokamak-rl-v2
 mkdir -p slurm_logs outputs
 
 export SOURCE_CONFIG=${SOURCE_CONFIG:-configs/experiments/t15_realstyle_simple_long60_0p1s_tcvjdot_mpo_balanced.yaml}
-export TRIM_MACHINE_CONFIG_SOURCE=${TRIM_MACHINE_CONFIG_SOURCE:-../tokamak-sim/configs/T15MD_new_data.toml}
+export TRIM_MACHINE_CONFIG_SOURCE=${TRIM_MACHINE_CONFIG_SOURCE:-../tokamak-sim/configs/T15MD.toml}
 export RESET_LIBRARY=${RESET_LIBRARY:-data/processed/t15_realstyle_simple_long60_initial_states.npz}
 export ORACLE_TARGET_DIR=${ORACLE_TARGET_DIR:-data/processed/t15_realstyle_simple_long60}
 export ORACLE_TARGETS=${ORACLE_TARGETS:-${ORACLE_TARGET_DIR}/t15_replay_window_oracle_targets.npz}
@@ -127,7 +127,7 @@ PYVALID
 mkdir -p "$(dirname "${GENERATED_CONFIG}")"
 python3 scripts/write_trim50_plain_gpu1e6_machine_config.py \
   --source "${TRIM_MACHINE_CONFIG_SOURCE}" \
-  --out "$(dirname "${GENERATED_CONFIG}")/T15MD_new_data.toml"
+  --out "$(dirname "${GENERATED_CONFIG}")/T15MD.toml"
 python3 - <<PYCFG
 import json
 from pathlib import Path
@@ -137,7 +137,7 @@ out = Path("${GENERATED_CONFIG}")
 cfg = json.loads(source.read_text(encoding="utf-8"))
 
 cfg["name"] = "${CONFIG_NAME}"
-cfg["sim"]["config_path"] = "/workspace/tokamak-rl-v2/${TRAIN_OUTPUT}/generated_configs/T15MD_new_data.toml"
+cfg["sim"]["config_path"] = "/workspace/tokamak-rl-v2/${TRAIN_OUTPUT}/generated_configs/T15MD.toml"
 cfg["sim"]["csv_initial_state_library"] = "/workspace/tokamak-rl-v2/${RESET_LIBRARY}"
 cfg["reference"]["boundary"]["replay_reference_dir"] = "/workspace/tokamak-rl-v2/${ORACLE_TARGET_DIR}"
 cfg["training"]["steps"] = int("${TRAIN_ENV_STEPS}")
@@ -156,7 +156,7 @@ cfg["training"]["early_stop_patience_evals"] = 0
 cfg["training"]["early_stop_min_delta"] = 0.0
 
 checks = {
-    "config_copy": cfg["sim"]["config_path"].endswith("/generated_configs/T15MD_new_data.toml"),
+    "config_copy": cfg["sim"]["config_path"].endswith("/generated_configs/T15MD.toml"),
     "realstyle_reset_library": "t15_realstyle_simple_long60" in str(cfg["sim"]["csv_initial_state_library"]),
     "realstyle_reference_dir": "t15_realstyle_simple_long60" in str(cfg["reference"]["boundary"]["replay_reference_dir"]),
     "replay_window_ip": cfg["reference"]["ip"]["kind"] == "replay_window",

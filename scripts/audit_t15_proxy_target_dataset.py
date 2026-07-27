@@ -19,7 +19,7 @@ from tokamak_rl_v2.data.target_trajectories import audit_target_dataset
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Audit target-only T15 proxy trajectory dataset geometry and coverage.")
     parser.add_argument("--dataset-dir", type=Path, default=Path("data/processed/t15_proxy_target_v1"))
-    parser.add_argument("--sim-config", type=Path, default=Path("../tokamak-sim/configs/T15MD_new_data.toml"))
+    parser.add_argument("--sim-config", type=Path, default=Path("../tokamak-sim/configs/T15MD.toml"))
     parser.add_argument("--out-dir", type=Path, default=Path("data/diagnostics/t15_proxy_target_v1"))
     parser.add_argument("--dt", type=float, default=0.001)
     args = parser.parse_args(argv)

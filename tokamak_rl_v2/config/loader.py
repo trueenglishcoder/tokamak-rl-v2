@@ -533,7 +533,7 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
         if cfg.sim.csv_initial_state_split != "train":
             raise ValueError("training.production_mode requires sim.csv_initial_state_split=train")
         config_name = cfg.sim.config_path.name
-        is_t15_new_data = config_name == "T15MD_new_data.toml" or config_name.startswith("T15MD_new_data_")
+        is_t15_new_data = config_name in ("T15MD.toml", "T15MD_new_data.toml") or config_name.startswith("T15MD_new_data_")
         if not is_t15_new_data and config_name != "T15MD_4pfc.toml":
             raise ValueError("training.production_mode requires a current T15 tokamak-sim config")
         if cfg.sim.action_contract != "jdot_command" or cfg.sim.delta_derivative_limits_aps is not None:
@@ -541,7 +541,7 @@ def _validate_experiment_config(cfg: ExperimentConfig) -> None:
         if not cfg.sim.terminate_on_boundary_loss or not cfg.sim.terminate_on_current_limit:
             raise ValueError("training.production_mode requires boundary and current terminations")
         if is_t15_new_data and cfg.reference.ip.kind not in {"segmented_profile", "single_segment_profile", "replay_window"}:
-            raise ValueError("T15MD_new_data production requires reference.ip.kind=segmented_profile, single_segment_profile, or replay_window")
+            raise ValueError("T15MD production requires reference.ip.kind=segmented_profile, single_segment_profile, or replay_window")
         if config_name == "T15MD_4pfc.toml" and cfg.reference.ip.kind != "replay_window":
             raise ValueError("T15MD_4pfc production requires reference.ip.kind=replay_window")
         if cfg.reference.ip.kind == "single_segment_profile":

@@ -18,7 +18,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--split", default="holdout", choices=("train", "holdout", "all"))
     ap.add_argument("--library-index", type=int, default=0)
-    ap.add_argument("--shot", default="3864")
+    ap.add_argument("--shot", default="3859")
     ap.add_argument("--seed", type=int, default=386400)
     ap.add_argument("--steps", type=int, default=500)
     ap.add_argument("--parent-steps", type=int, default=900)
@@ -107,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = f"hold_boundary_eval_cut900_seg300_shot{shot_id}_row{int(args.library_index):04d}_seed{int(args.seed)}"
     ref_out = out_dir / f"{stem}.npz"
-    config_out = out_dir / f"T15MD_new_data_{stem}.toml"
+    config_out = out_dir / f"T15MD_{stem}.toml"
     initial_out = out_dir / f"initial_state_{stem}.toml"
     summary_out = out_dir / f"{stem}.json"
 

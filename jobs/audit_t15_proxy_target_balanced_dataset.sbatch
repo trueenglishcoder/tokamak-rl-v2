@@ -13,7 +13,7 @@ cd /scratch/$USER/tokamak/tokamak-rl-v2
 mkdir -p slurm_logs
 
 export TARGET_OUT_DIR=${TARGET_OUT_DIR:-data/processed/t15_proxy_target_balanced_v1}
-export SIM_CONFIG=${SIM_CONFIG:-../tokamak-sim/configs/T15MD_new_data.toml}
+export SIM_CONFIG=${SIM_CONFIG:-../tokamak-sim/configs/T15MD.toml}
 export AUDIT_OUT_DIR=${AUDIT_OUT_DIR:-data/diagnostics/t15_proxy_target_balanced_v1}
 
 if [[ ! -f "${TARGET_OUT_DIR}/t15_target_trajectory_targets.npz" ]]; then

@@ -6,8 +6,8 @@ import re
 from pathlib import Path
 
 
-SUCCESSFUL_SIGMA = "3548133.8923357604"
-SUCCESSFUL_INDUCTANCE_L = "4.466835921509635e-07"
+SUCCESSFUL_SIGMA = "4472135.95499958"
+SUCCESSFUL_INDUCTANCE_L = "2.6826957952797275e-07"
 
 PHYSICS_OVERRIDES = {
     "sigma": SUCCESSFUL_SIGMA,
@@ -33,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
             "machine config only: embedded initial conditions are removed."
         )
     )
-    parser.add_argument("--source", type=Path, default=Path("../tokamak-sim/configs/T15MD_new_data.toml"))
+    parser.add_argument("--source", type=Path, default=Path("../tokamak-sim/configs/T15MD.toml"))
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
 
