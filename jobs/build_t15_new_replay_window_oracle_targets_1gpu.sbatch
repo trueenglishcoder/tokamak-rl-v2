@@ -27,14 +27,10 @@ srun \
     export PYTHONPATH=/workspace/tokamak-sim:/workspace/tokamak-rl-v2:${PYTHONPATH:-}
     cd /workspace/tokamak-rl-v2
 
-    python3 scripts/write_trim50_plain_gpu1e6_machine_config.py \
-      --source ../tokamak-sim/configs/T15MD.toml \
-      --out data/processed/t15_new_trim50_plain_gpu1e6_machine_config.toml
-
     python3 scripts/build_t15_new_replay_window_oracle_targets.py \
       --base-config configs/experiments/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_mpo_balanced.yaml \
-      --data-root ../tokamak-sim/data/t15_data_new_trim50 \
-      --machine-config data/processed/t15_new_trim50_plain_gpu1e6_machine_config.toml \
+      --data-root ../tokamak-sim/data/t15_data_new_trim50_ip_calibrated \
+      --machine-config ../tokamak-sim/configs/T15MD.toml \
       --target-dir data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_targets \
       --initial-library-out data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_initial_states.npz \
       --config-out configs/experiments/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_mpo.yaml \
@@ -43,6 +39,6 @@ srun \
       --batch-size 256 \
       --window-steps 100 \
       --angles 32 \
-      --train-shots 3855 3863 3856 3854 \
-      --holdout-shots 3859
+      --train-shots 3857 3858 3863 \
+      --holdout-shots 3856
   '
