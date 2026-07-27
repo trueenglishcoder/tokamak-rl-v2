@@ -1,51 +1,50 @@
 # Current RL Pipeline
 
 ```text
-T15 6-PFC calibrated (+15%) trim50 CSV data
-+ spline_contour boundary mode
-+ 0.1 s replay-window episodes from real T15 segments
+T15 6-PFC calibrated Ip +15% trim50 data
++ suchkov_spline_contour boundary mode
++ 0.1 s replay-window episodes
 + oracle targets from exact T15 current replay
-+ learned action contract jdot_command
 + actor observation controller_state_v6
 + critic observation compact_training_state_v2
 + TCV-derivative reward
-+ 8-GPU balanced-oracle MPO training
++ 8-GPU balanced-oracle MPO training for 50M steps
 ```
 
-## Single source of truth
+## Baseline and Experiment
 
-All configuration flows from one file:
+The successful 100M baseline is retained unchanged. It used
+`legacy_contour_limited`, 2048 environments, 8 GPUs, and the reward weights now
+copied into the new experiment.
+
+The active experiment changes only:
+
 ```text
-../tokamak-sim/configs/T15MD.toml
+Ip source data: calibrated +15%
+boundary mode: suchkov_spline_contour
+training length: 50M environment steps
 ```
-sigma = 4472135, inductance_L = 2.68e-7, actuator_tau = 0.0, R_wall = 0.0
-boundary.mode = spline_contour
 
-No machine config generation. No config rewriting.
-
-## Inputs
+## Inputs and Split
 
 ```text
 ../tokamak-sim/data/t15_data_new_trim50_ip_calibrated/
-data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_initial_states.npz
-data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_targets/
+../tokamak-sim/runs/t15md_trim50_ip15_suchkov_top5_replay/
+data/processed/t15_ip15_suchkov_replay_window_0p1s_oracle_initial_states.npz
+data/processed/t15_ip15_suchkov_replay_window_0p1s_oracle_targets/
 ```
 
-Train shots are `3857, 3858, 3863`. Shot `3856` is held out.
+Train shots are `3856`, `3857`, `3858`, and `3863`. Shot `3864` is holdout.
 
-## Canonical Server Flow
-
-```bash
-cd /scratch/$USER/tokamak/tokamak-sim && git pull --ff-only origin main
-cd /scratch/$USER/tokamak/tokamak-rl-v2 && git pull --ff-only origin main
-
-sbatch jobs/build_t15_new_replay_window_oracle_targets_1gpu.sbatch
-sbatch jobs/train_t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_balanced_oracle_8gpu_100m.sbatch
-```
-
-## Evaluation
+## Server Flow
 
 ```bash
-python3 scripts/evaluate_replay_window_oracle_baselines.py ...
-python3 scripts/evaluate_hold_boundary_task.py ...
+cd /scratch/$USER/tokamak/tokamak-sim
+git pull --ff-only origin main
+
+cd /scratch/$USER/tokamak/tokamak-rl-v2
+git pull --ff-only origin main
+
+sbatch jobs/build_t15_ip15_suchkov_replay_window_oracle_targets_1gpu.sbatch
+sbatch jobs/train_t15_ip15_suchkov_replay_window_tcvjdot_8gpu_50m.sbatch
 ```
