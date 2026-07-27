@@ -41,4 +41,5 @@ srun \
       --angles 32 \
       --train-shots 3857 3858 3863 \
       --holdout-shots 3856
+      --replay-root ../tokamak-sim/runs/top5_spline_replay \
   '

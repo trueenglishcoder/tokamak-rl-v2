@@ -41,6 +41,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-config", default="configs/experiments/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_mpo_balanced.yaml")
     parser.add_argument("--data-root", default="../tokamak-sim/data/t15_data_new_trim50_ip_calibrated")
     parser.add_argument("--machine-config", default="../tokamak-sim/configs/T15MD.toml")
+    parser.add_argument("--replay-root", default=None, help="Read boundary radii from existing replay NPZ files instead of re-simulating")
     parser.add_argument("--target-dir", default="data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_targets")
     parser.add_argument("--initial-library-out", default="data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_initial_states.npz")
     parser.add_argument("--config-out", default="configs/experiments/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_mpo.yaml")
@@ -71,6 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     target_dir = _repo_path(args.target_dir)
     initial_library_out = _repo_path(args.initial_library_out)
     machine_config = _repo_path(args.machine_config)
+    replay_root = _repo_path(args.replay_root) if args.replay_root else None
     base_config = _repo_path(args.base_config)
     config_out = _repo_path(args.config_out)
 
@@ -119,7 +121,17 @@ def main(argv: list[str] | None = None) -> int:
     summary_path = target_dir / "oracle_summary.json"
     oracle_path = target_dir / "t15_replay_window_oracle_targets.npz"
 
-    if str(args.compute_backend) == "gpu":
+    if replay_root is not None:
+        from scripts._oracle_from_replay import load_oracle_from_replay
+        accepted, sim_rejected = load_oracle_from_replay(
+            candidates,
+            replay_root=replay_root,
+            angles=int(args.angles),
+            mean_ip_limit=float(args.oracle_mean_ip_error_a),
+            max_ip_limit=float(args.oracle_max_ip_error_a),
+            n_pfc=sim_cfg.pfc.n_coils,
+        )
+    elif str(args.compute_backend) == "gpu":
         accepted, sim_rejected = _simulate_gpu(
             candidates,
             sim_cfg=sim_cfg,
