@@ -1565,25 +1565,74 @@ class Trainer:
         completion = metric("mean_episode_completion", 0.0)
         full_success = metric("full_episode_success", completion)
         min_completion = metric("min_episode_completion", completion)
-        boundary_late = metric("padded_boundary_found_late_min", metric("boundary_found_late_min", metric("boundary_found_min", metric("boundary_found", 0.0))))
-        terminated_boundary = metric("terminated_boundary_late_max", metric("terminated_boundary_max", metric("terminated_boundary", 0.0)))
-        current_over = metric("padded_current_over_limit_a_late_max", metric("current_over_limit_a_late_max", metric("current_over_limit_a_max", metric("current_over_limit_a", 0.0))))
+
+        boundary_late = metric(
+            "padded_boundary_found_late_min",
+            metric(
+                "boundary_found_late_min",
+                metric(
+                    "boundary_found_min",
+                    metric("boundary_found", 0.0),
+                ),
+            ),
+        )
+
+        terminated_boundary = metric(
+            "terminated_boundary_late_max",
+            metric(
+                "terminated_boundary_max",
+                metric("terminated_boundary", 0.0),
+            ),
+        )
+
+        terminated_current = metric(
+            "terminated_current_late_max",
+            metric(
+                "terminated_current_max",
+                metric("terminated_current", 0.0),
+            ),
+        )
+
+        current_over = metric(
+            "padded_current_over_limit_a_late_max",
+            metric(
+                "current_over_limit_a_late_max",
+                metric(
+                    "current_over_limit_a_max",
+                    metric("current_over_limit_a", 0.0),
+                ),
+            ),
+        )
+
         current_fraction = metric(
             "padded_current_over_limit_5ka_fraction_late",
-            metric("current_over_limit_5ka_fraction_late", metric("current_over_limit_fraction_late", metric("current_over_limit_fraction", 0.0))),
+            metric(
+                "current_over_limit_5ka_fraction_late",
+                metric(
+                    "current_over_limit_fraction_late",
+                    metric("current_over_limit_fraction", 0.0),
+                ),
+            ),
         )
-        current_1pct_fraction = metric(
-            "padded_current_over_limit_1pct_fraction_late",
-            metric("current_over_limit_1pct_fraction_late", metric("current_over_limit_fraction_late", metric("current_over_limit_fraction", 0.0))),
+
+        physical_cost = metric(
+            "physical_cost_late",
+            metric("physical_cost", 1.0e6),
         )
-        saturation_fraction = metric("action_saturation_fraction_late", metric("action_saturation_fraction", 1.0))
-        current_margin_loss = metric("current_margin_loss_late_max", metric("current_margin_loss_max", metric("current_margin_loss", 0.0)))
-        derivative_margin_loss = metric("derivative_margin_loss_late_max", metric("derivative_margin_loss_max", metric("derivative_margin_loss", 0.0)))
-        max_current_fraction = metric("max_current_fraction_late_max", metric("max_current_fraction_max", metric("current_usage_fraction_late_max", metric("current_usage_fraction_max", 0.0))))
-        max_derivative_fraction = metric("max_derivative_fraction_late_max", metric("max_derivative_fraction_max", metric("derivative_usage_late_max", metric("derivative_usage_max", 0.0))))
-        shape_mean = metric("shape_error_mean_m_late_p90", metric("shape_error_mean_m_p90", metric("shape_error_mean_m_late", metric("shape_error_mean_m", 1.0))))
-        shape_max = metric("shape_error_max_m_late_p90", metric("shape_error_max_m_p90", metric("shape_error_max_m_late", metric("shape_error_max_m", 1.0))))
-        ip_error = metric("ip_error_a_late_p90", metric("ip_error_a_p90", metric("ip_error_a_late", metric("ip_error_a", 1.0e6))))
+        physical_cost_max = metric(
+            "physical_cost_late_max",
+            metric("physical_cost_max", physical_cost),
+        )
+
+        current_violation = (
+            1.0
+            if (
+                current_over > 0.0
+                or current_fraction > 0.0
+                or terminated_current > 0.0
+            )
+            else 0.0
+        )
 
         objective = (
             1000.0 * max(1.0 - completion, 0.0)
@@ -1591,17 +1640,12 @@ class Trainer:
             + 1000.0 * max(1.0 - min_completion, 0.0)
             + 1000.0 * max(1.0 - boundary_late, 0.0)
             + 500.0 * max(terminated_boundary, 0.0)
+            + 500.0 * max(terminated_current, 0.0)
+            + 500.0 * current_violation
             + 500.0 * max(current_over, 0.0) / 5000.0
             + 500.0 * max(current_fraction, 0.0)
-            + 500.0 * max(current_1pct_fraction, 0.0)
-            + 250.0 * max(current_margin_loss, 0.0)
-            + 250.0 * max(derivative_margin_loss, 0.0)
-            + 100.0 * max(max_current_fraction - 0.90, 0.0)
-            + 100.0 * max(max_derivative_fraction - 0.50, 0.0)
-            + 500.0 * max(saturation_fraction - 0.01, 0.0)
-            + max(shape_mean, 0.0) / 0.03
-            + 0.5 * max(shape_max, 0.0) / 0.08
-            + max(ip_error, 0.0) / 15000.0
+            + max(physical_cost, 0.0)
+            + 0.25 * max(physical_cost_max, 0.0)
         )
         return float(-objective)
 
