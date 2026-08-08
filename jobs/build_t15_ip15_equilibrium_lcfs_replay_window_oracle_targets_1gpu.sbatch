@@ -158,7 +158,10 @@ for shot in sorted(expected_shots, key=int):
         radii_ok = np.isfinite(radii).all(axis=1) & (radii > 0.0).all(axis=1)
         polygon_finite = np.isfinite(polygon).all(axis=2)
         polygon_points = polygon_finite.sum(axis=1)
-        polygon_closed = np.linalg.norm(polygon[:, 0, :] - polygon[:, -1, :], axis=1) <= 1.0e-8
+        polygon_last = polygon[np.arange(steps), polygon_points - 1, :]
+        polygon_closed = (
+            np.linalg.norm(polygon[:, 0, :] - polygon_last, axis=1) <= 1.0e-8
+        )
         topology_ok = np.isin(topology, np.asarray([1, 2, 3, 4]))
         counts_ok = (counts == 1).all(axis=1)
         axis_ok = np.isfinite(axis).all(axis=1)
