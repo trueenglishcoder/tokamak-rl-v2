@@ -52,6 +52,82 @@ if [[ ! -d "${DATA_ROOT}" || ! -d "${ORACLE_TARGET_DIR}" ]]; then
   echo "missing calibrated data or oracle target directory" >&2
   exit 2
 fi
+
+python3 - "${ORACLE_SUMMARY}" "${ORACLE_TARGETS}" "${RESET_LIBRARY}" <<'PYDATA'
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+
+summary_path = Path(sys.argv[1])
+oracle_path = Path(sys.argv[2])
+reset_path = Path(sys.argv[3])
+summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+expected_train = ["3856", "3857", "3858", "3863"]
+expected_holdout = ["3864"]
+expected_all = set(expected_train + expected_holdout)
+
+if summary.get("train_shots") != expected_train:
+    raise SystemExit(f"oracle train shots mismatch: {summary.get('train_shots')}")
+if summary.get("holdout_shots") != expected_holdout:
+    raise SystemExit(f"oracle holdout shots mismatch: {summary.get('holdout_shots')}")
+if int(summary.get("window_steps", -1)) != 100:
+    raise SystemExit(f"oracle window_steps mismatch: {summary.get('window_steps')}")
+if int(summary.get("angles", -1)) != 32:
+    raise SystemExit(f"oracle angles mismatch: {summary.get('angles')}")
+source_data_root = str(summary.get("source_data_root", ""))
+if not source_data_root.endswith("tokamak-sim/data/t15_data_new_trim50_ip_calibrated"):
+    raise SystemExit(f"oracle source data root mismatch: {source_data_root}")
+source_replay_root = str(summary.get("source_replay_root", ""))
+if "tokamak-sim/runs/t15md_trim50_ip15_equilibrium_lcfs_top5_replay_gpu_full_" not in source_replay_root:
+    raise SystemExit(f"oracle source replay root mismatch: {source_replay_root}")
+contract = summary.get("boundary_contract", {})
+if contract.get("boundary_found_required_all_steps") is not True:
+    raise SystemExit("oracle summary does not require boundary_found on every step")
+if contract.get("fixed_angle_radii_required_all_steps") is not True:
+    raise SystemExit("oracle summary does not require fixed-angle radii on every step")
+if set(summary.get("accepted_by_shot", {})) != expected_all:
+    raise SystemExit(f"oracle accepted shots mismatch: {summary.get('accepted_by_shot')}")
+
+with np.load(oracle_path, allow_pickle=False) as oracle:
+    shot = np.asarray(oracle["shot_id"]).astype(str)
+    split = np.asarray(oracle["split"]).astype(str)
+    source_index = np.asarray(oracle["source_index"], dtype=np.int64)
+    ip_target = np.asarray(oracle["ip_target"])
+    boundary = np.asarray(oracle["boundary_radii"])
+    action = np.asarray(oracle["real_jdot_action"])
+
+if ip_target.ndim != 2 or ip_target.shape[1] != 101:
+    raise SystemExit(f"oracle ip_target shape mismatch: {ip_target.shape}")
+if boundary.ndim != 3 or boundary.shape[1:] != (101, 32):
+    raise SystemExit(f"oracle boundary_radii shape mismatch: {boundary.shape}")
+if action.ndim != 3 or action.shape[1:] != (100, 9):
+    raise SystemExit(f"oracle real_jdot_action shape mismatch: {action.shape}")
+if not np.isfinite(boundary).all() or np.any(boundary <= 0.0):
+    raise SystemExit("oracle boundary_radii contains invalid values")
+if not np.isfinite(ip_target).all() or not np.isfinite(action).all():
+    raise SystemExit("oracle target arrays contain non-finite values")
+
+for shot_id, split_name in zip(shot.tolist(), split.tolist(), strict=True):
+    expected_split = "holdout" if shot_id in expected_holdout else "train" if shot_id in expected_train else None
+    if split_name != expected_split:
+        raise SystemExit(f"wrong split for shot {shot_id}: {split_name}")
+keys = list(zip(shot.tolist(), source_index.tolist(), strict=True))
+if len(keys) != len(set(keys)):
+    raise SystemExit("oracle contains duplicate (shot_id, source_index) windows")
+
+with np.load(reset_path, allow_pickle=False) as reset:
+    reset_shot = np.asarray(reset["shot_id"]).astype(str)
+    reset_index = np.asarray(reset["source_index"], dtype=np.int64)
+    reset_split = np.asarray(reset["split"]).astype(str)
+if not np.array_equal(reset_shot, shot) or not np.array_equal(reset_index, source_index) or not np.array_equal(reset_split, split):
+    raise SystemExit("reset library and oracle targets do not describe the same windows in the same order")
+
+print("oracle_provenance_ok", len(shot), "windows")
+PYDATA
+
 if (( NUM_ENVS % WORLD_SIZE != 0 )); then
   echo "NUM_ENVS=${NUM_ENVS} must be divisible by WORLD_SIZE=${WORLD_SIZE}" >&2
   exit 2

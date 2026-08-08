@@ -26,8 +26,9 @@ def load_oracle_from_replay(
         if shot not in cache:
             loaded = _load_shot_replay(replay_root, shot)
             if loaded is None:
-                rejected.append(_reject(candidate, "no_replay_npz"))
-                continue
+                raise RuntimeError(
+                    f"missing replay artifact for shot {shot} under {replay_root}"
+                )
             cache[shot] = loaded
 
         replay = cache[shot]
@@ -35,24 +36,39 @@ def load_oracle_from_replay(
         steps = int(candidate.ip_target.shape[0])
         end = start + steps
         if end > int(replay["t"].shape[0]):
-            rejected.append(_reject(candidate, f"window_out_of_bounds_{start}+{steps}"))
-            continue
+            raise RuntimeError(
+                f"shot {shot}: oracle window [{start}:{end}] exceeds replay length "
+                f"{int(replay['t'].shape[0])}"
+            )
 
         window_ip = replay["Ip"][start:end]
         window_radii = replay["radii_true"][start:end]
         window_found = replay["boundary_found"][start:end]
         if not np.all(np.isfinite(window_ip)):
-            rejected.append(_reject(candidate, "non_finite_ip"))
-            continue
+            raise RuntimeError(
+                f"shot {shot}: replay Ip contains non-finite values in window [{start}:{end}]"
+            )
         if not bool(np.all(window_found)):
-            rejected.append(_reject(candidate, "boundary_not_found"))
-            continue
+            bad_steps = (start + np.flatnonzero(~window_found)).tolist()
+            raise RuntimeError(
+                f"shot {shot}: boundary extractor failed at replay steps {bad_steps[:20]}"
+            )
         if window_radii.ndim != 2 or int(window_radii.shape[1]) != int(angles):
-            rejected.append(_reject(candidate, "wrong_boundary_angle_count"))
-            continue
-        if not np.all(np.isfinite(window_radii)):
-            rejected.append(_reject(candidate, "non_finite_boundary_radii"))
-            continue
+            raise RuntimeError(
+                f"shot {shot}: expected {int(angles)} boundary radii, got shape "
+                f"{window_radii.shape}"
+            )
+        bad_radii = ~np.isfinite(window_radii) | (window_radii <= 0.0)
+        if bool(np.any(bad_radii)):
+            bad_local = np.argwhere(bad_radii)
+            preview = [
+                (int(start + row), int(angle_index))
+                for row, angle_index in bad_local[:20]
+            ]
+            raise RuntimeError(
+                f"shot {shot}: invalid fixed-angle boundary radii at "
+                f"(step, angle) {preview}"
+            )
 
         ip_error = np.abs(window_ip - np.asarray(candidate.ip_target, dtype=np.float64))
         mean_error = float(np.mean(ip_error))

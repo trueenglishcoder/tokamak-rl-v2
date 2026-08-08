@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 
 from tokamak_rl_v2.env.references import T15ReplayBoundaryLibrary
 from tokamak_rl_v2.training.replay import FIFOSequenceReplay
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_oracle_boundary_library_returns_exact_window_without_reanchoring(tmp_path: Path) -> None:
@@ -66,3 +71,83 @@ def test_full_episode_replay_sampling_starts_at_zero() -> None:
     batch = replay.sample(batch_size=4, sequence_length=5, min_sequence_length=5)
     assert torch.allclose(batch.obs[:, 0, 0], torch.zeros((4,)))
     assert torch.allclose(batch.obs[:, :, 0], torch.arange(5, dtype=torch.float32).repeat(4, 1))
+
+
+
+def test_replay_oracle_boundary_failure_is_fatal(tmp_path: Path) -> None:
+    from scripts._oracle_from_replay import load_oracle_from_replay
+
+    replay_root = tmp_path / "replay"
+    replay_root.mkdir()
+    radii = np.ones((3, 32), dtype=float)
+    np.savez_compressed(
+        replay_root / "lqr_boundary_reference_3856.npz",
+        t=np.asarray([0.0, 0.001, 0.002], dtype=float),
+        Ip=np.asarray([100000.0, 100100.0, 100200.0], dtype=float),
+        radii_true=radii,
+        boundary_found=np.asarray([True, False, True], dtype=bool),
+    )
+    candidate = SimpleNamespace(
+        shot_id="3856",
+        split="train",
+        source_index=0,
+        time_s=0.0,
+        ip_target=np.asarray([100000.0, 100100.0, 100200.0], dtype=float),
+        currents=np.zeros((3, 9), dtype=float),
+        normalized_action=np.zeros((2, 9), dtype=float),
+        difficulty_bin="flat",
+    )
+
+    with pytest.raises(RuntimeError, match=r"boundary extractor failed.*steps \[1\]"):
+        load_oracle_from_replay(
+            [candidate],
+            replay_root=replay_root,
+            angles=32,
+            mean_ip_limit=10000.0,
+            max_ip_limit=20000.0,
+            n_pfc=6,
+        )
+
+
+def test_replay_oracle_invalid_fixed_angle_radius_is_fatal(tmp_path: Path) -> None:
+    from scripts._oracle_from_replay import load_oracle_from_replay
+
+    replay_root = tmp_path / "replay"
+    replay_root.mkdir()
+    radii = np.ones((3, 32), dtype=float)
+    radii[2, 7] = np.nan
+    np.savez_compressed(
+        replay_root / "lqr_boundary_reference_3856.npz",
+        t=np.asarray([0.0, 0.001, 0.002], dtype=float),
+        Ip=np.asarray([100000.0, 100100.0, 100200.0], dtype=float),
+        radii_true=radii,
+        boundary_found=np.asarray([True, True, True], dtype=bool),
+    )
+    candidate = SimpleNamespace(
+        shot_id="3856",
+        split="train",
+        source_index=0,
+        time_s=0.0,
+        ip_target=np.asarray([100000.0, 100100.0, 100200.0], dtype=float),
+        currents=np.zeros((3, 9), dtype=float),
+        normalized_action=np.zeros((2, 9), dtype=float),
+        difficulty_bin="flat",
+    )
+
+    with pytest.raises(RuntimeError, match=r"invalid fixed-angle boundary radii"):
+        load_oracle_from_replay(
+            [candidate],
+            replay_root=replay_root,
+            angles=32,
+            mean_ip_limit=10000.0,
+            max_ip_limit=20000.0,
+            n_pfc=6,
+        )
+
+
+def test_equilibrium_oracle_job_uses_fresh_replay_as_single_boundary_source() -> None:
+    job = (ROOT / "jobs" / "build_t15_ip15_equilibrium_lcfs_replay_window_oracle_targets_1gpu.sbatch").read_text(encoding="utf-8")
+    assert "/workspace/tokamak-sim/runs/t15md_trim50_ip15_equilibrium_lcfs_top5_replay_gpu_full_" in job
+    assert '"boundary_found"' in job
+    assert 'np.flatnonzero(~ref_found)' in job
+    assert '--replay-root "$REPLAY_ROOT"' in job

@@ -182,7 +182,19 @@ def main(argv: list[str] | None = None) -> int:
         balanced=True,
     )
     _write_rejections(rejected_path, rejected)
-    summary = _summary(accepted, rejected, target_dir=target_dir, initial_library=initial_library_out, oracle_path=oracle_path)
+    summary = _summary(
+        accepted,
+        rejected,
+        target_dir=target_dir,
+        initial_library=initial_library_out,
+        oracle_path=oracle_path,
+        data_root=data_root,
+        replay_root=replay_root,
+        train_shots=train_shots,
+        holdout_shots=holdout_shots,
+        window_steps=int(args.window_steps),
+        angles=int(args.angles),
+    )
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
 
     print(
@@ -506,8 +518,11 @@ def _collect_simulated(
     for b, candidate in enumerate(candidates):
         found = np.asarray(boundary_found[b], dtype=bool)
         if not np.all(found):
-            rejected.append(_reject(candidate.shot_id, candidate.source_index, candidate.time_s, "oracle_boundary_lost"))
-            continue
+            bad_steps = (int(candidate.source_index) + np.flatnonzero(~found)).tolist()
+            raise RuntimeError(
+                f"shot {candidate.shot_id}: boundary extractor failed at replay steps "
+                f"{bad_steps[:20]}"
+            )
         ip_err = np.abs(np.asarray(sim_ip[b], dtype=float) - np.asarray(candidate.ip_target, dtype=float))
         mean_err = float(np.mean(ip_err))
         max_err = float(np.max(ip_err))
@@ -515,9 +530,17 @@ def _collect_simulated(
             rejected.append(_reject(candidate.shot_id, candidate.source_index, candidate.time_s, f"oracle_ip_error_mean_{mean_err:.1f}_max_{max_err:.1f}"))
             continue
         radii = np.asarray(boundary_radii[b], dtype=float)
-        if not np.all(np.isfinite(radii)) or np.any(radii <= 0.0):
-            rejected.append(_reject(candidate.shot_id, candidate.source_index, candidate.time_s, "oracle_bad_boundary_radii"))
-            continue
+        bad_radii = ~np.isfinite(radii) | (radii <= 0.0)
+        if bool(np.any(bad_radii)):
+            bad_local = np.argwhere(bad_radii)
+            preview = [
+                (int(candidate.source_index) + int(row), int(angle_index))
+                for row, angle_index in bad_local[:20]
+            ]
+            raise RuntimeError(
+                f"shot {candidate.shot_id}: invalid fixed-angle boundary radii at "
+                f"(step, angle) {preview}"
+            )
         accepted.append(
             {
                 "shot_id": candidate.shot_id,
@@ -649,7 +672,20 @@ def _write_config(
     config_out.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
 
-def _summary(rows: list[dict[str, object]], rejected: list[dict[str, object]], *, target_dir: Path, initial_library: Path, oracle_path: Path) -> dict[str, object]:
+def _summary(
+    rows: list[dict[str, object]],
+    rejected: list[dict[str, object]],
+    *,
+    target_dir: Path,
+    initial_library: Path,
+    oracle_path: Path,
+    data_root: Path,
+    replay_root: Path | None,
+    train_shots: tuple[str, ...],
+    holdout_shots: tuple[str, ...],
+    window_steps: int,
+    angles: int,
+) -> dict[str, object]:
     split_counts = Counter(str(r["split"]) for r in rows)
     difficulty_counts = Counter(str(r["difficulty_bin"]) for r in rows)
     by_shot = Counter(str(r["shot_id"]) for r in rows)
@@ -662,6 +698,16 @@ def _summary(rows: list[dict[str, object]], rejected: list[dict[str, object]], *
         "target_dir": str(target_dir),
         "oracle_path": str(oracle_path),
         "initial_library": str(initial_library),
+        "source_data_root": str(data_root),
+        "source_replay_root": None if replay_root is None else str(replay_root),
+        "train_shots": list(train_shots),
+        "holdout_shots": list(holdout_shots),
+        "window_steps": int(window_steps),
+        "angles": int(angles),
+        "boundary_contract": {
+            "boundary_found_required_all_steps": True,
+            "fixed_angle_radii_required_all_steps": True,
+        },
         "accepted_windows": int(len(rows)),
         "rejected_windows": int(len(rejected)),
         "split_counts": dict(sorted(split_counts.items())),

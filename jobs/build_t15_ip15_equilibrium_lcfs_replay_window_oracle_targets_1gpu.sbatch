@@ -13,7 +13,7 @@ set -euo pipefail
 cd /scratch/$USER/tokamak/tokamak-rl-v2
 mkdir -p slurm_logs data/processed
 
-export REPLAY_ROOT=${REPLAY_ROOT:-runs/t15md_trim50_ip15_equilibrium_lcfs_top5_replay_gpu_full_${SLURM_JOB_ID}}
+export REPLAY_ROOT=${REPLAY_ROOT:-/workspace/tokamak-sim/runs/t15md_trim50_ip15_equilibrium_lcfs_top5_replay_gpu_full_${SLURM_JOB_ID}}
 export TARGET_DIR=${TARGET_DIR:-data/processed/t15_ip15_equilibrium_lcfs_replay_window_0p1s_oracle_targets}
 export RESET_LIBRARY=${RESET_LIBRARY:-data/processed/t15_ip15_equilibrium_lcfs_replay_window_0p1s_oracle_initial_states.npz}
 export CONFIG_OUT=${CONFIG_OUT:-configs/experiments/t15_ip15_equilibrium_lcfs_replay_window_0p1s_tcvjdot_mpo.yaml}
@@ -190,6 +190,45 @@ for shot in sorted(expected_shots, key=int):
                 f"invalid_count={int(invalid.size)}"
             )
 
+        reference_path = root / f"lqr_boundary_reference_{shot}.npz"
+        if not reference_path.exists():
+            raise RuntimeError(f"missing replay reference {reference_path}")
+        with np.load(reference_path, allow_pickle=False) as ref:
+            ref_required = {"t", "Ip", "radii_true", "boundary_found"}
+            ref_missing = sorted(ref_required - set(ref.files))
+            if ref_missing:
+                raise RuntimeError(
+                    f"{reference_path}: missing replay reference fields {ref_missing}"
+                )
+            ref_t = np.asarray(ref["t"], dtype=float).reshape(-1)
+            ref_ip = np.asarray(ref["Ip"], dtype=float).reshape(-1)
+            ref_radii = np.asarray(ref["radii_true"], dtype=float)
+            ref_found = np.asarray(ref["boundary_found"], dtype=bool).reshape(-1)
+        if ref_t.shape != (steps,) or ref_ip.shape != (steps,):
+            raise RuntimeError(
+                f"{reference_path}: replay reference length mismatch "
+                f"t={ref_t.shape} Ip={ref_ip.shape} expected={(steps,)}"
+            )
+        if ref_radii.shape != radii.shape:
+            raise RuntimeError(
+                f"{reference_path}: radii shape {ref_radii.shape} != run {radii.shape}"
+            )
+        if ref_found.shape != (steps,):
+            raise RuntimeError(
+                f"{reference_path}: boundary_found shape {ref_found.shape} != {(steps,)}"
+            )
+        missing_boundary = np.flatnonzero(~ref_found)
+        if missing_boundary.size:
+            raise RuntimeError(
+                f"{reference_path}: boundary extractor failed at steps "
+                f"{missing_boundary[:20].tolist()}; "
+                f"invalid_count={int(missing_boundary.size)}"
+            )
+        if not np.array_equal(ref_radii, radii, equal_nan=True):
+            raise RuntimeError(
+                f"{reference_path}: radii_true differs from source run artifact {path}"
+            )
+
         print(
             "validated_full_gpu_replay",
             shot,
@@ -197,6 +236,8 @@ for shot in sorted(expected_shots, key=int):
             steps,
             "path",
             path,
+            "reference",
+            reference_path,
         )
 PYREPLAYCHECK
 
@@ -205,6 +246,7 @@ PYREPLAYCHECK
       --base-config configs/experiments/t15_ip15_equilibrium_lcfs_replay_window_0p1s_tcvjdot_mpo_balanced.yaml \
       --data-root ../tokamak-sim/data/t15_data_new_trim50_ip_calibrated \
       --machine-config ../tokamak-sim/configs/T15MD.toml \
+      --replay-root "$REPLAY_ROOT" \
       --target-dir "$TARGET_DIR" \
       --initial-library-out "$RESET_LIBRARY" \
       --config-out "$CONFIG_OUT" \
@@ -229,6 +271,25 @@ if actual_shots != expected_shots:
         "oracle dataset shots mismatch: "
         f"expected={sorted(expected_shots)} actual={sorted(actual_shots)}"
     )
+if summary.get("train_shots") != ["3856", "3857", "3858", "3863"]:
+    raise SystemExit(f"oracle train shots mismatch: {summary.get('train_shots')}")
+if summary.get("holdout_shots") != ["3864"]:
+    raise SystemExit(f"oracle holdout shots mismatch: {summary.get('holdout_shots')}")
+if int(summary.get("window_steps", -1)) != 100 or int(summary.get("angles", -1)) != 32:
+    raise SystemExit(
+        f"oracle representation mismatch: window_steps={summary.get('window_steps')} "
+        f"angles={summary.get('angles')}"
+    )
+if summary.get("source_replay_root") != os.environ["REPLAY_ROOT"]:
+    raise SystemExit(
+        f"oracle source replay mismatch: {summary.get('source_replay_root')} "
+        f"!= {os.environ['REPLAY_ROOT']}"
+    )
+contract = summary.get("boundary_contract", {})
+if contract.get("boundary_found_required_all_steps") is not True:
+    raise SystemExit("oracle summary does not enforce complete boundary_found")
+if contract.get("fixed_angle_radii_required_all_steps") is not True:
+    raise SystemExit("oracle summary does not enforce complete fixed-angle radii")
 if int(summary["split_counts"].get("holdout", 0)) <= 0:
     raise SystemExit("oracle dataset has no holdout windows")
 if int(summary["split_counts"].get("train", 0)) <= 0:
