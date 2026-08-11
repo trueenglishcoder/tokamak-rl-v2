@@ -73,6 +73,39 @@ def test_csv_initial_state_library_requires_split_for_production(tmp_path: Path)
     assert len(CsvInitialStateLibrary(path, n_pfc=6, n_sol=3, split="all")) == 1
 
 
+def test_csv_initial_state_library_requires_compact_hidden_and_passive_state(tmp_path: Path) -> None:
+    """Проверить explicit compact reset contract для production T-15 library."""
+    path = tmp_path / "compact_states.npz"
+    common = {
+        "shot_id": np.asarray(["3856"]),
+        "source_index": np.asarray([10], dtype=np.int64),
+        "time_s": np.asarray([0.1], dtype=float),
+        "ip0": np.asarray([120000.0], dtype=float),
+        "pfc0": np.zeros((1, 6), dtype=float),
+        "sol0": np.zeros((1, 3), dtype=float),
+        "split": np.asarray(["train"]),
+    }
+    np.savez(path, **common)
+    with pytest.raises(ValueError, match="hidden_state_a"):
+        CsvInitialStateLibrary(path, n_pfc=6, n_sol=3, require_compact_state=True)
+
+    np.savez(path, **common, hidden_state_a=np.asarray([12.0], dtype=float))
+    with pytest.raises(ValueError, match="passive_currents_a"):
+        CsvInitialStateLibrary(path, n_pfc=6, n_sol=3, require_compact_state=True)
+
+    passive = np.arange(303, dtype=float).reshape(1, 303)
+    np.savez(
+        path,
+        **common,
+        hidden_state_a=np.asarray([12.0], dtype=float),
+        passive_currents_a=passive,
+    )
+    sample = CsvInitialStateLibrary(path, n_pfc=6, n_sol=3, require_compact_state=True).take([0])
+    assert np.allclose(sample.hidden_state_a, [12.0])
+    assert sample.passive_currents_a.shape == (1, 303)
+    assert np.allclose(sample.passive_currents_a, passive)
+
+
 def test_validate_split_nonoverlap_rejects_same_shot_rows_within_episode_gap() -> None:
     with pytest.raises(ValueError, match="overlap within one episode"):
         validate_split_nonoverlap(

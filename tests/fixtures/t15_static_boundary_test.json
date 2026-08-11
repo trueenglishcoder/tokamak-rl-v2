@@ -1,7 +1,7 @@
 {
   "name": "t15_static_boundary",
   "sim": {
-    "config_path": "../../../tokamak-sim/configs/T15MD.toml",
+    "config_path": "T15MD_legacy_unit_test.toml",
     "compute_backend": "cpu",
     "gpu_device": "cuda:0",
     "angles": 32,

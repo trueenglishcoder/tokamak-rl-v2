@@ -11,7 +11,11 @@ from torch import Tensor
 from tokamak_control.compute import ComputeSettings
 from tokamak_control.core.batched_gpu_simulator import BatchedGpuTokamakSimulator
 from tokamak_control.core.plasma_model import PlasmaModel
+from tokamak_control.current_dynamics.compact_current_nx2 import Nx2CurrentState
+from tokamak_control.current_dynamics.passive_vessel import PassiveVesselInitialState
 from tokamak_control.geometry.boundary import BoundaryNotFoundError, find_plasma_boundary_with_status
+from tokamak_control.geometry.boundary_projection import project_boundary_to_fixed_angles
+from tokamak_control.geometry.lcfs import find_equilibrium_lcfs
 from tokamak_control.geometry.legacy_metrics import legacy_radii_at_angles
 from tokamak_control.io.config_io import load_config
 
@@ -45,9 +49,13 @@ class BatchStep:
 
 @dataclass(slots=True)
 class ResetPayload:
+    """Полный batch reset contract RL environment для legacy или compact plant."""
+
     ip0: np.ndarray
     pfc0: np.ndarray
     sol0: np.ndarray
+    hidden_state_a: np.ndarray | None
+    passive_currents_a: np.ndarray | None
     params0: np.ndarray
     reference_seed: int
     shot_ids: tuple[str, ...] = ()
@@ -77,6 +85,16 @@ class TokamakMagneticControlEnv:
             current_scale=float(config.sim.current_limit_scale),
             derivative_scale=float(config.sim.derivative_limit_scale),
         )
+        self._compact_plant_enabled = self.cfg.current_dynamics is not None
+        if self._compact_plant_enabled:
+            if self.cfg.passive_vessel is None:
+                raise ValueError("compact current dynamics requires canonical passive_vessel settings")
+            if self.cfg.vacuum_chamber_shape is None:
+                raise ValueError("compact current dynamics requires vacuum-chamber geometry")
+            if config.sim.reset_source != "csv_initial_states":
+                raise ValueError("compact current dynamics requires sim.reset_source=csv_initial_states")
+        elif self.cfg.passive_vessel is not None:
+            raise ValueError("passive_vessel settings without compact current dynamics are not supported by the RL environment")
         if self.cfg.limiter_shape is None:
             raise ValueError("T15 training requires limiter geometry")
         self.angles = np.linspace(-np.pi, np.pi, int(config.sim.angles), endpoint=False, dtype=float)
@@ -110,6 +128,7 @@ class TokamakMagneticControlEnv:
                 n_pfc=self.cfg.pfc.n_coils,
                 n_sol=self.cfg.sol.n_coils,
                 split=config.sim.csv_initial_state_split,
+                require_compact_state=self._compact_plant_enabled,
             )
             if config.sim.reset_source == "csv_initial_states"
             else None
@@ -173,38 +192,28 @@ class TokamakMagneticControlEnv:
         self.step_index.zero_()
         self.done.zero_()
         if self.config.sim.compute_backend == "gpu":
-            self._gpu_sim = BatchedGpuTokamakSimulator(
-                grid=self.cfg.grid,
-                pfc=self.cfg.pfc,
-                sol=self.cfg.sol,
-                settings=self.cfg.physics,
-                batch_size=self.batch_size,
-                angles_rad=self.angles,
-                limiter_shape=self.cfg.limiter_shape,
-                boundary_mode=self.cfg.boundary_mode,
-                boundary_base_mode=self.cfg.boundary_base_mode,
-                boundary_legacy_precision_index2=self.cfg.boundary_legacy_precision_index2,
-                boundary_smooth_selected_level=self.cfg.boundary_smooth_selected_level,
-                boundary_soft_level_selection=self.cfg.boundary_soft_level_selection,
-                boundary_soft_level_candidates=self.cfg.boundary_soft_level_candidates,
-                boundary_soft_level_temperature=self.cfg.boundary_soft_level_temperature,
-                boundary_soft_level_radius_weight=self.cfg.boundary_soft_level_radius_weight,
-                boundary_soft_level_missing_penalty=self.cfg.boundary_soft_level_missing_penalty,
-                boundary_soft_level_roughness_penalty=self.cfg.boundary_soft_level_roughness_penalty,
-                boundary_level_smoothing_alpha=self.cfg.boundary_level_smoothing_alpha,
-                boundary_level_search_span_fraction=self.cfg.boundary_level_search_span_fraction,
-                boundary_continuity_weight_radii=self.cfg.boundary_continuity_weight_radii,
-                boundary_continuity_weight_mean_radius=self.cfg.boundary_continuity_weight_mean_radius,
-                boundary_continuity_weight_center=self.cfg.boundary_continuity_weight_center,
-                boundary_continuity_weight_area=self.cfg.boundary_continuity_weight_area,
-                boundary_continuity_weight_level=self.cfg.boundary_continuity_weight_level,
-                gpu_device=self.config.sim.gpu_device,
+            self._gpu_sim = self._new_gpu_simulator()
+            result = self._gpu_sim.reset(
+                ip=ip0,
+                pfc_currents=pfc0,
+                sol_currents=sol0,
+                hidden_state_a=payload.hidden_state_a,
+                passive_currents_a=payload.passive_currents_a,
             )
-            result = self._gpu_sim.reset(ip=ip0, pfc_currents=pfc0, sol_currents=sol0)
+            self._assert_gpu_boundary_contract(result, context="reset")
             self._update_psi_reset_stats(result.state.psi)
             self.reference = self._reference_for_reset_payload(payload=payload, boundary_points=result.boundary.points, boundary_radii=result.boundary.radii)
             return self._obs_gpu(result=result)
-        self._cpu_models = [self._new_cpu_model(ip=float(ip0[b]), pfc_currents=pfc0[b], sol_currents=sol0[b]) for b in range(self.batch_size)]
+        self._cpu_models = [
+            self._new_cpu_model(
+                ip=float(ip0[b]),
+                pfc_currents=pfc0[b],
+                sol_currents=sol0[b],
+                hidden_state_a=None if payload.hidden_state_a is None else float(payload.hidden_state_a[b]),
+                passive_currents_a=None if payload.passive_currents_a is None else payload.passive_currents_a[b],
+            )
+            for b in range(self.batch_size)
+        ]
         self._update_psi_reset_stats_cpu()
         points0, radii0, _found0 = self._cpu_boundary_samples()
         self.reference = self._reference_for_reset_payload(payload=payload, boundary_points=points0, boundary_radii=radii0)
@@ -234,7 +243,15 @@ class TokamakMagneticControlEnv:
         self.done[indices_t] = False
         if self.config.sim.compute_backend == "gpu":
             assert self._gpu_sim is not None
-            result = self._gpu_sim.reset_indices(indices, ip=ip0, pfc_currents=pfc0, sol_currents=sol0)
+            result = self._gpu_sim.reset_indices(
+                indices,
+                ip=ip0,
+                pfc_currents=pfc0,
+                sol_currents=sol0,
+                hidden_state_a=payload.hidden_state_a,
+                passive_currents_a=payload.passive_currents_a,
+            )
+            self._assert_gpu_boundary_contract(result, context="reset_indices")
             self._update_psi_reset_stats(result.state.psi, indices=indices_t)
             idx_for_boundary = indices_t.to(device=result.boundary.points.device)
             reference = self._reference_for_reset_payload(payload=payload, boundary_points=result.boundary.points[idx_for_boundary], boundary_radii=result.boundary.radii[idx_for_boundary])
@@ -242,7 +259,13 @@ class TokamakMagneticControlEnv:
             self._record_reset_metadata(payload, indices=indices)
             return self._obs_gpu(result=result)
         for local, env_index in enumerate(indices):
-            self._cpu_models[env_index] = self._new_cpu_model(ip=float(ip0[local]), pfc_currents=pfc0[local], sol_currents=sol0[local])
+            self._cpu_models[env_index] = self._new_cpu_model(
+                ip=float(ip0[local]),
+                pfc_currents=pfc0[local],
+                sol_currents=sol0[local],
+                hidden_state_a=None if payload.hidden_state_a is None else float(payload.hidden_state_a[local]),
+                passive_currents_a=None if payload.passive_currents_a is None else payload.passive_currents_a[local],
+            )
         self._update_psi_reset_stats_cpu(indices=indices)
         points0, radii0, _found0 = self._cpu_boundary_samples(indices=indices)
         reference = self._reference_for_reset_payload(payload=payload, boundary_points=points0, boundary_radii=radii0)
@@ -256,7 +279,15 @@ class TokamakMagneticControlEnv:
         if self.config.sim.initial_ranges is None:
             raise ValueError("training config must provide replay-bounded initial_ranges")
         ip0, pfc0, sol0, params0 = sample_initial_conditions(self.rng, self.config.sim.initial_ranges, int(count))
-        return ResetPayload(ip0=ip0, pfc0=pfc0, sol0=sol0, params0=params0, reference_seed=int(self.rng.integers(0, 2**31 - 1)))
+        return ResetPayload(
+            ip0=ip0,
+            pfc0=pfc0,
+            sol0=sol0,
+            hidden_state_a=None,
+            passive_currents_a=None,
+            params0=params0,
+            reference_seed=int(self.rng.integers(0, 2**31 - 1)),
+        )
 
     def _reset_payload_from_csv_sample(self, reset: CsvInitialStateSample) -> ResetPayload:
         count = int(reset.ip0.shape[0])
@@ -265,6 +296,8 @@ class TokamakMagneticControlEnv:
             ip0=reset.ip0,
             pfc0=reset.pfc0,
             sol0=reset.sol0,
+            hidden_state_a=reset.hidden_state_a,
+            passive_currents_a=reset.passive_currents_a,
             params0=params0,
             reference_seed=int(self.rng.integers(0, 2**31 - 1)),
             shot_ids=reset.shot_ids,
@@ -378,10 +411,88 @@ class TokamakMagneticControlEnv:
         psi = torch.as_tensor(psi_flat, dtype=torch.float32, device=self.device).reshape(self.batch_size, -1)
         return (psi - self.psi_reset_mean[:, None]) / (self.psi_reset_std[:, None] + 1.0e-6)
 
-    def _new_cpu_model(self, *, ip: float, pfc_currents: np.ndarray, sol_currents: np.ndarray) -> PlasmaModel:
+    def _new_gpu_simulator(self) -> BatchedGpuTokamakSimulator:
+        """Построить GPU simulator с тем же canonical plant settings, что и machine config."""
+        return BatchedGpuTokamakSimulator(
+            grid=self.cfg.grid,
+            pfc=self.cfg.pfc,
+            sol=self.cfg.sol,
+            settings=self.cfg.physics,
+            batch_size=self.batch_size,
+            angles_rad=self.angles,
+            limiter_shape=self.cfg.limiter_shape,
+            current_dynamics_settings=self.cfg.current_dynamics,
+            passive_vessel_settings=self.cfg.passive_vessel,
+            vacuum_chamber_shape=self.cfg.vacuum_chamber_shape,
+            boundary_mode=self.cfg.boundary_mode,
+            boundary_base_mode=self.cfg.boundary_base_mode,
+            boundary_legacy_precision_index2=self.cfg.boundary_legacy_precision_index2,
+            boundary_smooth_selected_level=self.cfg.boundary_smooth_selected_level,
+            boundary_soft_level_selection=self.cfg.boundary_soft_level_selection,
+            boundary_soft_level_candidates=self.cfg.boundary_soft_level_candidates,
+            boundary_soft_level_temperature=self.cfg.boundary_soft_level_temperature,
+            boundary_soft_level_radius_weight=self.cfg.boundary_soft_level_radius_weight,
+            boundary_soft_level_missing_penalty=self.cfg.boundary_soft_level_missing_penalty,
+            boundary_soft_level_roughness_penalty=self.cfg.boundary_soft_level_roughness_penalty,
+            boundary_level_smoothing_alpha=self.cfg.boundary_level_smoothing_alpha,
+            boundary_level_search_span_fraction=self.cfg.boundary_level_search_span_fraction,
+            boundary_continuity_weight_radii=self.cfg.boundary_continuity_weight_radii,
+            boundary_continuity_weight_mean_radius=self.cfg.boundary_continuity_weight_mean_radius,
+            boundary_continuity_weight_center=self.cfg.boundary_continuity_weight_center,
+            boundary_continuity_weight_area=self.cfg.boundary_continuity_weight_area,
+            boundary_continuity_weight_level=self.cfg.boundary_continuity_weight_level,
+            gpu_device=self.config.sim.gpu_device,
+        )
+
+    def _assert_gpu_boundary_contract(self, result, *, context: str) -> None:
+        """Остановить canonical RL path при потере LCFS или invalid 32-ray projection."""
+        if self.cfg.boundary_mode != "equilibrium_lcfs":
+            return
+        boundary = result.boundary
+        finite_radii = torch.all(torch.isfinite(boundary.radii[:, : int(self.config.sim.angles)]), dim=1)
+        valid = boundary.found.to(torch.bool) & boundary.projection_valid.to(torch.bool) & finite_radii
+        if bool(torch.all(valid).item()):
+            return
+        bad = torch.nonzero(~valid, as_tuple=False).reshape(-1).detach().cpu().tolist()
+        raise RuntimeError(
+            f"canonical equilibrium_lcfs contract failed during {context}: invalid lanes={bad}; "
+            "boundary_found and projection_valid must both be true"
+        )
+
+    def _new_cpu_model(
+        self,
+        *,
+        ip: float,
+        pfc_currents: np.ndarray,
+        sol_currents: np.ndarray,
+        hidden_state_a: float | None = None,
+        passive_currents_a: np.ndarray | None = None,
+    ) -> PlasmaModel:
+        """Построить CPU plant с explicit compact/passive reset state при active compact model."""
         pfc = self.cfg.pfc.__class__(name=self.cfg.pfc.name, coils=list(self.cfg.pfc.coils), currents=pfc_currents)
         sol = self.cfg.sol.__class__(name=self.cfg.sol.name, coils=list(self.cfg.sol.coils), currents=sol_currents)
-        return PlasmaModel.from_settings(grid=self.cfg.grid, pfc=pfc, sol=sol, settings=self.cfg.physics, ip0=float(ip))
+        current_initial = None
+        passive_initial = None
+        if self._compact_plant_enabled:
+            if hidden_state_a is None or passive_currents_a is None:
+                raise ValueError("compact CPU reset requires hidden_state_a and passive_currents_a")
+            current_initial = Nx2CurrentState(plasma_current_a=float(ip), hidden_state_a=float(hidden_state_a))
+            passive_initial = PassiveVesselInitialState(currents_a=np.asarray(passive_currents_a, dtype=float).reshape(-1))
+        elif hidden_state_a is not None or passive_currents_a is not None:
+            raise ValueError("legacy CPU reset does not accept compact hidden/passive state")
+        return PlasmaModel.from_settings(
+            grid=self.cfg.grid,
+            pfc=pfc,
+            sol=sol,
+            settings=self.cfg.physics,
+            ip0=float(ip),
+            vacuum_chamber_shape=self.cfg.vacuum_chamber_shape,
+            limiter_shape=self.cfg.limiter_shape,
+            current_dynamics_settings=self.cfg.current_dynamics,
+            current_dynamics_initial=current_initial,
+            passive_vessel_settings=self.cfg.passive_vessel,
+            passive_vessel_initial=passive_initial,
+        )
 
     def step(self, action: Tensor) -> BatchStep:
         action = torch.as_tensor(action, dtype=torch.float32, device=self.device).reshape(self.batch_size, self.action_dim)
@@ -398,6 +509,7 @@ class TokamakMagneticControlEnv:
             current_now = torch.cat([self._gpu_sim.pfc_currents, self._gpu_sim.sol_currents], dim=1).to(dtype=torch.float64, device=self._gpu_sim.device)
             current_next = current_now + float(self.cfg.physics.t_step) * physical.to(dtype=torch.float64, device=self._gpu_sim.device)
             result = self._gpu_sim.step_currents(current_next)
+            self._assert_gpu_boundary_contract(result, context="step")
             self._update_measured_ip_rate(result.state.Ip.to(torch.float32), ip_before)
             self.step_index += 1
             self._accumulate_integral_errors(
@@ -700,6 +812,7 @@ class TokamakMagneticControlEnv:
         raw_deriv_scale = np.asarray(self.raw_derivative_limits.detach().cpu().numpy(), dtype=float)
         raw_deriv_scale = np.where(np.isfinite(raw_deriv_scale) & (raw_deriv_scale > 0.0), raw_deriv_scale, 1.0)
         preview = self._preview().detach().cpu().numpy()
+        _boundary_points, boundary_radii, boundary_found_values = self._cpu_boundary_samples()
         for b, model in enumerate(self._cpu_models):
             currents = np.concatenate([model.state.pfc_currents, model.state.sol_currents]).astype(float, copy=False)
             derivs = np.concatenate([model.state.pfc_current_derivs, model.state.sol_current_derivs]).astype(float, copy=False)
@@ -709,28 +822,8 @@ class TokamakMagneticControlEnv:
                     measured_ip += float(self.rng.normal(0.0, float(self.config.randomization.ip_measurement_noise_a)))
                 if self.config.randomization.current_measurement_noise_a > 0.0:
                     currents = currents + self.rng.normal(0.0, float(self.config.randomization.current_measurement_noise_a), size=currents.shape)
-            try:
-                poly, _level, _status = find_plasma_boundary_with_status(
-                    model.state.psi,
-                    model.grid,
-                    (model.R0, model.Z0),
-                    n_levels=80,
-                    limiter_shape=self.cfg.limiter_shape,
-                    boundary_mode=self.cfg.boundary_mode,
-                    boundary_base_mode=self.cfg.boundary_base_mode,
-                    level_smoothing_alpha=self.cfg.boundary_level_smoothing_alpha,
-                    level_search_span_fraction=self.cfg.boundary_level_search_span_fraction,
-                    continuity_weight_radii=self.cfg.boundary_continuity_weight_radii,
-                    continuity_weight_mean_radius=self.cfg.boundary_continuity_weight_mean_radius,
-                    continuity_weight_center=self.cfg.boundary_continuity_weight_center,
-                    continuity_weight_area=self.cfg.boundary_continuity_weight_area,
-                    continuity_weight_level=self.cfg.boundary_continuity_weight_level,
-                )
-                measured_radii = legacy_radii_at_angles(poly, (model.R0, model.Z0), self.angles)
-                boundary_found = 1.0
-            except BoundaryNotFoundError:
-                measured_radii = np.zeros((int(self.config.sim.angles),), dtype=float)
-                boundary_found = 0.0
+            measured_radii = boundary_radii[b]
+            boundary_found = 1.0 if bool(boundary_found_values[b]) else 0.0
             target_radii = ref_radii[b, : int(self.config.sim.angles)].detach().cpu().numpy().astype(float, copy=False)
             scalar_features = [measured_ip / 5.0e5, float(ip_ref[b].item()) / 5.0e5, (measured_ip - float(ip_ref[b].item())) / 5.0e5]
             if self.config.observation.actor_kind not in _NO_STEP_NORM_OBSERVATION_KINDS:
@@ -802,6 +895,7 @@ class TokamakMagneticControlEnv:
         return actor_t
 
     def _cpu_boundary_samples(self, *, indices: list[int] | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Вычислить CPU boundary samples и enforce canonical LCFS/projection contract."""
         selected = list(range(len(self._cpu_models))) if indices is None else [int(i) for i in indices]
         points: list[np.ndarray] = []
         radii_values: list[np.ndarray] = []
@@ -809,6 +903,39 @@ class TokamakMagneticControlEnv:
         angle_count = int(self.config.sim.angles)
         for env_index in selected:
             model = self._cpu_models[env_index]
+            if self.cfg.boundary_mode == "equilibrium_lcfs":
+                try:
+                    equilibrium = find_equilibrium_lcfs(
+                        psi=np.asarray(model.state.psi, dtype=float),
+                        grid=model.grid,
+                        center_hint=(model.R0, model.Z0),
+                        limiter_shape=np.asarray(self.cfg.limiter_shape, dtype=float),
+                    )
+                except (RuntimeError, ValueError) as exc:
+                    raise RuntimeError(
+                        f"canonical equilibrium_lcfs contract failed for CPU lane {env_index}: boundary_found=False"
+                    ) from exc
+                projection = project_boundary_to_fixed_angles(
+                    equilibrium.core_boundary,
+                    (model.R0, model.Z0),
+                    self.angles,
+                )
+                if not projection.valid or not np.all(np.isfinite(projection.radii)):
+                    raise RuntimeError(
+                        f"canonical equilibrium_lcfs contract failed for CPU lane {env_index}: "
+                        f"projection_valid=False ({projection.reason})"
+                    )
+                radii = np.asarray(projection.radii, dtype=float)
+                pts = np.column_stack(
+                    [
+                        model.R0 + radii * np.cos(self.angles),
+                        model.Z0 + radii * np.sin(self.angles),
+                    ]
+                )
+                points.append(pts)
+                radii_values.append(radii)
+                found.append(True)
+                continue
             try:
                 poly, _level, _status = find_plasma_boundary_with_status(
                     model.state.psi,
@@ -910,34 +1037,13 @@ class TokamakMagneticControlEnv:
         currents = []
         derivs = []
         ips = []
-        for model in self._cpu_models:
+        boundary_points_array, _boundary_radii, boundary_found_values = self._cpu_boundary_samples()
+        for b, model in enumerate(self._cpu_models):
             ips.append(model.state.Ip)
             currents.append(np.concatenate([model.state.pfc_currents, model.state.sol_currents]))
             derivs.append(np.concatenate([model.state.pfc_current_derivs, model.state.sol_current_derivs]))
-            try:
-                poly, _level, _status = find_plasma_boundary_with_status(
-                    model.state.psi,
-                    model.grid,
-                    (model.R0, model.Z0),
-                    n_levels=80,
-                    limiter_shape=self.cfg.limiter_shape,
-                    boundary_mode=self.cfg.boundary_mode,
-                    boundary_base_mode=self.cfg.boundary_base_mode,
-                    level_smoothing_alpha=self.cfg.boundary_level_smoothing_alpha,
-                    level_search_span_fraction=self.cfg.boundary_level_search_span_fraction,
-                    continuity_weight_radii=self.cfg.boundary_continuity_weight_radii,
-                    continuity_weight_mean_radius=self.cfg.boundary_continuity_weight_mean_radius,
-                    continuity_weight_center=self.cfg.boundary_continuity_weight_center,
-                    continuity_weight_area=self.cfg.boundary_continuity_weight_area,
-                    continuity_weight_level=self.cfg.boundary_continuity_weight_level,
-                )
-                radii = legacy_radii_at_angles(poly, (model.R0, model.Z0), self.angles)
-                pts = np.column_stack([model.R0 + radii * np.cos(self.angles), model.Z0 + radii * np.sin(self.angles)])
-                boundary_points.append(pts)
-                found.append(True)
-            except BoundaryNotFoundError:
-                boundary_points.append(np.full((int(self.config.sim.angles), 2), np.nan, dtype=float))
-                found.append(False)
+            boundary_points.append(boundary_points_array[b])
+            found.append(bool(boundary_found_values[b]))
         current_t = torch.as_tensor(np.stack(currents), dtype=torch.float32, device=self.device)
         deriv_t = torch.as_tensor(np.stack(derivs), dtype=torch.float32, device=self.device)
         current_scale = torch.where(torch.isfinite(self.current_limits) & (self.current_limits > 0.0), self.current_limits, torch.ones_like(self.current_limits))
@@ -1050,8 +1156,9 @@ class TokamakMagneticControlEnv:
         }
         if self.config.sim.compute_backend == "gpu":
             assert self._gpu_sim is not None
-            state["gpu_sim"] = {
+            gpu_state: dict[str, object] = {
                 "Ip": self._gpu_sim.Ip.detach().cpu(),
+                "Ip0": self._gpu_sim.Ip0.detach().cpu(),
                 "pfc_currents": self._gpu_sim.pfc_currents.detach().cpu(),
                 "sol_currents": self._gpu_sim.sol_currents.detach().cpu(),
                 "pfc_derivs": self._gpu_sim.pfc_derivs.detach().cpu(),
@@ -1059,7 +1166,20 @@ class TokamakMagneticControlEnv:
                 "step_index": self._gpu_sim.step_index.detach().cpu(),
                 "time_s": self._gpu_sim.time_s.detach().cpu(),
                 "psi": self._gpu_sim.psi.detach().cpu(),
+                "boundary_prev_levels": self._gpu_sim._boundary_prev_levels.detach().cpu(),
+                "boundary_prev_points": self._gpu_sim._boundary_prev_points.detach().cpu(),
+                "boundary_prev_radii": self._gpu_sim._boundary_prev_radii.detach().cpu(),
             }
+            if self._compact_plant_enabled:
+                gpu_state.update(
+                    {
+                        "current_hidden": self._gpu_sim.current_hidden.detach().cpu(),
+                        "passive_currents": self._gpu_sim.passive_currents.detach().cpu(),
+                        "passive_modal_currents": self._gpu_sim.passive_modal_currents.detach().cpu(),
+                        "passive_external_modal_flux": self._gpu_sim.passive_external_modal_flux.detach().cpu(),
+                    }
+                )
+            state["gpu_sim"] = gpu_state
         else:
             state["cpu_model_states"] = [model.snapshot_state() for model in self._cpu_models]
         return state
@@ -1104,35 +1224,10 @@ class TokamakMagneticControlEnv:
         self.psi_reset_std = torch.as_tensor(state.get("psi_reset_std", torch.ones((self.batch_size,), dtype=torch.float32)), dtype=torch.float32, device=self.device).clone().clamp_min(1.0e-6)
         if self.config.sim.compute_backend == "gpu":
             if self._gpu_sim is None:
-                self._gpu_sim = BatchedGpuTokamakSimulator(
-                    grid=self.cfg.grid,
-                    pfc=self.cfg.pfc,
-                    sol=self.cfg.sol,
-                    settings=self.cfg.physics,
-                    batch_size=self.batch_size,
-                    angles_rad=self.angles,
-                    limiter_shape=self.cfg.limiter_shape,
-                    boundary_mode=self.cfg.boundary_mode,
-                    boundary_base_mode=self.cfg.boundary_base_mode,
-                    boundary_legacy_precision_index2=self.cfg.boundary_legacy_precision_index2,
-                    boundary_smooth_selected_level=self.cfg.boundary_smooth_selected_level,
-                    boundary_soft_level_selection=self.cfg.boundary_soft_level_selection,
-                    boundary_soft_level_candidates=self.cfg.boundary_soft_level_candidates,
-                    boundary_soft_level_temperature=self.cfg.boundary_soft_level_temperature,
-                    boundary_soft_level_radius_weight=self.cfg.boundary_soft_level_radius_weight,
-                    boundary_soft_level_missing_penalty=self.cfg.boundary_soft_level_missing_penalty,
-                    boundary_soft_level_roughness_penalty=self.cfg.boundary_soft_level_roughness_penalty,
-                    boundary_level_smoothing_alpha=self.cfg.boundary_level_smoothing_alpha,
-                    boundary_level_search_span_fraction=self.cfg.boundary_level_search_span_fraction,
-                    boundary_continuity_weight_radii=self.cfg.boundary_continuity_weight_radii,
-                    boundary_continuity_weight_mean_radius=self.cfg.boundary_continuity_weight_mean_radius,
-                    boundary_continuity_weight_center=self.cfg.boundary_continuity_weight_center,
-                    boundary_continuity_weight_area=self.cfg.boundary_continuity_weight_area,
-                    boundary_continuity_weight_level=self.cfg.boundary_continuity_weight_level,
-                    gpu_device=self.config.sim.gpu_device,
-                )
+                self._gpu_sim = self._new_gpu_simulator()
             sim = state["gpu_sim"]
             self._gpu_sim.Ip = torch.as_tensor(sim["Ip"], dtype=self._gpu_sim.dtype, device=self._gpu_sim.device).clone()
+            self._gpu_sim.Ip0 = torch.as_tensor(sim.get("Ip0", sim["Ip"]), dtype=self._gpu_sim.dtype, device=self._gpu_sim.device).clone()
             self._gpu_sim.pfc_currents = torch.as_tensor(sim["pfc_currents"], dtype=self._gpu_sim.dtype, device=self._gpu_sim.device).clone()
             self._gpu_sim.sol_currents = torch.as_tensor(sim["sol_currents"], dtype=self._gpu_sim.dtype, device=self._gpu_sim.device).clone()
             self._gpu_sim.pfc_derivs = torch.as_tensor(sim["pfc_derivs"], dtype=self._gpu_sim.dtype, device=self._gpu_sim.device).clone()
@@ -1140,11 +1235,38 @@ class TokamakMagneticControlEnv:
             self._gpu_sim.step_index = torch.as_tensor(sim["step_index"], dtype=torch.long, device=self._gpu_sim.device).clone()
             self._gpu_sim.time_s = torch.as_tensor(sim["time_s"], dtype=self._gpu_sim.dtype, device=self._gpu_sim.device).clone()
             self._gpu_sim.psi = torch.as_tensor(sim["psi"], dtype=self._gpu_sim.dtype, device=self._gpu_sim.device).clone()
-            return self._obs_gpu()
+            if self._compact_plant_enabled:
+                required_compact = {"current_hidden", "passive_currents", "passive_modal_currents", "passive_external_modal_flux"}
+                missing_compact = sorted(required_compact - set(sim))
+                if missing_compact:
+                    raise ValueError("environment checkpoint is missing compact GPU state: " + ", ".join(missing_compact))
+                self._gpu_sim.current_hidden = torch.as_tensor(sim["current_hidden"], dtype=self._gpu_sim.dtype, device=self._gpu_sim.device).clone()
+                self._gpu_sim.passive_currents = torch.as_tensor(sim["passive_currents"], dtype=self._gpu_sim.dtype, device=self._gpu_sim.device).clone()
+                self._gpu_sim.passive_modal_currents = torch.as_tensor(sim["passive_modal_currents"], dtype=self._gpu_sim.dtype, device=self._gpu_sim.device).clone()
+                self._gpu_sim.passive_external_modal_flux = torch.as_tensor(sim["passive_external_modal_flux"], dtype=self._gpu_sim.dtype, device=self._gpu_sim.device).clone()
+            self._gpu_sim._boundary_prev_levels = torch.as_tensor(sim.get("boundary_prev_levels", torch.full((self.batch_size,), float("nan"))), dtype=self._gpu_sim.dtype, device=self._gpu_sim.device).clone()
+            self._gpu_sim._boundary_prev_points = torch.as_tensor(sim.get("boundary_prev_points", torch.full((self.batch_size, int(self.config.sim.angles), 2), float("nan"))), dtype=self._gpu_sim.dtype, device=self._gpu_sim.device).clone()
+            self._gpu_sim._boundary_prev_radii = torch.as_tensor(sim.get("boundary_prev_radii", torch.full((self.batch_size, int(self.config.sim.angles)), float("nan"))), dtype=self._gpu_sim.dtype, device=self._gpu_sim.device).clone()
+            self._gpu_sim._has_state = True
+            result = self._gpu_sim._result()
+            self._assert_gpu_boundary_contract(result, context="checkpoint_restore")
+            return self._obs_gpu(result=result)
         cpu_states = list(state["cpu_model_states"])
         self._cpu_models = []
         for saved in cpu_states:
-            self._cpu_models.append(self._new_cpu_model(ip=float(saved.Ip), pfc_currents=np.asarray(saved.pfc_currents), sol_currents=np.asarray(saved.sol_currents)))
+            hidden_state = None if saved.current_dynamics is None else float(saved.current_dynamics.hidden_state_a)
+            passive_seed = None
+            if saved.passive_vessel is not None:
+                passive_seed = np.zeros_like(np.asarray(saved.passive_vessel.modal_currents, dtype=float))
+            self._cpu_models.append(
+                self._new_cpu_model(
+                    ip=float(saved.Ip),
+                    pfc_currents=np.asarray(saved.pfc_currents),
+                    sol_currents=np.asarray(saved.sol_currents),
+                    hidden_state_a=hidden_state,
+                    passive_currents_a=passive_seed,
+                )
+            )
             self._cpu_models[-1].restore_state(saved)
         return self._obs_cpu()
 

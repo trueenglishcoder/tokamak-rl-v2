@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import torch
 
+import tokamak_rl_v2.env.batch_env as batch_env_module
 from tokamak_rl_v2.config import load_experiment_config
 from tokamak_rl_v2.config.schema import BoundaryReferenceConfig, DeltaDerivativeLimits, IpReferenceConfig, LearnerConfig, ReferenceConfig, RewardConfig
 from tokamak_rl_v2.env import BatchStep, TokamakMagneticControlEnv
@@ -144,6 +145,8 @@ def test_exact_csv_reset_sample_is_wrapped_as_reset_payload() -> None:
         ip0=np.asarray([1.0, 2.0], dtype=float),
         pfc0=np.zeros((2, 6), dtype=float),
         sol0=np.ones((2, 3), dtype=float),
+        hidden_state_a=np.asarray([3.0, 4.0], dtype=float),
+        passive_currents_a=np.zeros((2, 303), dtype=float),
         params0=None,
         shot_ids=("3856", "3864"),
         source_indices=(10, 20),
@@ -155,10 +158,133 @@ def test_exact_csv_reset_sample_is_wrapped_as_reset_payload() -> None:
 
     assert payload.params0.shape == (2, 5)
     assert np.all(payload.params0 == 0.0)
+    assert np.allclose(payload.hidden_state_a, [3.0, 4.0])
+    assert payload.passive_currents_a.shape == (2, 303)
     assert payload.shot_ids == sample.shot_ids
     assert payload.source_indices == sample.source_indices
     assert payload.source_times_s == sample.source_times_s
     assert payload.difficulty_bins == sample.difficulty_bins
+
+
+def test_compact_gpu_constructor_receives_machine_plant_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Проверить передачу compact current/passive/vacuum settings в batched GPU plant."""
+    captured: dict[str, object] = {}
+
+    class FakeGpuSimulator:
+        """Сохранить constructor kwargs вместо реального CUDA simulator."""
+
+        def __init__(self, **kwargs) -> None:
+            """Запомнить переданные environment settings."""
+            captured.update(kwargs)
+
+    monkeypatch.setattr(batch_env_module, "BatchedGpuTokamakSimulator", FakeGpuSimulator)
+    env = object.__new__(TokamakMagneticControlEnv)
+    current_settings = object()
+    passive_settings = object()
+    chamber = np.asarray([[1.0, -1.0], [2.0, -1.0], [2.0, 1.0]], dtype=float)
+    env.batch_size = 2
+    env.angles = np.linspace(-np.pi, np.pi, 32, endpoint=False)
+    env.config = SimpleNamespace(sim=SimpleNamespace(gpu_device="cuda:0"))
+    env.cfg = SimpleNamespace(
+        grid=object(),
+        pfc=object(),
+        sol=object(),
+        physics=object(),
+        limiter_shape=np.asarray([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]], dtype=float),
+        current_dynamics=current_settings,
+        passive_vessel=passive_settings,
+        vacuum_chamber_shape=chamber,
+        boundary_mode="equilibrium_lcfs",
+        boundary_base_mode="legacy_contour_limited",
+        boundary_legacy_precision_index2=1.0e-6,
+        boundary_smooth_selected_level=False,
+        boundary_soft_level_selection=False,
+        boundary_soft_level_candidates=64,
+        boundary_soft_level_temperature=0.05,
+        boundary_soft_level_radius_weight=1.0,
+        boundary_soft_level_missing_penalty=4.0,
+        boundary_soft_level_roughness_penalty=0.2,
+        boundary_level_smoothing_alpha=1.0,
+        boundary_level_search_span_fraction=0.02,
+        boundary_continuity_weight_radii=1.0,
+        boundary_continuity_weight_mean_radius=0.3,
+        boundary_continuity_weight_center=0.2,
+        boundary_continuity_weight_area=0.2,
+        boundary_continuity_weight_level=0.1,
+    )
+
+    simulator = TokamakMagneticControlEnv._new_gpu_simulator(env)
+
+    assert isinstance(simulator, FakeGpuSimulator)
+    assert captured["current_dynamics_settings"] is current_settings
+    assert captured["passive_vessel_settings"] is passive_settings
+    assert np.array_equal(captured["vacuum_chamber_shape"], chamber)
+
+
+def test_canonical_gpu_boundary_contract_rejects_invalid_projection() -> None:
+    """Проверить hard failure вместо zero-fill для invalid fixed-angle projection."""
+    env = object.__new__(TokamakMagneticControlEnv)
+    env.cfg = SimpleNamespace(boundary_mode="equilibrium_lcfs")
+    env.config = SimpleNamespace(sim=SimpleNamespace(angles=32))
+    boundary = SimpleNamespace(
+        found=torch.tensor([True, True]),
+        projection_valid=torch.tensor([True, False]),
+        radii=torch.ones((2, 32), dtype=torch.float64),
+    )
+    result = SimpleNamespace(boundary=boundary)
+
+    with pytest.raises(RuntimeError, match="projection_valid"):
+        TokamakMagneticControlEnv._assert_gpu_boundary_contract(env, result, context="test")
+
+
+def test_compact_cpu_constructor_receives_explicit_hidden_and_passive_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Проверить передачу полного compact reset state в CPU PlasmaModel."""
+    captured: dict[str, object] = {}
+
+    class FakePlasmaModel:
+        """Подменить CPU plant constructor для проверки wiring."""
+
+        @classmethod
+        def from_settings(cls, **kwargs):
+            """Вернуть constructor kwargs как test result."""
+            captured.update(kwargs)
+            return kwargs
+
+    monkeypatch.setattr(batch_env_module, "PlasmaModel", FakePlasmaModel)
+    env = object.__new__(TokamakMagneticControlEnv)
+    env._compact_plant_enabled = True
+    current_settings = object()
+    passive_settings = object()
+    chamber = np.asarray([[1.0, -1.0], [2.0, -1.0], [2.0, 1.0]], dtype=float)
+    limiter = np.asarray([[1.1, -0.9], [1.9, -0.9], [1.9, 0.9]], dtype=float)
+    env.cfg = SimpleNamespace(
+        grid=object(),
+        physics=object(),
+        pfc=SimpleNamespace(name="PFC", coils=[1, 2, 3, 4, 5, 6]),
+        sol=SimpleNamespace(name="SOL", coils=[1, 2, 3]),
+        current_dynamics=current_settings,
+        passive_vessel=passive_settings,
+        vacuum_chamber_shape=chamber,
+        limiter_shape=limiter,
+    )
+    passive = np.arange(303, dtype=float)
+
+    result = TokamakMagneticControlEnv._new_cpu_model(
+        env,
+        ip=123000.0,
+        pfc_currents=np.arange(6, dtype=float),
+        sol_currents=np.arange(3, dtype=float),
+        hidden_state_a=-456.0,
+        passive_currents_a=passive,
+    )
+
+    assert result["ip0"] == pytest.approx(123000.0)
+    assert captured["current_dynamics_settings"] is current_settings
+    assert captured["passive_vessel_settings"] is passive_settings
+    assert captured["current_dynamics_initial"].plasma_current_a == pytest.approx(123000.0)
+    assert captured["current_dynamics_initial"].hidden_state_a == pytest.approx(-456.0)
+    assert np.allclose(captured["passive_vessel_initial"].currents_a, passive)
+    assert np.array_equal(captured["vacuum_chamber_shape"], chamber)
 
 
 def test_critic_reads_normalized_env_actions_without_extra_squash() -> None:

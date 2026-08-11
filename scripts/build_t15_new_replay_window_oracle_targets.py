@@ -90,6 +90,10 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError(f"expected T15 replay-window dt=0.001, got {dt}")
     if sim_cfg.limiter_shape is None:
         raise ValueError("oracle target building requires limiter geometry")
+    if sim_cfg.current_dynamics is not None and replay_root is None:
+        raise ValueError(
+            "compact_nx2 oracle building requires --replay-root from a fresh endpoint-aligned canonical full replay"
+        )
 
     base = json.loads(base_config.read_text(encoding="utf-8"))
     current_limits = _current_limit_vector(base, n_pfc=sim_cfg.pfc.n_coils, n_sol=sim_cfg.sol.n_coils)
@@ -127,8 +131,6 @@ def main(argv: list[str] | None = None) -> int:
             candidates,
             replay_root=replay_root,
             angles=int(args.angles),
-            mean_ip_limit=float(args.oracle_mean_ip_error_a),
-            max_ip_limit=float(args.oracle_max_ip_error_a),
             n_pfc=sim_cfg.pfc.n_coils,
         )
     elif str(args.compute_backend) == "gpu":
@@ -563,7 +565,7 @@ def _collect_simulated(
 def _write_oracle_npz(path: Path, rows: list[dict[str, object]], *, current_limits: np.ndarray, derivative_limits: np.ndarray) -> None:
     np.savez_compressed(
         path,
-        schema=np.asarray(["t15_replay_window_oracle_targets_v1"]),
+        schema=np.asarray(["t15_replay_window_oracle_targets_v2"]),
         shot_id=np.asarray([r["shot_id"] for r in rows]),
         split=np.asarray([r["split"] for r in rows]),
         source_index=np.asarray([r["source_index"] for r in rows], dtype=np.int64),
@@ -583,18 +585,32 @@ def _write_oracle_npz(path: Path, rows: list[dict[str, object]], *, current_limi
 
 
 def _write_initial_library(path: Path, rows: list[dict[str, object]]) -> None:
+    """Сохранить reset library, включая canonical compact/passive state когда он присутствует."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        path,
-        shot_id=np.asarray([r["shot_id"] for r in rows]),
-        source_index=np.asarray([r["source_index"] for r in rows], dtype=np.int64),
-        time_s=np.asarray([r["time_s"] for r in rows], dtype=np.float64),
-        ip0=np.asarray([r["ip0"] for r in rows], dtype=np.float32),
-        pfc0=np.stack([r["pfc0"] for r in rows], axis=0).astype(np.float32),
-        sol0=np.stack([r["sol0"] for r in rows], axis=0).astype(np.float32),
-        split=np.asarray([r["split"] for r in rows]),
-        difficulty_bin=np.asarray([r["difficulty_bin"] for r in rows]),
-    )
+    payload: dict[str, np.ndarray] = {
+        "schema": np.asarray(["t15_replay_window_oracle_initial_states_v2"]),
+        "shot_id": np.asarray([r["shot_id"] for r in rows]),
+        "source_index": np.asarray([r["source_index"] for r in rows], dtype=np.int64),
+        "time_s": np.asarray([r["time_s"] for r in rows], dtype=np.float64),
+        "ip0": np.asarray([r["ip0"] for r in rows], dtype=np.float64),
+        "pfc0": np.stack([r["pfc0"] for r in rows], axis=0).astype(np.float64),
+        "sol0": np.stack([r["sol0"] for r in rows], axis=0).astype(np.float64),
+        "split": np.asarray([r["split"] for r in rows]),
+        "difficulty_bin": np.asarray([r["difficulty_bin"] for r in rows]),
+    }
+    has_hidden = ["hidden_state_a" in row for row in rows]
+    has_passive = ["passive_currents_a" in row for row in rows]
+    if any(has_hidden) != all(has_hidden) or any(has_passive) != all(has_passive):
+        raise ValueError("reset rows must either all contain or all omit compact hidden/passive state")
+    if all(has_hidden) or all(has_passive):
+        if not all(has_hidden) or not all(has_passive):
+            raise ValueError("compact reset library requires both hidden_state_a and passive_currents_a")
+        payload["hidden_state_a"] = np.asarray([r["hidden_state_a"] for r in rows], dtype=np.float64)
+        payload["passive_currents_a"] = np.stack(
+            [np.asarray(r["passive_currents_a"], dtype=np.float64) for r in rows],
+            axis=0,
+        )
+    np.savez_compressed(path, **payload)
 
 
 def _write_config(
@@ -694,7 +710,7 @@ def _summary(
         values = [float(r["oracle_ip_mean_error_a"]) for r in rows if str(r["difficulty_bin"]) == bin_name]
         p90_mean_err_by_bin[bin_name] = float(np.percentile(values, 90)) if values else float("nan")
     return {
-        "schema": "t15_replay_window_oracle_targets_v1",
+        "schema": "t15_replay_window_oracle_targets_v2",
         "target_dir": str(target_dir),
         "oracle_path": str(oracle_path),
         "initial_library": str(initial_library),
@@ -706,8 +722,16 @@ def _summary(
         "angles": int(angles),
         "boundary_contract": {
             "boundary_found_required_all_steps": True,
+            "projection_valid_required_all_steps": True,
             "fixed_angle_radii_required_all_steps": True,
         },
+        "reset_contract": {
+            "source_index_endpoint_aligned": True,
+            "compact_hidden_state_required": bool(rows and "hidden_state_a" in rows[0]),
+            "physical_passive_currents_required": bool(rows and "passive_currents_a" in rows[0]),
+            "future_measured_ip_after_reset_endpoint_used": False,
+        },
+        "oracle_ip_error_filtering": False if replay_root is not None else True,
         "accepted_windows": int(len(rows)),
         "rejected_windows": int(len(rejected)),
         "split_counts": dict(sorted(split_counts.items())),

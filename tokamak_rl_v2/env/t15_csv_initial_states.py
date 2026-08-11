@@ -8,9 +8,13 @@ import numpy as np
 
 @dataclass(frozen=True, slots=True)
 class CsvInitialStateSample:
+    """Набор coherent reset rows, включая optional compact hidden/passive state."""
+
     ip0: np.ndarray
     pfc0: np.ndarray
     sol0: np.ndarray
+    hidden_state_a: np.ndarray | None
+    passive_currents_a: np.ndarray | None
     params0: np.ndarray | None
     shot_ids: tuple[str, ...]
     source_indices: tuple[int, ...]
@@ -21,7 +25,16 @@ class CsvInitialStateSample:
 class CsvInitialStateLibrary:
     """Processed coherent reset states extracted from real T15 CSV traces."""
 
-    def __init__(self, path: str | Path, *, n_pfc: int, n_sol: int, split: str = "train") -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        n_pfc: int,
+        n_sol: int,
+        split: str = "train",
+        require_compact_state: bool = False,
+    ) -> None:
+        """Загрузить coherent reset rows и при необходимости compact hidden state."""
         self.path = Path(path)
         split = str(split)
         if split not in {"train", "holdout", "all"}:
@@ -39,6 +52,8 @@ class CsvInitialStateLibrary:
             self.ip0 = np.asarray(data["ip0"], dtype=float).reshape(-1)
             self.pfc0 = np.asarray(data["pfc0"], dtype=float)
             self.sol0 = np.asarray(data["sol0"], dtype=float)
+            raw_hidden_state_a = np.asarray(data["hidden_state_a"], dtype=float) if "hidden_state_a" in data.files else None
+            raw_passive_currents_a = np.asarray(data["passive_currents_a"], dtype=float) if "passive_currents_a" in data.files else None
             raw_params0 = np.asarray(data["params0"], dtype=float) if "params0" in data.files else None
             raw_split = np.asarray(data["split"]).astype(str) if "split" in data.files else None
             raw_difficulty = np.asarray(data["difficulty_bin"]).astype(str) if "difficulty_bin" in data.files else None
@@ -59,6 +74,10 @@ class CsvInitialStateLibrary:
                 self.ip0 = self.ip0[keep]
                 self.pfc0 = self.pfc0[keep]
                 self.sol0 = self.sol0[keep]
+                if raw_hidden_state_a is not None:
+                    raw_hidden_state_a = raw_hidden_state_a[keep]
+                if raw_passive_currents_a is not None:
+                    raw_passive_currents_a = raw_passive_currents_a[keep]
                 if raw_params0 is not None:
                     raw_params0 = raw_params0[keep]
                 if raw_difficulty is not None:
@@ -85,13 +104,40 @@ class CsvInitialStateLibrary:
             raise ValueError(f"CSV initial-state PFC shape must be ({count}, {int(n_pfc)}), got {self.pfc0.shape}")
         if self.sol0.shape != (count, int(n_sol)):
             raise ValueError(f"CSV initial-state SOL shape must be ({count}, {int(n_sol)}), got {self.sol0.shape}")
+        self.hidden_state_a = None
+        self.passive_currents_a = None
+        if require_compact_state and raw_hidden_state_a is None:
+            raise ValueError("CSV initial-state library missing hidden_state_a required by compact current dynamics")
+        if require_compact_state and raw_passive_currents_a is None:
+            raise ValueError("CSV initial-state library missing passive_currents_a required by canonical passive vessel")
+        if raw_hidden_state_a is not None:
+            raw_hidden_state_a = np.asarray(raw_hidden_state_a, dtype=float).reshape(-1)
+            if raw_hidden_state_a.shape != (count,):
+                raise ValueError(f"CSV initial-state hidden_state_a shape must be ({count},), got {raw_hidden_state_a.shape}")
+            self.hidden_state_a = raw_hidden_state_a
+        if raw_passive_currents_a is not None:
+            raw_passive_currents_a = np.asarray(raw_passive_currents_a, dtype=float)
+            if raw_passive_currents_a.ndim != 2 or raw_passive_currents_a.shape[0] != count or raw_passive_currents_a.shape[1] <= 0:
+                raise ValueError(
+                    "CSV initial-state passive_currents_a must have shape "
+                    f"({count}, N_passive), got {raw_passive_currents_a.shape}"
+                )
+            self.passive_currents_a = raw_passive_currents_a
         self.params0 = None
         if raw_params0 is not None:
             raw_params0 = np.asarray(raw_params0, dtype=float)
             if raw_params0.shape != (count, 5):
                 raise ValueError(f"CSV initial-state params0 shape must be ({count}, 5), got {raw_params0.shape}")
             self.params0 = raw_params0
-        for name, arr in (("time_s", self.time_s), ("ip0", self.ip0), ("pfc0", self.pfc0), ("sol0", self.sol0), ("params0", self.params0)):
+        for name, arr in (
+            ("time_s", self.time_s),
+            ("ip0", self.ip0),
+            ("pfc0", self.pfc0),
+            ("sol0", self.sol0),
+            ("hidden_state_a", self.hidden_state_a),
+            ("passive_currents_a", self.passive_currents_a),
+            ("params0", self.params0),
+        ):
             if arr is None:
                 continue
             if not np.all(np.isfinite(arr)):
@@ -151,6 +197,8 @@ class CsvInitialStateLibrary:
             ip0=self.ip0[idx].astype(float, copy=True),
             pfc0=self.pfc0[idx].astype(float, copy=True),
             sol0=self.sol0[idx].astype(float, copy=True),
+            hidden_state_a=None if self.hidden_state_a is None else self.hidden_state_a[idx].astype(float, copy=True),
+            passive_currents_a=None if self.passive_currents_a is None else self.passive_currents_a[idx].astype(float, copy=True),
             params0=None if self.params0 is None else self.params0[idx].astype(float, copy=True),
             shot_ids=tuple(str(v) for v in self.shot_id[idx].tolist()),
             source_indices=tuple(int(v) for v in self.source_index[idx].tolist()),
