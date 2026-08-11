@@ -227,4 +227,7 @@ def test_equilibrium_oracle_job_requires_fresh_endpoint_aligned_compact_replay()
     assert 'fresh canonical oracle rejected' in job
     assert 'accepted_by_shot mismatch' in job
     assert 'server_stage_acceptance.json' in job
-    assert job.index('scripts/validate_t15_compact_gpu_batch32.py') < job.index('--shots 3856 3857 3858 3863 3864')
+    assert job.index('scripts/validate_t15_compact_gpu_batch32.py') < job.index('--shots 3854 3855 3856 3857 3858 3859 3862 3863')
+    assert '--train-shots 3854 3855 3856 3857 3858 3859 3862 3863' in job
+    assert '--holdout-shots 3864' not in job
+    assert 'expected_shots = {"3854", "3855", "3856", "3857", "3858", "3859", "3862", "3863"}' in job

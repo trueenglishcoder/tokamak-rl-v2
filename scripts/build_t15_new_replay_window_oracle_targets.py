@@ -46,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--initial-library-out", default="data/processed/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_oracle_initial_states.npz")
     parser.add_argument("--config-out", default="configs/experiments/t15_new_trim50_plain_gpu1e6_replay_window_0p1s_tcvjdot_mpo.yaml")
     parser.add_argument("--train-shots", nargs="+", default=["3857", "3858", "3863"])
-    parser.add_argument("--holdout-shots", nargs="+", default=["3856"])
+    parser.add_argument("--holdout-shots", nargs="*", default=[])
     parser.add_argument("--window-steps", type=int, default=100)
     parser.add_argument("--angles", type=int, default=32)
     parser.add_argument("--delimiter", default=";")

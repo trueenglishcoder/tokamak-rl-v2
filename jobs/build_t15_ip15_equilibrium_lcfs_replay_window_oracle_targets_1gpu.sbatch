@@ -15,7 +15,7 @@ mkdir -p slurm_logs data/processed
 
 export READINESS_ROOT=${READINESS_ROOT:-/workspace/tokamak-sim/runs/t15_compact_gpu_batch32_readiness_${SLURM_JOB_ID}}
 export READINESS_JSON=${READINESS_JSON:-${READINESS_ROOT}/batch32_readiness.json}
-export REPLAY_ROOT=${REPLAY_ROOT:-/workspace/tokamak-sim/runs/t15md_trim50_ip15_equilibrium_lcfs_top5_replay_gpu_full_${SLURM_JOB_ID}}
+export REPLAY_ROOT=${REPLAY_ROOT:-/workspace/tokamak-sim/runs/t15md_trim50_ip15_equilibrium_lcfs_dev8_replay_gpu_full_${SLURM_JOB_ID}}
 export TARGET_DIR=${TARGET_DIR:-data/processed/t15_ip15_equilibrium_lcfs_replay_window_0p1s_oracle_targets}
 export RESET_LIBRARY=${RESET_LIBRARY:-data/processed/t15_ip15_equilibrium_lcfs_replay_window_0p1s_oracle_initial_states.npz}
 export CONFIG_OUT=${CONFIG_OUT:-configs/experiments/t15_ip15_equilibrium_lcfs_replay_window_0p1s_tcvjdot_mpo.yaml}
@@ -92,9 +92,9 @@ for key in ("simulator_steps_per_second", "environment_steps_per_second", "peak_
 print("batch32_readiness_accepted", json.dumps(summary, sort_keys=True), flush=True)
 PYREADINESS
 
-    echo "===== server stage 2/3: fresh five-shot canonical GPU replay ====="
+    echo "===== server stage 2/3: fresh eight-shot development canonical GPU replay ====="
     python3 scripts/run_t15md_limited_replay_dataset.py \
-      --shots 3856 3857 3858 3863 3864 \
+      --shots 3854 3855 3856 3857 3858 3859 3862 3863 \
       --config configs/T15MD.toml \
       --data-root data/t15_data_new_trim50_ip_calibrated \
       --raw-data-root data/t15_data_new \
@@ -113,7 +113,7 @@ from pathlib import Path
 import numpy as np
 
 root = Path(os.environ["REPLAY_ROOT"])
-expected_shots = {"3856", "3857", "3858", "3863", "3864"}
+expected_shots = {"3854", "3855", "3856", "3857", "3858", "3859", "3862", "3863"}
 required = {
     "version",
     "radii_true",
@@ -341,8 +341,7 @@ PYREPLAYCHECK
       --angles 32 \
       --compute-backend gpu \
       --gpu-device cuda:0 \
-      --train-shots 3856 3857 3858 3863 \
-      --holdout-shots 3864
+      --train-shots 3854 3855 3856 3857 3858 3859 3862 3863
 
     python3 - <<"PYCHECK"
 import json
@@ -353,7 +352,7 @@ import numpy as np
 
 summary_path = Path(os.environ["TARGET_DIR"]) / "oracle_summary.json"
 summary = json.loads(summary_path.read_text(encoding="utf-8"))
-expected_shots = {"3856", "3857", "3858", "3863", "3864"}
+expected_shots = {"3854", "3855", "3856", "3857", "3858", "3859", "3862", "3863"}
 actual_shots = set(summary["accepted_by_shot"])
 if actual_shots != expected_shots:
     raise SystemExit(
@@ -385,9 +384,9 @@ if int(summary.get("rejected_windows", -1)) != 0:
     raise SystemExit(
         f"fresh canonical oracle rejected {summary.get('rejected_windows')} windows; expected zero"
     )
-if summary.get("train_shots") != ["3856", "3857", "3858", "3863"]:
+if summary.get("train_shots") != ["3854", "3855", "3856", "3857", "3858", "3859", "3862", "3863"]:
     raise SystemExit(f"oracle train shots mismatch: {summary.get('train_shots')}")
-if summary.get("holdout_shots") != ["3864"]:
+if summary.get("holdout_shots") != []:
     raise SystemExit(f"oracle holdout shots mismatch: {summary.get('holdout_shots')}")
 if int(summary.get("window_steps", -1)) != 100 or int(summary.get("angles", -1)) != 32:
     raise SystemExit(
